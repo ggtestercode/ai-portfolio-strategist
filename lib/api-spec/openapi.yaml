@@ -3,20 +3,29 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: AI Portfolio Strategist API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
-    description: Health operations
+  - name: user
+  - name: goals
+  - name: strategy
+  - name: portfolio
+  - name: trades
+  - name: rebalancing
+  - name: performance
+  - name: transactions
+  - name: alerts
+  - name: assistant
+  - name: dashboard
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +33,509 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /me:
+    get:
+      operationId: getCurrentUser
+      tags: [user]
+      summary: Current user profile
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+
+  /dashboard/summary:
+    get:
+      operationId: getDashboardSummary
+      tags: [dashboard]
+      summary: Dashboard summary widgets
+      responses:
+        "200":
+          description: Dashboard summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardSummary" }
+
+  /goals:
+    get:
+      operationId: getInvestmentGoals
+      tags: [goals]
+      summary: Get current investment goals
+      responses:
+        "200":
+          description: Investment goals
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvestmentGoals" }
+    put:
+      operationId: updateInvestmentGoals
+      tags: [goals]
+      summary: Update investment goals
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateGoalsRequest" }
+      responses:
+        "200":
+          description: Updated goals
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InvestmentGoals" }
+
+  /strategy:
+    get:
+      operationId: getCurrentStrategy
+      tags: [strategy]
+      summary: Get current strategy
+      responses:
+        "200":
+          description: Strategy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+  /strategy/regenerate:
+    post:
+      operationId: regenerateStrategy
+      tags: [strategy]
+      summary: AI-regenerate strategy from current goals
+      responses:
+        "200":
+          description: Regenerated strategy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Strategy" }
+
+  /portfolio:
+    get:
+      operationId: getPortfolio
+      tags: [portfolio]
+      summary: Portfolio overview
+      responses:
+        "200":
+          description: Portfolio
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Portfolio" }
+  /portfolio/allocation:
+    get:
+      operationId: getPortfolioAllocation
+      tags: [portfolio]
+      summary: Portfolio allocation breakdown by asset class
+      responses:
+        "200":
+          description: Allocation rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AllocationRow" }
+  /portfolio/holdings:
+    get:
+      operationId: getHoldings
+      tags: [portfolio]
+      summary: Detailed holdings list
+      responses:
+        "200":
+          description: Holdings
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Holding" }
+
+  /performance/series:
+    get:
+      operationId: getPerformanceSeries
+      tags: [performance]
+      summary: Portfolio value vs benchmark over a range
+      parameters:
+        - in: query
+          name: range
+          required: false
+          schema:
+            type: string
+            enum: [1D, 7D, 1M, 3M, 1Y, ALL]
+            default: 1M
+      responses:
+        "200":
+          description: Time series
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PerformanceSeries" }
+
+  /trades/suggestions:
+    get:
+      operationId: getTradeSuggestions
+      tags: [trades]
+      summary: AI trade suggestions
+      responses:
+        "200":
+          description: Trade suggestions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TradeSuggestion" }
+  /trades/last:
+    get:
+      operationId: getLastTradeSuggestion
+      tags: [trades]
+      summary: Most recent AI trade suggestion
+      responses:
+        "200":
+          description: Trade suggestion
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TradeSuggestion" }
+  /trades/{id}/apply:
+    post:
+      operationId: applyTradeSuggestion
+      tags: [trades]
+      summary: Apply (accept) a trade suggestion
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Updated suggestion
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TradeSuggestion" }
+
+  /rebalancing/suggestions:
+    get:
+      operationId: getRebalancingSuggestions
+      tags: [rebalancing]
+      summary: Rebalancing actions to bring allocation back in line
+      responses:
+        "200":
+          description: Rebalancing actions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RebalancingAction" }
+  /rebalancing/apply:
+    post:
+      operationId: applyRebalancing
+      tags: [rebalancing]
+      summary: Apply all current rebalancing suggestions
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplyRebalancingResult" }
+
+  /transactions:
+    get:
+      operationId: listTransactions
+      tags: [transactions]
+      summary: Transaction history
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50 }
+      responses:
+        "200":
+          description: Transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Transaction" }
+
+  /alerts:
+    get:
+      operationId: listAlerts
+      tags: [alerts]
+      summary: Risk alerts
+      responses:
+        "200":
+          description: Alerts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/RiskAlert" }
+  /alerts/{id}/dismiss:
+    post:
+      operationId: dismissAlert
+      tags: [alerts]
+      summary: Dismiss an alert
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Dismissed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RiskAlert" }
+
+  /assistant/messages:
+    get:
+      operationId: listAssistantMessages
+      tags: [assistant]
+      summary: AI Trade Assistant chat history
+      responses:
+        "200":
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AssistantMessage" }
+    post:
+      operationId: sendAssistantMessage
+      tags: [assistant]
+      summary: Send a message to the AI assistant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendAssistantRequest" }
+      responses:
+        "200":
+          description: New assistant message pair (user + reply)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userMessage, assistantMessage]
+                properties:
+                  userMessage: { $ref: "#/components/schemas/AssistantMessage" }
+                  assistantMessage: { $ref: "#/components/schemas/AssistantMessage" }
+
+  /command:
+    post:
+      operationId: runCommand
+      tags: [assistant]
+      summary: Run a command/question via the AI Command Center
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RunCommandRequest" }
+      responses:
+        "200":
+          description: Command response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandResult" }
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
-        status:
-          type: string
-      required:
-        - status
+        status: { type: string }
 
+    User:
+      type: object
+      required: [id, name, email, marketStatus, marketTime]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        marketStatus: { type: string, enum: [Open, Closed] }
+        marketTime: { type: string }
+
+    InvestmentGoals:
+      type: object
+      required: [totalCapital, targetReturnPct, timeHorizonMonths, riskTolerance, goalProgressPct]
+      properties:
+        totalCapital: { type: number }
+        targetReturnPct: { type: number }
+        timeHorizonMonths: { type: integer }
+        riskTolerance: { type: string, enum: [Low, Medium, High] }
+        goalProgressPct: { type: number }
+        goalProgressNote: { type: string }
+
+    UpdateGoalsRequest:
+      type: object
+      required: [totalCapital, targetReturnPct, timeHorizonMonths, riskTolerance]
+      properties:
+        totalCapital: { type: number }
+        targetReturnPct: { type: number }
+        timeHorizonMonths: { type: integer }
+        riskTolerance: { type: string, enum: [Low, Medium, High] }
+
+    AllocationSlice:
+      type: object
+      required: [assetClass, percentage]
+      properties:
+        assetClass: { type: string }
+        percentage: { type: number }
+
+    Strategy:
+      type: object
+      required: [strategyType, lastGenerated, riskLevel, allocation, keyRules]
+      properties:
+        strategyType: { type: string }
+        lastGenerated: { type: string }
+        riskLevel: { type: string, enum: [Low, Medium, High] }
+        allocation:
+          type: array
+          items: { $ref: "#/components/schemas/AllocationSlice" }
+        keyRules:
+          type: array
+          items: { type: string }
+
+    Portfolio:
+      type: object
+      required: [totalValue, totalProfitLoss, totalProfitLossPct, change24h, change24hPct]
+      properties:
+        totalValue: { type: number }
+        totalProfitLoss: { type: number }
+        totalProfitLossPct: { type: number }
+        change24h: { type: number }
+        change24hPct: { type: number }
+
+    AllocationRow:
+      type: object
+      required: [assetClass, currentPct, targetPct, differencePct, status]
+      properties:
+        assetClass: { type: string }
+        currentPct: { type: number }
+        targetPct: { type: number }
+        differencePct: { type: number }
+        status: { type: string, enum: ["In Range", "Slightly High", "Slightly Low", "Out of Range"] }
+
+    Holding:
+      type: object
+      required: [id, symbol, name, assetClass, quantity, price, value, change24hPct]
+      properties:
+        id: { type: string }
+        symbol: { type: string }
+        name: { type: string }
+        assetClass: { type: string }
+        quantity: { type: number }
+        price: { type: number }
+        value: { type: number }
+        change24hPct: { type: number }
+
+    PerformancePoint:
+      type: object
+      required: [timestamp, portfolio, benchmark]
+      properties:
+        timestamp: { type: string }
+        portfolio: { type: number }
+        benchmark: { type: number }
+
+    PerformanceSeries:
+      type: object
+      required: [range, points]
+      properties:
+        range: { type: string }
+        points:
+          type: array
+          items: { $ref: "#/components/schemas/PerformancePoint" }
+
+    TradeSuggestion:
+      type: object
+      required: [id, symbol, pair, side, status, entryRangeLow, entryRangeHigh, target, stopLoss, riskWarning, createdAt, summary]
+      properties:
+        id: { type: string }
+        symbol: { type: string }
+        pair: { type: string }
+        side: { type: string, enum: [Buy, Sell, Hold] }
+        status: { type: string, enum: [Open, Applied, Dismissed] }
+        entryRangeLow: { type: number }
+        entryRangeHigh: { type: number }
+        target: { type: number }
+        stopLoss: { type: number }
+        positionSize: { type: string }
+        suggestedAction: { type: string }
+        reasoning: { type: string }
+        riskWarning: { type: string }
+        createdAt: { type: string }
+        summary: { type: string }
+
+    RebalancingAction:
+      type: object
+      required: [id, asset, actionType, amount]
+      properties:
+        id: { type: string }
+        asset: { type: string }
+        actionType: { type: string, enum: [Buy, Sell] }
+        amount: { type: number }
+
+    ApplyRebalancingResult:
+      type: object
+      required: [appliedCount]
+      properties:
+        appliedCount: { type: integer }
+
+    Transaction:
+      type: object
+      required: [id, occurredAt, type, asset, amount, value, status]
+      properties:
+        id: { type: string }
+        occurredAt: { type: string }
+        type: { type: string, enum: [Buy, Sell, Deposit, Withdraw, Dividend, Rebalance] }
+        asset: { type: string }
+        amount: { type: number }
+        value: { type: number }
+        status: { type: string, enum: [Completed, Pending, Failed] }
+        note: { type: string }
+
+    RiskAlert:
+      type: object
+      required: [id, severity, title, message, createdAt, dismissed]
+      properties:
+        id: { type: string }
+        severity: { type: string, enum: [Info, Warning, Critical] }
+        title: { type: string }
+        message: { type: string }
+        createdAt: { type: string }
+        dismissed: { type: boolean }
+
+    AssistantMessage:
+      type: object
+      required: [id, role, content, createdAt]
+      properties:
+        id: { type: string }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        createdAt: { type: string }
+
+    SendAssistantRequest:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+
+    RunCommandRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: { type: string }
+
+    CommandResult:
+      type: object
+      required: [reply]
+      properties:
+        reply: { type: string }
+
+    DashboardSummary:
+      type: object
+      required: [portfolio, goals, strategy, alertsCount, healthScore, healthLabel]
+      properties:
+        portfolio: { $ref: "#/components/schemas/Portfolio" }
+        goals: { $ref: "#/components/schemas/InvestmentGoals" }
+        strategy: { $ref: "#/components/schemas/Strategy" }
+        alertsCount: { type: integer }
+        healthScore: { type: integer }
+        healthLabel: { type: string }
+        healthNote: { type: string }
