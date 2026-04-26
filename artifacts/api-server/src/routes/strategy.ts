@@ -1,11 +1,20 @@
 import { Router, type IRouter } from "express";
-import { eq } from "drizzle-orm";
-import { db, profileTable, targetAllocationsTable } from "@workspace/db";
+import { asc, eq } from "drizzle-orm";
+import {
+  db,
+  profileTable,
+  targetAllocationsTable,
+  strategyOptionsTable,
+} from "@workspace/db";
 import {
   GetCurrentStrategyResponse,
   RegenerateStrategyResponse,
+  GetStrategyOptionsResponse,
+  ApplyStrategyOptionsBody,
+  ApplyStrategyOptionsResponse,
 } from "@workspace/api-zod";
 import { getProfile } from "../lib/profile";
+import { generateStrategyOptions } from "../lib/strategyGenerator";
 
 const router: IRouter = Router();
 
@@ -23,90 +32,170 @@ async function buildStrategy() {
   };
 }
 
-const STRATEGY_VARIANTS: Array<{
-  riskLevel: "Low" | "Medium" | "High";
-  type: string;
-  allocation: Array<{ assetClass: string; targetPct: number }>;
-  rules: string[];
-}> = [
-  {
-    riskLevel: "Low",
-    type: "Capital Preservation",
-    allocation: [
-      { assetClass: "Equities", targetPct: 25 },
-      { assetClass: "ETFs", targetPct: 20 },
-      { assetClass: "Cash", targetPct: 30 },
-      { assetClass: "Crypto", targetPct: 5 },
-      { assetClass: "Commodities", targetPct: 20 },
-    ],
-    rules: [
+function serializeOption(o: typeof strategyOptionsTable.$inferSelect) {
+  return {
+    id: o.id,
+    optionIndex: o.optionIndex,
+    name: o.name,
+    summary: o.summary,
+    riskLevel: o.riskLevel,
+    expectedReturnPct: o.expectedReturnPct,
+    picks: o.picks,
+    generatedAt: o.generatedAt.toISOString(),
+  };
+}
+
+function rulesForRisk(riskLevel: string): string[] {
+  if (riskLevel === "Low") {
+    return [
       "Maintain target allocation within ±3%",
       "Max position size: 10%",
       "Max drawdown: 8%",
       "Rebalance when deviation > 4%",
-    ],
-  },
-  {
-    riskLevel: "Medium",
-    type: "Balanced Growth",
-    allocation: [
-      { assetClass: "Crypto", targetPct: 40 },
-      { assetClass: "Equities", targetPct: 30 },
-      { assetClass: "ETFs", targetPct: 15 },
-      { assetClass: "Cash", targetPct: 10 },
-      { assetClass: "Commodities", targetPct: 5 },
-    ],
-    rules: [
-      "Maintain target allocation within ±5%",
-      "Max position size: 20%",
-      "Max drawdown: 15%",
-      "Rebalance when deviation > 5%",
-    ],
-  },
-  {
-    riskLevel: "High",
-    type: "Aggressive Growth",
-    allocation: [
-      { assetClass: "Crypto", targetPct: 55 },
-      { assetClass: "Equities", targetPct: 25 },
-      { assetClass: "ETFs", targetPct: 10 },
-      { assetClass: "Cash", targetPct: 5 },
-      { assetClass: "Commodities", targetPct: 5 },
-    ],
-    rules: [
+    ];
+  }
+  if (riskLevel === "High") {
+    return [
       "Maintain target allocation within ±7%",
       "Max position size: 30%",
       "Max drawdown: 25%",
       "Rebalance when deviation > 7%",
-    ],
-  },
-];
+    ];
+  }
+  return [
+    "Maintain target allocation within ±5%",
+    "Max position size: 20%",
+    "Max drawdown: 15%",
+    "Rebalance when deviation > 5%",
+  ];
+}
 
 router.get("/strategy", async (_req, res): Promise<void> => {
   res.json(GetCurrentStrategyResponse.parse(await buildStrategy()));
 });
 
+router.get("/strategy/options", async (_req, res): Promise<void> => {
+  const rows = await db
+    .select()
+    .from(strategyOptionsTable)
+    .orderBy(asc(strategyOptionsTable.optionIndex));
+  res.json(GetStrategyOptionsResponse.parse(rows.map(serializeOption)));
+});
+
 router.post("/strategy/regenerate", async (_req, res): Promise<void> => {
   const profile = await getProfile();
-  const variant =
-    STRATEGY_VARIANTS.find((v) => v.riskLevel === profile.riskTolerance) ??
-    STRATEGY_VARIANTS[1]!;
+  const options = await generateStrategyOptions();
+
+  await db.delete(strategyOptionsTable);
+  const inserted = await db
+    .insert(strategyOptionsTable)
+    .values(
+      options.map((o, idx) => ({
+        optionIndex: idx,
+        name: o.name,
+        summary: o.summary,
+        riskLevel: o.riskLevel,
+        expectedReturnPct: o.expectedReturnPct,
+        picks: o.picks,
+      })),
+    )
+    .returning();
+
+  // Pick the option that matches the user's stated risk tolerance, fall back to medium.
+  const chosen =
+    options.find((o) => o.riskLevel === profile.riskTolerance) ??
+    options[1] ??
+    options[0]!;
+
+  // Aggregate picks by asset class for active allocation.
+  const byClass: Record<string, number> = {};
+  for (const pick of chosen.picks) {
+    byClass[pick.assetClass] = (byClass[pick.assetClass] ?? 0) + pick.weightPct;
+  }
+  const allocation = Object.entries(byClass).map(([assetClass, targetPct]) => ({
+    assetClass,
+    targetPct: Math.round(targetPct * 10) / 10,
+  }));
+
   await db
     .update(profileTable)
     .set({
-      strategyType: variant.type,
-      strategyRiskLevel: variant.riskLevel,
-      strategyKeyRules: variant.rules,
+      strategyType: chosen.name,
+      strategyRiskLevel: chosen.riskLevel,
+      strategyKeyRules: rulesForRisk(chosen.riskLevel),
       strategyLastGenerated: new Date(),
     })
     .where(eq(profileTable.id, profile.id));
 
   await db.delete(targetAllocationsTable);
-  if (variant.allocation.length > 0) {
-    await db.insert(targetAllocationsTable).values(variant.allocation);
+  if (allocation.length > 0) {
+    await db.insert(targetAllocationsTable).values(allocation);
   }
 
-  res.json(RegenerateStrategyResponse.parse(await buildStrategy()));
+  res.json(
+    RegenerateStrategyResponse.parse({
+      strategy: await buildStrategy(),
+      options: inserted.map(serializeOption),
+    }),
+  );
+});
+
+router.post("/strategy/options/apply", async (req, res): Promise<void> => {
+  const parsed = ApplyStrategyOptionsBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const { strategyName, picks } = parsed.data;
+  if (picks.length === 0) {
+    res.status(400).json({ error: "Select at least one pick" });
+    return;
+  }
+
+  // Normalize weights to 100%.
+  const totalWeight = picks.reduce((s, p) => s + p.weightPct, 0);
+  if (totalWeight <= 0) {
+    res.status(400).json({ error: "Selected picks must have positive weight" });
+    return;
+  }
+  const normalized = picks.map((p) => ({
+    ...p,
+    weightPct: (p.weightPct / totalWeight) * 100,
+  }));
+
+  // Aggregate by asset class.
+  const byClass: Record<string, number> = {};
+  for (const p of normalized) {
+    byClass[p.assetClass] = (byClass[p.assetClass] ?? 0) + p.weightPct;
+  }
+  const allocation = Object.entries(byClass).map(([assetClass, targetPct]) => ({
+    assetClass,
+    targetPct: Math.round(targetPct * 10) / 10,
+  }));
+
+  // Determine risk level from concentration.
+  const cryptoPct = byClass["Crypto"] ?? 0;
+  const cashPct = (byClass["Cash"] ?? 0) + (byClass["Bonds"] ?? 0);
+  const riskLevel: "Low" | "Medium" | "High" =
+    cryptoPct >= 45 ? "High" : cashPct >= 30 ? "Low" : "Medium";
+
+  const profile = await getProfile();
+  await db
+    .update(profileTable)
+    .set({
+      strategyType: strategyName,
+      strategyRiskLevel: riskLevel,
+      strategyKeyRules: rulesForRisk(riskLevel),
+      strategyLastGenerated: new Date(),
+    })
+    .where(eq(profileTable.id, profile.id));
+
+  await db.delete(targetAllocationsTable);
+  if (allocation.length > 0) {
+    await db.insert(targetAllocationsTable).values(allocation);
+  }
+
+  res.json(ApplyStrategyOptionsResponse.parse(await buildStrategy()));
 });
 
 export default router;

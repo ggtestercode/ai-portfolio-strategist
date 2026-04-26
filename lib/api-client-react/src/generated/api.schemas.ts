@@ -262,6 +262,51 @@ export interface CommandResult {
   reply: string;
 }
 
+export interface StrategyPick {
+  symbol: string;
+  name: string;
+  assetClass: string;
+  weightPct: number;
+  rationale: string;
+}
+
+export type StrategyOptionRiskLevel =
+  (typeof StrategyOptionRiskLevel)[keyof typeof StrategyOptionRiskLevel];
+
+export const StrategyOptionRiskLevel = {
+  Low: "Low",
+  Medium: "Medium",
+  High: "High",
+} as const;
+
+export interface StrategyOption {
+  id: number;
+  optionIndex: number;
+  name: string;
+  summary: string;
+  riskLevel: StrategyOptionRiskLevel;
+  expectedReturnPct: number;
+  picks: StrategyPick[];
+  generatedAt: string;
+}
+
+export interface RegenerateStrategyResult {
+  strategy: Strategy;
+  options: StrategyOption[];
+}
+
+export interface ApplyStrategyOptionsPick {
+  symbol: string;
+  name: string;
+  assetClass: string;
+  weightPct: number;
+}
+
+export interface ApplyStrategyOptionsRequest {
+  strategyName: string;
+  picks: ApplyStrategyOptionsPick[];
+}
+
 export interface DashboardSummary {
   portfolio: Portfolio;
   goals: InvestmentGoals;

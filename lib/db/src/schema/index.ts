@@ -5,3 +5,4 @@ export * from "./tradeSuggestions";
 export * from "./transactions";
 export * from "./riskAlerts";
 export * from "./assistantMessages";
+export * from "./strategyOptions";

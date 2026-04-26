@@ -111,9 +111,84 @@ export const GetCurrentStrategyResponse = zod.object({
 });
 
 /**
- * @summary AI-regenerate strategy from current goals
+ * @summary AI-regenerate strategy + portfolio options from current goals
  */
 export const RegenerateStrategyResponse = zod.object({
+  strategy: zod.object({
+    strategyType: zod.string(),
+    lastGenerated: zod.string(),
+    riskLevel: zod.enum(["Low", "Medium", "High"]),
+    allocation: zod.array(
+      zod.object({
+        assetClass: zod.string(),
+        percentage: zod.number(),
+      }),
+    ),
+    keyRules: zod.array(zod.string()),
+  }),
+  options: zod.array(
+    zod.object({
+      id: zod.number(),
+      optionIndex: zod.number(),
+      name: zod.string(),
+      summary: zod.string(),
+      riskLevel: zod.enum(["Low", "Medium", "High"]),
+      expectedReturnPct: zod.number(),
+      picks: zod.array(
+        zod.object({
+          symbol: zod.string(),
+          name: zod.string(),
+          assetClass: zod.string(),
+          weightPct: zod.number(),
+          rationale: zod.string(),
+        }),
+      ),
+      generatedAt: zod.string(),
+    }),
+  ),
+});
+
+/**
+ * @summary Latest AI-generated portfolio strategy options
+ */
+export const GetStrategyOptionsResponseItem = zod.object({
+  id: zod.number(),
+  optionIndex: zod.number(),
+  name: zod.string(),
+  summary: zod.string(),
+  riskLevel: zod.enum(["Low", "Medium", "High"]),
+  expectedReturnPct: zod.number(),
+  picks: zod.array(
+    zod.object({
+      symbol: zod.string(),
+      name: zod.string(),
+      assetClass: zod.string(),
+      weightPct: zod.number(),
+      rationale: zod.string(),
+    }),
+  ),
+  generatedAt: zod.string(),
+});
+export const GetStrategyOptionsResponse = zod.array(
+  GetStrategyOptionsResponseItem,
+);
+
+/**
+ * @summary Apply a custom mix of picks across the generated options
+ */
+export const ApplyStrategyOptionsBody = zod.object({
+  strategyName: zod.string(),
+  picks: zod.array(
+    zod.object({
+      symbol: zod.string(),
+      name: zod.string(),
+      assetClass: zod.string(),
+      weightPct: zod.number(),
+    }),
+  ),
+});
+
+export const ApplyStrategyOptionsResponse = zod.object({
   strategyType: zod.string(),
   lastGenerated: zod.string(),
   riskLevel: zod.enum(["Low", "Medium", "High"]),

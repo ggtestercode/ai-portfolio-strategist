@@ -19,6 +19,7 @@ import type {
 import type {
   AllocationRow,
   ApplyRebalancingResult,
+  ApplyStrategyOptionsRequest,
   AssistantMessage,
   CommandResult,
   DashboardSummary,
@@ -30,11 +31,13 @@ import type {
   PerformanceSeries,
   Portfolio,
   RebalancingAction,
+  RegenerateStrategyResult,
   RiskAlert,
   RunCommandRequest,
   SendAssistantMessage200,
   SendAssistantRequest,
   Strategy,
+  StrategyOption,
   TradeSuggestion,
   Transaction,
   UpdateGoalsRequest,
@@ -510,7 +513,7 @@ export function useGetCurrentStrategy<
 }
 
 /**
- * @summary AI-regenerate strategy from current goals
+ * @summary AI-regenerate strategy + portfolio options from current goals
  */
 export const getRegenerateStrategyUrl = () => {
   return `/api/strategy/regenerate`;
@@ -518,8 +521,8 @@ export const getRegenerateStrategyUrl = () => {
 
 export const regenerateStrategy = async (
   options?: RequestInit,
-): Promise<Strategy> => {
-  return customFetch<Strategy>(getRegenerateStrategyUrl(), {
+): Promise<RegenerateStrategyResult> => {
+  return customFetch<RegenerateStrategyResult>(getRegenerateStrategyUrl(), {
     ...options,
     method: "POST",
   });
@@ -568,7 +571,7 @@ export type RegenerateStrategyMutationResult = NonNullable<
 export type RegenerateStrategyMutationError = ErrorType<unknown>;
 
 /**
- * @summary AI-regenerate strategy from current goals
+ * @summary AI-regenerate strategy + portfolio options from current goals
  */
 export const useRegenerateStrategy = <
   TError = ErrorType<unknown>,
@@ -588,6 +591,168 @@ export const useRegenerateStrategy = <
   TContext
 > => {
   return useMutation(getRegenerateStrategyMutationOptions(options));
+};
+
+/**
+ * @summary Latest AI-generated portfolio strategy options
+ */
+export const getGetStrategyOptionsUrl = () => {
+  return `/api/strategy/options`;
+};
+
+export const getStrategyOptions = async (
+  options?: RequestInit,
+): Promise<StrategyOption[]> => {
+  return customFetch<StrategyOption[]>(getGetStrategyOptionsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetStrategyOptionsQueryKey = () => {
+  return [`/api/strategy/options`] as const;
+};
+
+export const getGetStrategyOptionsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getStrategyOptions>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getStrategyOptions>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetStrategyOptionsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getStrategyOptions>>
+  > = ({ signal }) => getStrategyOptions({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getStrategyOptions>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetStrategyOptionsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getStrategyOptions>>
+>;
+export type GetStrategyOptionsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Latest AI-generated portfolio strategy options
+ */
+
+export function useGetStrategyOptions<
+  TData = Awaited<ReturnType<typeof getStrategyOptions>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getStrategyOptions>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetStrategyOptionsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Apply a custom mix of picks across the generated options
+ */
+export const getApplyStrategyOptionsUrl = () => {
+  return `/api/strategy/options/apply`;
+};
+
+export const applyStrategyOptions = async (
+  applyStrategyOptionsRequest: ApplyStrategyOptionsRequest,
+  options?: RequestInit,
+): Promise<Strategy> => {
+  return customFetch<Strategy>(getApplyStrategyOptionsUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(applyStrategyOptionsRequest),
+  });
+};
+
+export const getApplyStrategyOptionsMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof applyStrategyOptions>>,
+    TError,
+    { data: BodyType<ApplyStrategyOptionsRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof applyStrategyOptions>>,
+  TError,
+  { data: BodyType<ApplyStrategyOptionsRequest> },
+  TContext
+> => {
+  const mutationKey = ["applyStrategyOptions"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof applyStrategyOptions>>,
+    { data: BodyType<ApplyStrategyOptionsRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return applyStrategyOptions(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ApplyStrategyOptionsMutationResult = NonNullable<
+  Awaited<ReturnType<typeof applyStrategyOptions>>
+>;
+export type ApplyStrategyOptionsMutationBody =
+  BodyType<ApplyStrategyOptionsRequest>;
+export type ApplyStrategyOptionsMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Apply a custom mix of picks across the generated options
+ */
+export const useApplyStrategyOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof applyStrategyOptions>>,
+    TError,
+    { data: BodyType<ApplyStrategyOptionsRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof applyStrategyOptions>>,
+  TError,
+  { data: BodyType<ApplyStrategyOptionsRequest> },
+  TContext
+> => {
+  return useMutation(getApplyStrategyOptionsMutationOptions(options));
 };
 
 /**

@@ -100,10 +100,39 @@ paths:
     post:
       operationId: regenerateStrategy
       tags: [strategy]
-      summary: AI-regenerate strategy from current goals
+      summary: AI-regenerate strategy + portfolio options from current goals
       responses:
         "200":
-          description: Regenerated strategy
+          description: Regenerated strategy and options
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegenerateStrategyResult" }
+  /strategy/options:
+    get:
+      operationId: getStrategyOptions
+      tags: [strategy]
+      summary: Latest AI-generated portfolio strategy options
+      responses:
+        "200":
+          description: Strategy options
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/StrategyOption" }
+  /strategy/options/apply:
+    post:
+      operationId: applyStrategyOptions
+      tags: [strategy]
+      summary: Apply a custom mix of picks across the generated options
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApplyStrategyOptionsRequest" }
+      responses:
+        "200":
+          description: Updated active strategy
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Strategy" }
@@ -527,6 +556,58 @@ components:
       required: [reply]
       properties:
         reply: { type: string }
+
+    StrategyPick:
+      type: object
+      required: [symbol, name, assetClass, weightPct, rationale]
+      properties:
+        symbol: { type: string }
+        name: { type: string }
+        assetClass: { type: string }
+        weightPct: { type: number }
+        rationale: { type: string }
+
+    StrategyOption:
+      type: object
+      required: [id, optionIndex, name, summary, riskLevel, expectedReturnPct, picks, generatedAt]
+      properties:
+        id: { type: integer }
+        optionIndex: { type: integer }
+        name: { type: string }
+        summary: { type: string }
+        riskLevel: { type: string, enum: [Low, Medium, High] }
+        expectedReturnPct: { type: number }
+        picks:
+          type: array
+          items: { $ref: "#/components/schemas/StrategyPick" }
+        generatedAt: { type: string }
+
+    RegenerateStrategyResult:
+      type: object
+      required: [strategy, options]
+      properties:
+        strategy: { $ref: "#/components/schemas/Strategy" }
+        options:
+          type: array
+          items: { $ref: "#/components/schemas/StrategyOption" }
+
+    ApplyStrategyOptionsPick:
+      type: object
+      required: [symbol, name, assetClass, weightPct]
+      properties:
+        symbol: { type: string }
+        name: { type: string }
+        assetClass: { type: string }
+        weightPct: { type: number }
+
+    ApplyStrategyOptionsRequest:
+      type: object
+      required: [strategyName, picks]
+      properties:
+        strategyName: { type: string }
+        picks:
+          type: array
+          items: { $ref: "#/components/schemas/ApplyStrategyOptionsPick" }
 
     DashboardSummary:
       type: object

@@ -10,7 +10,10 @@ import {
   getGetInvestmentGoalsQueryKey,
   getGetDashboardSummaryQueryKey,
   getGetCurrentStrategyQueryKey,
+  getGetStrategyOptionsQueryKey,
+  getGetPortfolioAllocationQueryKey,
 } from "@workspace/api-client-react";
+import StrategyOptions from "@/components/StrategyOptions";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -68,12 +71,17 @@ export default function Goals() {
 
   const handleRegen = async () => {
     try {
-      await regenerate.mutateAsync();
+      const result = await regenerate.mutateAsync();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: getGetCurrentStrategyQueryKey() }),
         queryClient.invalidateQueries({ queryKey: getGetDashboardSummaryQueryKey() }),
+        queryClient.invalidateQueries({ queryKey: getGetStrategyOptionsQueryKey() }),
+        queryClient.invalidateQueries({ queryKey: getGetPortfolioAllocationQueryKey() }),
       ]);
-      toast({ title: "Strategy regenerated" });
+      toast({
+        title: "Strategy regenerated",
+        description: `AI produced ${result.options.length} portfolio options below — select picks to mix and match.`,
+      });
     } catch {
       toast({ title: "Could not regenerate", variant: "destructive" });
     }
@@ -274,6 +282,8 @@ export default function Goals() {
           )}
         </Card>
       </div>
+
+      <StrategyOptions />
     </div>
   );
 }
