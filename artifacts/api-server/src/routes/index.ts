@@ -11,6 +11,7 @@ import transactionsRouter from "./transactions";
 import alertsRouter from "./alerts";
 import assistantRouter from "./assistant";
 import dashboardRouter from "./dashboard";
+import scannerRouter   from "./scanner";
 
 const router: IRouter = Router();
 
@@ -26,5 +27,6 @@ router.use(transactionsRouter);
 router.use(alertsRouter);
 router.use(assistantRouter);
 router.use(dashboardRouter);
+router.use(scannerRouter);
 
 export default router;

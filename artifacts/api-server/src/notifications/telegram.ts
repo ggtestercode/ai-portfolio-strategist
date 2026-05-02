@@ -5,7 +5,10 @@ import {
   getCachedContext,
   type AssistantContext,
 } from "../lib/aiResponder";
-import { getPortfolioSnapshot } from "../lib/portfolio";
+import { getPortfolioSnapshot }            from "../lib/portfolio";
+import { runScan, type Recommendation }    from "../lib/marketScanner";
+import { rebalanceNow }                    from "../lib/rebalancer";
+import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
 import {
   db,
   profileTable,
@@ -30,6 +33,13 @@ function escapeHtml(s: string): string {
 function utcNow(): string {
   return new Date().toUTCString();
 }
+
+const REC_EMOJI: Record<Recommendation, string> = {
+  "STRONG BUY": "🟢",
+  "BUY":        "🟡",
+  "WATCH":      "🔵",
+  "AVOID":      "🔴",
+};
 
 async function buildContext(): Promise<AssistantContext> {
   return getCachedContext(async () => {
@@ -96,7 +106,7 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
 export function startPolling(): void {
   const b = getBot();
 
-  // Inline button callbacks — approve / reject
+  // ── Inline button callbacks — approve / reject ───────────────────────────
   b.on("callback_query", async (query) => {
     const data   = query.data ?? "";
     const chatId = query.message?.chat.id;
@@ -130,7 +140,7 @@ export function startPolling(): void {
     }
   });
 
-  // /status — portfolio snapshot
+  // ── /status ──────────────────────────────────────────────────────────────
   b.onText(/^\/status(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
@@ -160,7 +170,7 @@ export function startPolling(): void {
     }
   });
 
-  // /pending — list queued trades
+  // ── /pending ─────────────────────────────────────────────────────────────
   b.onText(/^\/pending(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
@@ -186,7 +196,7 @@ export function startPolling(): void {
     }
   });
 
-  // /mode autonomous | /mode approval
+  // ── /mode autonomous | /mode approval ────────────────────────────────────
   b.onText(/^\/mode(?:@\w+)?\s+(autonomous|approval)$/, async (msg, match) => {
     const chatId  = String(msg.chat.id);
     const newMode = match?.[1] as "autonomous" | "approval" | undefined;
@@ -205,14 +215,139 @@ export function startPolling(): void {
     }
   });
 
-  // /scan — Sprint 4 placeholder
+  // ── /scan — live Claude market analysis ──────────────────────────────────
   b.onText(/^\/scan(?:@\w+)?$/, async (msg) => {
-    await b.sendMessage(String(msg.chat.id),
-      `🔍 Market scan coming in Sprint 4.\n<i>${utcNow()}</i>`,
-      { parse_mode: "HTML" });
+    const chatId = String(msg.chat.id);
+    try {
+      await b.sendMessage(chatId, `🔍 Running market scan… <i>this takes ~20 s</i>`, { parse_mode: "HTML" });
+      const result = await runScan();
+
+      if (!result.opportunities.length) {
+        await b.sendMessage(chatId,
+          `⚠️ Scan returned no results.\n<i>${utcNow()}</i>`,
+          { parse_mode: "HTML" });
+        return;
+      }
+
+      const top5 = result.opportunities.slice(0, 5);
+      const lines = top5.map((o, i) => {
+        const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
+        return [
+          `${i + 1}. ${emoji} <b>${escapeHtml(o.symbol)}</b> — ${o.recommendation} (score: ${o.score})`,
+          `$${o.price.toLocaleString("en-US", { maximumFractionDigits: 4 })} | data: <i>${new Date(o.dataTimestamp).toUTCString()}</i>`,
+          escapeHtml(o.reasoning),
+        ].join("\n");
+      }).join("\n\n");
+
+      await b.sendMessage(chatId, [
+        `🔍 <b>Market Scan — Top 5 Picks</b>`,
+        `<i>${new Date(result.scanTimestamp).toUTCString()}</i>`,
+        ``,
+        lines,
+        ``,
+        `<i>${escapeHtml(result.summary)}</i>`,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ Scan failed: ${escapeHtml(m)}`).catch(() => {});
+    }
   });
 
-  // Free-text NL — route to AI assistant
+  // ── /rebalance — propose rebalance trades ────────────────────────────────
+  b.onText(/^\/rebalance(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      await b.sendMessage(chatId, `⚖️ Analysing portfolio drift…`, { parse_mode: "HTML" });
+      const result = await rebalanceNow();
+
+      if (!result.trades.length) {
+        await b.sendMessage(chatId,
+          `✅ Portfolio is balanced — no trades needed.\n<i>${utcNow()}</i>`,
+          { parse_mode: "HTML" });
+        return;
+      }
+
+      const tradeLines = result.trades.map((t, i) =>
+        `${i + 1}. <b>${t.side.toUpperCase()} ${escapeHtml(t.symbol)}</b> $${t.amountUsd.toFixed(0)}\n   ${escapeHtml(t.rationale)}`
+      ).join("\n\n");
+
+      await b.sendMessage(chatId, [
+        `⚖️ <b>Rebalance Proposed (${result.trades.length} trades)</b>`,
+        `<i>${new Date(result.timestamp).toUTCString()}</i>`,
+        ``,
+        tradeLines,
+        ``,
+        `<i>${escapeHtml(result.summary)}</i>`,
+        ``,
+        `Trades queued for approval.`,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ Rebalance failed: ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /watchlist ────────────────────────────────────────────────────────────
+  b.onText(/^\/watchlist(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const list = await getWatchlist();
+      const grouped: Record<string, string[]> = {};
+      for (const e of list) {
+        (grouped[e.assetClass] ??= []).push(e.symbol);
+      }
+      const lines = Object.entries(grouped).map(([cls, syms]) =>
+        `<b>${escapeHtml(cls)}</b> (${syms.length}): ${syms.map(escapeHtml).join(" ")}`
+      ).join("\n\n");
+
+      await b.sendMessage(chatId, [
+        `📋 <b>Watchlist (${list.length} assets)</b>`,
+        `<i>${utcNow()}</i>`,
+        ``,
+        lines,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /add SYMBOL [assetClass] ─────────────────────────────────────────────
+  b.onText(/^\/add(?:@\w+)?\s+(\S+)(?:\s+(\S+))?$/, async (msg, match) => {
+    const chatId     = String(msg.chat.id);
+    const symbol     = match?.[1]?.toUpperCase() ?? "";
+    const assetClass = match?.[2] ?? "Equity";
+    if (!symbol) { await b.sendMessage(chatId, "Usage: /add SYMBOL [assetClass]"); return; }
+    try {
+      await addToWatchlist(symbol, assetClass);
+      await b.sendMessage(chatId,
+        `✅ <b>${escapeHtml(symbol)}</b> added to watchlist as <i>${escapeHtml(assetClass)}</i>\n<i>${utcNow()}</i>`,
+        { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /remove SYMBOL ────────────────────────────────────────────────────────
+  b.onText(/^\/remove(?:@\w+)?\s+(\S+)$/, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    const symbol = match?.[1]?.toUpperCase() ?? "";
+    if (!symbol) { await b.sendMessage(chatId, "Usage: /remove SYMBOL"); return; }
+    try {
+      const removed = await removeFromWatchlist(symbol);
+      await b.sendMessage(chatId,
+        removed
+          ? `✅ <b>${escapeHtml(symbol)}</b> removed from watchlist.\n<i>${utcNow()}</i>`
+          : `⚠️ <b>${escapeHtml(symbol)}</b> was not in the watchlist.`,
+        { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── Free-text NL — route to AI assistant ─────────────────────────────────
   b.on("message", async (msg) => {
     if (!msg.text || msg.text.startsWith("/")) return;
     const chatId = String(msg.chat.id);
