@@ -78,9 +78,13 @@ export async function runScan(): Promise<ScanResult> {
 
     const systemContext = [
       "You are an elite portfolio analyst. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":""}],"scanTimestamp":"","summary":""}`,
+      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","positionSizeUsd":0,"leverageRecommended":1}],"scanTimestamp":"","summary":""}`,
       "Rules: rank exactly 5 opportunities. Score 80-100=STRONG BUY, 60-79=BUY, 40-59=WATCH, <40=AVOID.",
-      "Consider: RSI <30 oversold (bullish), RSI >70 overbought (bearish). momentum (7d/30d), volume, diversification.",
+      "Consider: RSI <30 oversold (bullish), RSI >70 overbought (bearish). momentum (7d/30d), volume.",
+      "This is an EXTREME risk tolerance portfolio targeting 50% monthly returns.",
+      "Only surface high-conviction momentum plays. Never suggest defensive positions.",
+      "Always include leverage recommendations (up to 50x crypto, 20x stocks).",
+      `HARD RULE: Never suggest position size exceeding 50% of total capital ($${totalPortfolio.toFixed(0)}). Max single trade = $${(totalPortfolio * 0.5).toFixed(0)}. Always include recommended dollar position size in signals.`,
     ].join("\n");
 
     const prompt = [

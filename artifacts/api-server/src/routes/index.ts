@@ -12,9 +12,11 @@ import alertsRouter from "./alerts";
 import assistantRouter from "./assistant";
 import dashboardRouter from "./dashboard";
 import scannerRouter   from "./scanner";
+import telegramRouter  from "./telegram";
 
 const router: IRouter = Router();
 
+router.use(telegramRouter);
 router.use(healthRouter);
 router.use(userRouter);
 router.use(goalsRouter);

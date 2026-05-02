@@ -364,3 +364,7 @@ export function startPolling(): void {
   b.startPolling();
   console.log("[telegram] Bot polling started");
 }
+
+export function processWebhookUpdate(update: object): void {
+  getBot().processUpdate(update as Parameters<TelegramBot["processUpdate"]>[0]);
+}

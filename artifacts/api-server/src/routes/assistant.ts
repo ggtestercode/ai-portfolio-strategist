@@ -106,7 +106,7 @@ router.get("/assistant/messages", async (req, res): Promise<void> => {
       .from(assistantMessagesTable)
       .orderBy(desc(assistantMessagesTable.id))
       .limit(limit);
-    res.json({ messages: messages.reverse() });
+    res.json(messages.reverse());
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

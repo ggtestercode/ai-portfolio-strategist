@@ -1,0 +1,286 @@
+[
+  {
+    "symbol": "BTC",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "ETH",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "USDT",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "XRP",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "BNB",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "USDC",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "SOL",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "TRX",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "FIGR_HELOC",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "DOGE",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "WBT",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "USDS",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "HYPE",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "LEO",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "ADA",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "BCH",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "XMR",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "LINK",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "ZEC",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "CC",
+    "assetClass": "Crypto"
+  },
+  {
+    "symbol": "AAPL",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "MSFT",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "NVDA",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "AMZN",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "META",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "GOOGL",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "GOOG",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "BRK-B",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "LLY",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "AVGO",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "TSLA",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "WMT",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "JPM",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "V",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "UNH",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "XOM",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "ORCL",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "MA",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "COST",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "HD",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "PG",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "JNJ",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "ABBV",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "BAC",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "NFLX",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "CRM",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "MRK",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "CVX",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "AMD",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "PEP",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "TMO",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "KO",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "ACN",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "LIN",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "ADBE",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "CSCO",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "QCOM",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "TXN",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "WFC",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "MS",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "PM",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "AMGN",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "AXP",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "DIS",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "BX",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "ABT",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "INTU",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "ISRG",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "MCD",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "RTX",
+    "assetClass": "Equity"
+  },
+  {
+    "symbol": "BABA",
+    "assetClass": "Equity"
+  }
+]

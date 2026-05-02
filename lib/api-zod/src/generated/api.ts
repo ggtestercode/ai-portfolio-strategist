@@ -41,14 +41,14 @@ export const GetDashboardSummaryResponse = zod.object({
     totalCapital: zod.number(),
     targetReturnPct: zod.number(),
     timeHorizonMonths: zod.number(),
-    riskTolerance: zod.enum(["Low", "Medium", "High"]),
+    riskTolerance: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
     goalProgressPct: zod.number(),
     goalProgressNote: zod.string().optional(),
   }),
   strategy: zod.object({
     strategyType: zod.string(),
     lastGenerated: zod.string(),
-    riskLevel: zod.enum(["Low", "Medium", "High"]),
+    riskLevel: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
     allocation: zod.array(
       zod.object({
         assetClass: zod.string(),
@@ -70,7 +70,7 @@ export const GetInvestmentGoalsResponse = zod.object({
   totalCapital: zod.number(),
   targetReturnPct: zod.number(),
   timeHorizonMonths: zod.number(),
-  riskTolerance: zod.enum(["Low", "Medium", "High"]),
+  riskTolerance: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
   goalProgressPct: zod.number(),
   goalProgressNote: zod.string().optional(),
 });
@@ -82,14 +82,14 @@ export const UpdateInvestmentGoalsBody = zod.object({
   totalCapital: zod.number(),
   targetReturnPct: zod.number(),
   timeHorizonMonths: zod.number(),
-  riskTolerance: zod.enum(["Low", "Medium", "High"]),
+  riskTolerance: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
 });
 
 export const UpdateInvestmentGoalsResponse = zod.object({
   totalCapital: zod.number(),
   targetReturnPct: zod.number(),
   timeHorizonMonths: zod.number(),
-  riskTolerance: zod.enum(["Low", "Medium", "High"]),
+  riskTolerance: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
   goalProgressPct: zod.number(),
   goalProgressNote: zod.string().optional(),
 });
@@ -100,7 +100,7 @@ export const UpdateInvestmentGoalsResponse = zod.object({
 export const GetCurrentStrategyResponse = zod.object({
   strategyType: zod.string(),
   lastGenerated: zod.string(),
-  riskLevel: zod.enum(["Low", "Medium", "High"]),
+  riskLevel: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
   allocation: zod.array(
     zod.object({
       assetClass: zod.string(),
@@ -117,7 +117,7 @@ export const RegenerateStrategyResponse = zod.object({
   strategy: zod.object({
     strategyType: zod.string(),
     lastGenerated: zod.string(),
-    riskLevel: zod.enum(["Low", "Medium", "High"]),
+    riskLevel: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
     allocation: zod.array(
       zod.object({
         assetClass: zod.string(),
@@ -132,7 +132,7 @@ export const RegenerateStrategyResponse = zod.object({
       optionIndex: zod.number(),
       name: zod.string(),
       summary: zod.string(),
-      riskLevel: zod.enum(["Low", "Medium", "High"]),
+      riskLevel: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
       expectedReturnPct: zod.number(),
       picks: zod.array(
         zod.object({
@@ -156,7 +156,7 @@ export const GetStrategyOptionsResponseItem = zod.object({
   optionIndex: zod.number(),
   name: zod.string(),
   summary: zod.string(),
-  riskLevel: zod.enum(["Low", "Medium", "High"]),
+  riskLevel: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
   expectedReturnPct: zod.number(),
   picks: zod.array(
     zod.object({
@@ -191,7 +191,7 @@ export const ApplyStrategyOptionsBody = zod.object({
 export const ApplyStrategyOptionsResponse = zod.object({
   strategyType: zod.string(),
   lastGenerated: zod.string(),
-  riskLevel: zod.enum(["Low", "Medium", "High"]),
+  riskLevel: zod.enum(["Low", "Medium", "High", "Extreme", "extreme"]),
   allocation: zod.array(
     zod.object({
       assetClass: zod.string(),

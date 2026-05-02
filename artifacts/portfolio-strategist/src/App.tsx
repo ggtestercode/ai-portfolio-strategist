@@ -14,6 +14,8 @@ import Transactions from "@/pages/transactions";
 import Alerts from "@/pages/alerts";
 import Backtesting from "@/pages/backtesting";
 import Settings from "@/pages/settings";
+import Scanner from "@/pages/scanner";
+import Approvals from "@/pages/approvals";
 
 const queryClient = new QueryClient();
 
@@ -31,6 +33,8 @@ function Router() {
         <Route path="/alerts" component={Alerts} />
         <Route path="/backtesting" component={Backtesting} />
         <Route path="/settings" component={Settings} />
+        <Route path="/scanner" component={Scanner} />
+        <Route path="/approvals" component={Approvals} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

@@ -8,7 +8,8 @@ import { llm }                    from "./llmRouter";
 import { cache, TTL, CacheKey }   from "./contextCache";
 import { db }                     from "@workspace/db";
 import { tradeProposals,
-         operationConfig }        from "@workspace/db/schema";
+         operationConfig,
+         profileTable }           from "@workspace/db/schema";
 import { eq }                     from "drizzle-orm";
 
 export type OperationMode = "autonomous" | "approval";
@@ -95,7 +96,37 @@ class ApprovalGate {
   }
 
   async submit(proposal: TradeProposal): Promise<GateResult> {
-    const { mode, thresholdUsd } = await this.getConfig();
+    const [{ mode, thresholdUsd }, profileRow] = await Promise.all([
+      this.getConfig(),
+      db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1).then(r => r[0]),
+    ]);
+    const totalCapital = profileRow?.totalCapital ?? 10000;
+    const capLimit     = totalCapital * 0.50;
+    if (proposal.amountUsd > capLimit) {
+      await db.insert(tradeProposals).values({
+        id: proposal.id, symbol: proposal.symbol, side: proposal.side,
+        amountUsd: String(proposal.amountUsd), assetClass: proposal.assetClass,
+        broker: proposal.broker, rationale: proposal.rationale,
+        score:        proposal.score        != null ? String(proposal.score)        : null,
+        currentPrice: proposal.currentPrice != null ? String(proposal.currentPrice) : null,
+        dataTimestamp: proposal.dataTimestamp ?? null,
+        status: "rejected",
+        resolvedAt: new Date(),
+        executionError: `Exceeds 50% single-trade capital limit ($${capLimit.toFixed(0)})`,
+        expiresAt: new Date(Date.now() + EXPIRY_MS),
+      }).onConflictDoNothing();
+      const reason = `Exceeds 50% single-trade capital limit ($${capLimit.toFixed(0)} max, got $${proposal.amountUsd})`;
+      if (this.notifyFn) {
+        await this.notifyFn({
+          proposal,
+          summary: `AUTO-REJECTED: ${proposal.side.toUpperCase()} ${proposal.symbol} $${proposal.amountUsd} — ${reason}`,
+          expiresAt: new Date().toISOString(),
+          status: "pending",
+        }).catch(() => {});
+      }
+      console.warn(`[ApprovalGate] Auto-rejected ${proposal.id}: ${reason}`);
+      return { action: "rejected", proposal, message: reason };
+    }
     await db.insert(tradeProposals).values({
       id: proposal.id, symbol: proposal.symbol, side: proposal.side,
       amountUsd: String(proposal.amountUsd), assetClass: proposal.assetClass,

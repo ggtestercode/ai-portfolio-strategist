@@ -24,6 +24,9 @@ export const profileTable = pgTable("profile", {
   })
     .notNull()
     .defaultNow(),
+  maxLeverageCrypto: integer("max_leverage_crypto"),
+  maxLeverageStocks: integer("max_leverage_stocks"),
+  notes: text("notes"),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow()
