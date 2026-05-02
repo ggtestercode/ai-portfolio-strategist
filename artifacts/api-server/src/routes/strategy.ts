@@ -82,9 +82,13 @@ router.get("/strategy/options", async (_req, res): Promise<void> => {
   res.json(GetStrategyOptionsResponse.parse(rows.map(serializeOption)));
 });
 
-router.post("/strategy/regenerate", async (_req, res): Promise<void> => {
+router.post("/strategy/regenerate", async (req, res): Promise<void> => {
   const profile = await getProfile();
-  const options = await generateStrategyOptions();
+  const result = await generateStrategyOptions({
+    riskTolerance: (profile?.riskTolerance ?? "medium") as "low" | "medium" | "high",
+    forceRefresh: false,
+  });
+  const options = result.options;
 
   await db.delete(strategyOptionsTable);
   const inserted = await db
@@ -122,7 +126,7 @@ router.post("/strategy/regenerate", async (_req, res): Promise<void> => {
     .set({
       strategyType: chosen.name,
       strategyRiskLevel: chosen.riskLevel,
-      strategyKeyRules: rulesForRisk(chosen.riskLevel),
+      strategyKeyRules: rulesForRisk(String(chosen.riskLevel)),
       strategyLastGenerated: new Date(),
     })
     .where(eq(profileTable.id, profile.id));

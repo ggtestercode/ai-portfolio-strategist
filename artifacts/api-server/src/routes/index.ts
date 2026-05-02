@@ -5,7 +5,7 @@ import goalsRouter from "./goals";
 import strategyRouter from "./strategy";
 import portfolioRouter from "./portfolio";
 import performanceRouter from "./performance";
-import tradesRouter from "./trades";
+import { tradesRouter } from "./trades";
 import rebalancingRouter from "./rebalancing";
 import transactionsRouter from "./transactions";
 import alertsRouter from "./alerts";

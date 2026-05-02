@@ -1,222 +1,189 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
-import type { StrategyPick } from "@workspace/db";
-import { getProfile } from "./profile";
-import { logger } from "./logger";
+/**
+ * strategyGenerator.ts — Token-efficient strategy generation
+ * Types match DB schema (strategyOptions.ts) exactly.
+ */
 
-const MODEL = "gpt-5.4";
+import { llm }                  from "./llmRouter";
+import { cache, TTL, CacheKey } from "./contextCache";
 
-export type GeneratedOption = {
-  name: string;
-  summary: string;
-  riskLevel: "Low" | "Medium" | "High";
+// Matches lib/db/src/schema/strategyOptions.ts StrategyPick exactly
+export interface StrategyPick {
+  symbol:     string;
+  name:       string;
+  assetClass: string;
+  weightPct:  number;
+  rationale:  string;
+}
+
+export interface StrategyOption {
+  name:              string;
+  riskLevel:         string;
   expectedReturnPct: number;
-  picks: StrategyPick[];
-};
+  summary:           string;
+  picks:             StrategyPick[];
+  generatedAt:       string;
+}
 
-const ALLOWED_ASSET_CLASSES = [
-  "Crypto",
-  "Equities",
-  "ETFs",
-  "Cash",
-  "Commodities",
-  "Bonds",
-];
-const ALLOWED_RISK_LEVELS = ["Low", "Medium", "High"];
+export interface StrategyResult {
+  options:          StrategyOption[];
+  recommendedIndex: number;
+  fromCache:        boolean;
+  generatedAt:      string;
+}
 
-function normalizeOption(opt: GeneratedOption, idx: number): GeneratedOption {
-  const picks = (opt.picks ?? [])
-    .filter((p) => p && typeof p.symbol === "string")
-    .map((p) => ({
-      symbol: String(p.symbol).toUpperCase().slice(0, 12),
-      name: String(p.name ?? p.symbol),
-      assetClass: ALLOWED_ASSET_CLASSES.includes(p.assetClass)
-        ? p.assetClass
-        : "Equities",
-      weightPct: Math.max(0, Number(p.weightPct) || 0),
-      rationale: String(p.rationale ?? "").slice(0, 240),
-    }));
-  const sum = picks.reduce((s, p) => s + p.weightPct, 0);
-  if (sum > 0 && Math.abs(sum - 100) > 0.5) {
-    for (const p of picks) {
-      p.weightPct = Math.round(((p.weightPct / sum) * 100) * 10) / 10;
+export interface GenerateStrategyParams {
+  riskTolerance:     "low" | "medium" | "high";
+  investmentGoalUsd?: number;
+  currentHoldings?:  string[];
+  monthlyBudgetUsd?: number;
+  forceRefresh?:     boolean;
+}
+
+const SCHEMA = {
+  type: "object", required: ["options","recommendedIndex"],
+  properties: {
+    recommendedIndex: { type: "number" },
+    options: {
+      type: "array", minItems: 3, maxItems: 3,
+      items: {
+        type: "object",
+        required: ["name","riskLevel","expectedReturnPct","summary","picks"],
+        properties: {
+          name:              { type: "string" },
+          riskLevel:         { type: "string", enum: ["low","medium","high"] },
+          expectedReturnPct: { type: "number" },
+          summary:           { type: "string" },
+          picks: {
+            type: "array", minItems: 5, maxItems: 8,
+            items: {
+              type: "object",
+              required: ["symbol","name","assetClass","weightPct","rationale"],
+              properties: {
+                symbol:     { type: "string" },
+                name:       { type: "string" },
+                assetClass: { type: "string" },
+                weightPct:  { type: "number", minimum: 1, maximum: 100 },
+                rationale:  { type: "string" },
+              }
+            }
+          }
+        }
+      }
     }
   }
+};
+
+function buildFallback(): Pick<StrategyResult,"options"|"recommendedIndex"> {
+  const now = new Date().toISOString();
   return {
-    name: String(opt.name ?? `Option ${idx + 1}`).slice(0, 60),
-    summary: String(opt.summary ?? "").slice(0, 320),
-    riskLevel: ALLOWED_RISK_LEVELS.includes(opt.riskLevel)
-      ? opt.riskLevel
-      : "Medium",
-    expectedReturnPct: Math.max(
-      0,
-      Math.min(80, Number(opt.expectedReturnPct) || 0),
-    ),
-    picks,
+    recommendedIndex: 1,
+    options: [
+      {
+        name: "Capital Preservation", riskLevel: "low",
+        expectedReturnPct: 6.5,
+        summary: "Defensive allocation. Dividend ETFs, T-bills, gold. Minimal crypto.",
+        generatedAt: now,
+        picks: [
+          { symbol:"VTI",  name:"Vanguard Total Stock Market ETF", assetClass:"ETF",       weightPct:40, rationale:"Broad US market, low cost" },
+          { symbol:"SGOV", name:"iShares 0-3 Month Treasury ETF",  assetClass:"ETF",       weightPct:25, rationale:"Short-term T-bills yield" },
+          { symbol:"GLD",  name:"SPDR Gold Shares",                assetClass:"Commodity", weightPct:15, rationale:"Inflation hedge" },
+          { symbol:"VNQ",  name:"Vanguard Real Estate ETF",        assetClass:"REIT",      weightPct:10, rationale:"Real estate income" },
+          { symbol:"BTC",  name:"Bitcoin",                         assetClass:"Crypto",    weightPct:10, rationale:"Small digital asset exposure" },
+        ],
+      },
+      {
+        name: "Balanced Growth", riskLevel: "medium",
+        expectedReturnPct: 14,
+        summary: "Quality equities and crypto with ETF diversification.",
+        generatedAt: now,
+        picks: [
+          { symbol:"NVDA", name:"NVIDIA Corporation",      assetClass:"US Equity", weightPct:20, rationale:"AI infrastructure leader" },
+          { symbol:"MSFT", name:"Microsoft Corporation",   assetClass:"US Equity", weightPct:15, rationale:"Stable cloud growth" },
+          { symbol:"QQQ",  name:"Invesco QQQ Trust",       assetClass:"ETF",       weightPct:15, rationale:"NASDAQ broad coverage" },
+          { symbol:"BTC",  name:"Bitcoin",                 assetClass:"Crypto",    weightPct:25, rationale:"Digital store of value" },
+          { symbol:"ETH",  name:"Ethereum",                assetClass:"Crypto",    weightPct:15, rationale:"Smart contract ecosystem" },
+          { symbol:"GLD",  name:"SPDR Gold Shares",        assetClass:"Commodity", weightPct:10, rationale:"Portfolio anchor" },
+        ],
+      },
+      {
+        name: "Aggressive Alpha", riskLevel: "high",
+        expectedReturnPct: 30,
+        summary: "Concentrated crypto and growth equities. High drawdown risk.",
+        generatedAt: now,
+        picks: [
+          { symbol:"BTC",  name:"Bitcoin",           assetClass:"Crypto",    weightPct:30, rationale:"Dominant crypto by market cap" },
+          { symbol:"ETH",  name:"Ethereum",          assetClass:"Crypto",    weightPct:20, rationale:"DeFi and L2 hub" },
+          { symbol:"SOL",  name:"Solana",            assetClass:"Crypto",    weightPct:15, rationale:"High-throughput L1 ecosystem" },
+          { symbol:"NVDA", name:"NVIDIA Corporation",assetClass:"US Equity", weightPct:20, rationale:"AI compute monopoly" },
+          { symbol:"PLTR", name:"Palantir Technologies", assetClass:"US Equity", weightPct:10, rationale:"AI data platform" },
+          { symbol:"ARKK", name:"ARK Innovation ETF",   assetClass:"ETF",       weightPct:5,  rationale:"Disruptive tech basket" },
+        ],
+      },
+    ],
   };
 }
 
-function fallbackOptions(): GeneratedOption[] {
-  return [
-    {
-      name: "Capital Preservation",
-      summary:
-        "Defensive mix anchored in cash, dividend equities and gold to protect downside.",
-      riskLevel: "Low",
-      expectedReturnPct: 7,
-      picks: [
-        { symbol: "VOO", name: "Vanguard S&P 500 ETF", assetClass: "ETFs", weightPct: 25, rationale: "Broad equity exposure with low fees." },
-        { symbol: "BND", name: "Vanguard Total Bond ETF", assetClass: "Bonds", weightPct: 25, rationale: "Steady fixed-income ballast." },
-        { symbol: "GLD", name: "SPDR Gold Trust", assetClass: "Commodities", weightPct: 15, rationale: "Inflation and tail-risk hedge." },
-        { symbol: "USD", name: "Cash Reserve", assetClass: "Cash", weightPct: 25, rationale: "Dry powder for drawdowns." },
-        { symbol: "BTC", name: "Bitcoin", assetClass: "Crypto", weightPct: 10, rationale: "Small asymmetric crypto sleeve." },
-      ],
-    },
-    {
-      name: "Balanced Growth",
-      summary:
-        "Diversified blend of mega-cap equities, blue-chip crypto and ETFs for steady compounding.",
-      riskLevel: "Medium",
-      expectedReturnPct: 18,
-      picks: [
-        { symbol: "BTC", name: "Bitcoin", assetClass: "Crypto", weightPct: 25, rationale: "Core crypto allocation." },
-        { symbol: "ETH", name: "Ethereum", assetClass: "Crypto", weightPct: 15, rationale: "Smart-contract platform leader." },
-        { symbol: "NVDA", name: "NVIDIA", assetClass: "Equities", weightPct: 15, rationale: "AI compute backbone." },
-        { symbol: "AAPL", name: "Apple", assetClass: "Equities", weightPct: 10, rationale: "Cash-rich consumer tech anchor." },
-        { symbol: "VOO", name: "Vanguard S&P 500 ETF", assetClass: "ETFs", weightPct: 20, rationale: "Broad market exposure." },
-        { symbol: "USD", name: "Cash Reserve", assetClass: "Cash", weightPct: 10, rationale: "Liquidity for opportunities." },
-        { symbol: "GLD", name: "SPDR Gold Trust", assetClass: "Commodities", weightPct: 5, rationale: "Diversifier." },
-      ],
-    },
-    {
-      name: "Aggressive Growth",
-      summary:
-        "High-conviction crypto and innovation equities targeting outsized upside.",
-      riskLevel: "High",
-      expectedReturnPct: 32,
-      picks: [
-        { symbol: "BTC", name: "Bitcoin", assetClass: "Crypto", weightPct: 30, rationale: "Largest digital store of value." },
-        { symbol: "ETH", name: "Ethereum", assetClass: "Crypto", weightPct: 20, rationale: "Layer-1 settlement leader." },
-        { symbol: "SOL", name: "Solana", assetClass: "Crypto", weightPct: 10, rationale: "High-throughput challenger chain." },
-        { symbol: "NVDA", name: "NVIDIA", assetClass: "Equities", weightPct: 15, rationale: "AI compute monopoly." },
-        { symbol: "TSLA", name: "Tesla", assetClass: "Equities", weightPct: 10, rationale: "EV and robotics optionality." },
-        { symbol: "QQQ", name: "Invesco QQQ Trust", assetClass: "ETFs", weightPct: 10, rationale: "Concentrated tech beta." },
-        { symbol: "USD", name: "Cash Reserve", assetClass: "Cash", weightPct: 5, rationale: "Tactical reserve." },
-      ],
-    },
-  ];
+function normaliseWeights(picks: StrategyPick[]): StrategyPick[] {
+  const total = picks.reduce((s, p) => s + p.weightPct, 0);
+  if (Math.abs(total - 100) < 0.5) return picks;
+  return picks.map(p => ({ ...p, weightPct: parseFloat(((p.weightPct / total) * 100).toFixed(1)) }));
 }
 
-export async function generateStrategyOptions(): Promise<GeneratedOption[]> {
-  const profile = await getProfile();
+export async function generateStrategyOptions(
+  params: GenerateStrategyParams
+): Promise<StrategyResult> {
+  const riskToIdx: Record<string, number> = { low: 0, medium: 1, high: 2 };
+  const cacheKey = CacheKey.strategyOptions();
 
-  const userPrompt = [
-    `Investor goals:`,
-    `- Total capital: $${profile.totalCapital.toLocaleString()}`,
-    `- Target annual return: ${profile.targetReturnPct}%`,
-    `- Time horizon: ${profile.timeHorizonMonths} months`,
-    `- Stated risk tolerance: ${profile.riskTolerance}`,
-    ``,
-    `Generate three distinct portfolio strategy options spanning Low, Medium and High risk levels.`,
-    `Each option must contain 5-8 specific holdings using REAL ticker symbols (e.g. BTC, ETH, SOL, AAPL, MSFT, NVDA, TSLA, GOOG, VOO, QQQ, SPY, BND, GLD, USD).`,
-    `Each pick's assetClass must be one of: Crypto, Equities, ETFs, Bonds, Commodities, Cash.`,
-    `Weights within an option must sum to exactly 100. Provide a one-sentence rationale per pick.`,
-  ].join("\n");
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: MODEL,
-      max_completion_tokens: 8192,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "strategy_options",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["options"],
-            properties: {
-              options: {
-                type: "array",
-                minItems: 3,
-                maxItems: 3,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "name",
-                    "summary",
-                    "riskLevel",
-                    "expectedReturnPct",
-                    "picks",
-                  ],
-                  properties: {
-                    name: { type: "string" },
-                    summary: { type: "string" },
-                    riskLevel: {
-                      type: "string",
-                      enum: ["Low", "Medium", "High"],
-                    },
-                    expectedReturnPct: { type: "number" },
-                    picks: {
-                      type: "array",
-                      minItems: 5,
-                      maxItems: 8,
-                      items: {
-                        type: "object",
-                        additionalProperties: false,
-                        required: [
-                          "symbol",
-                          "name",
-                          "assetClass",
-                          "weightPct",
-                          "rationale",
-                        ],
-                        properties: {
-                          symbol: { type: "string" },
-                          name: { type: "string" },
-                          assetClass: {
-                            type: "string",
-                            enum: [
-                              "Crypto",
-                              "Equities",
-                              "ETFs",
-                              "Bonds",
-                              "Commodities",
-                              "Cash",
-                            ],
-                          },
-                          weightPct: { type: "number" },
-                          rationale: { type: "string" },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a senior multi-asset portfolio strategist. Always return strict JSON matching the requested schema.",
-        },
-        { role: "user", content: userPrompt },
-      ],
-    });
-
-    const raw = completion.choices[0]?.message?.content;
-    if (!raw) throw new Error("Empty model response");
-    const parsed = JSON.parse(raw) as { options: GeneratedOption[] };
-    if (!Array.isArray(parsed.options) || parsed.options.length < 3) {
-      throw new Error("Model returned fewer than 3 options");
+  if (!params.forceRefresh) {
+    const stored = (cache as any).getStore().get(cacheKey);
+    if (stored && Date.now() < stored.expiresAt) {
+      return { ...(stored.data as StrategyResult), fromCache: true };
     }
-    return parsed.options.slice(0, 3).map(normalizeOption);
-  } catch (err) {
-    logger.error({ err }, "generateStrategyOptions failed, using fallback");
-    return fallbackOptions().map(normalizeOption);
   }
+
+  const now = new Date().toISOString();
+
+  const systemContext = [
+    "You are a portfolio strategist. Generate exactly 3 investment strategy options.",
+    "Use real tickers only. weightPct per option must sum to 100.",
+    "Each pick needs: symbol, name (full company/fund name), assetClass, weightPct (number), rationale (1 sentence).",
+    "expectedReturnPct must be a number (e.g. 12.5 not '12.5%').",
+    "Summary max 2 sentences. Diversify across asset classes.",
+    `Today: ${new Date().toUTCString()}.`,
+  ].join(" ");
+
+  const prompt = [
+    `Generate 3 strategies (low/medium/high risk) for ${params.riskTolerance} risk investor.`,
+    params.investmentGoalUsd ? `Goal: $${params.investmentGoalUsd.toLocaleString()}.` : "",
+    params.monthlyBudgetUsd  ? `Monthly budget: $${params.monthlyBudgetUsd}.` : "",
+    params.currentHoldings?.length ? `Current holdings: ${params.currentHoldings.join(", ")}.` : "",
+    `recommendedIndex: ${riskToIdx[params.riskTolerance]}.`,
+  ].filter(Boolean).join(" ");
+
+  const res = await llm.json<Pick<StrategyResult,"options"|"recommendedIndex">>({
+    taskType: "strategy_generation",
+    systemContext, prompt,
+    schema:   SCHEMA,
+    fallback: buildFallback(),
+  });
+
+  const options: StrategyOption[] = res.data.options.map(opt => ({
+    ...opt,
+    expectedReturnPct: typeof opt.expectedReturnPct === "number"
+      ? opt.expectedReturnPct
+      : parseFloat(String(opt.expectedReturnPct)) || 0,
+    generatedAt: now,
+    picks: normaliseWeights(opt.picks),
+  }));
+
+  const result: StrategyResult = {
+    options,
+    recommendedIndex: res.data.recommendedIndex ?? riskToIdx[params.riskTolerance],
+    fromCache: false,
+    generatedAt: now,
+  };
+
+  await cache.get(cacheKey, TTL.STRATEGY_OPTIONS, async () => result);
+  return result;
 }

@@ -1,73 +1,115 @@
-import { Router, type IRouter } from "express";
-import { asc } from "drizzle-orm";
-import { db, assistantMessagesTable } from "@workspace/db";
+import { Router }                       from "express";
+import { desc }                         from "drizzle-orm";
 import {
-  ListAssistantMessagesResponse,
-  SendAssistantMessageBody,
-  SendAssistantMessageResponse,
-  RunCommandBody,
-  RunCommandResponse,
-} from "@workspace/api-zod";
-import { generateAssistantReply } from "../lib/aiResponder";
+  db,
+  assistantMessagesTable,
+  profileTable,
+  holdingsTable,
+  targetAllocationsTable,
+  strategyOptionsTable,
+} from "@workspace/db";
+import {
+  generateAssistantReply,
+  getCachedContext,
+  type AssistantContext,
+} from "../lib/aiResponder";
+import { approvalGate } from "../lib/approvalGate";
 
-const router: IRouter = Router();
+const router = Router();
 
-function serialize(m: typeof assistantMessagesTable.$inferSelect) {
-  return {
-    id: String(m.id),
-    role: m.role,
-    content: m.content,
-    createdAt: m.createdAt.toISOString(),
-  };
+// Build context from DB — cached 60s by getCachedContext
+async function buildContext(): Promise<AssistantContext> {
+  return getCachedContext(async () => {
+    const [profile, holdings, allocations, strategy, config] = await Promise.all([
+      db.select().from(profileTable).limit(1).then(r => r[0]),
+      db.select().from(holdingsTable),
+      db.select().from(targetAllocationsTable),
+      db.select().from(strategyOptionsTable).limit(1).then(r => r[0]),
+      approvalGate.getConfig(),
+    ]);
+
+    return {
+      profile: {
+        name:             profile?.name           ?? "Investor",
+        riskTolerance:    (profile?.riskTolerance ?? "medium") as "low" | "medium" | "high",
+        investmentGoal:   `Target return: ${profile?.targetReturnPct ?? 10}% over ${profile?.timeHorizonMonths ?? 12} months`,
+        monthlyBudgetUsd: undefined,
+      },
+      totalPortfolioUsd:    holdings.reduce((s, h) => s + h.quantity * h.price, 0),
+      availableCashUsd:     0,
+      holdings:             holdings.map(h => ({
+        symbol:           h.symbol,
+        assetClass:       h.assetClass,
+        currentValueUsd:  h.quantity * h.price,
+        unrealisedPnlPct: h.change24hPct ?? 0,
+      })),
+      targetAllocations:    Object.fromEntries(
+        allocations.map(a => [a.assetClass, a.targetPct])
+      ),
+      activeStrategy:       profile?.strategyType      ?? "Balanced Growth",
+      rebalancingStatus:    "on_track"                 as const,
+      operationMode:        config.mode,
+      approvalThresholdUsd: config.thresholdUsd,
+    };
+  });
 }
 
-router.get("/assistant/messages", async (_req, res): Promise<void> => {
-  const msgs = await db
-    .select()
-    .from(assistantMessagesTable)
-    .orderBy(asc(assistantMessagesTable.createdAt));
-  res.json(ListAssistantMessagesResponse.parse(msgs.map(serialize)));
-});
-
+// POST /api/assistant/messages
 router.post("/assistant/messages", async (req, res): Promise<void> => {
-  const parsed = SendAssistantMessageBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
+  try {
+    const { message, history = [] } = req.body as {
+      message: string;
+      history?: Array<{ role: "user" | "assistant"; content: string }>;
+    };
+
+    if (!message?.trim()) {
+      res.status(400).json({ error: "message is required" });
+      return;
+    }
+
+    const ctx   = await buildContext();
+    const reply = await generateAssistantReply(message, ctx, history);
+
+    // Persist both messages (non-fatal if it fails)
+    await db.insert(assistantMessagesTable).values({ role: "user",      content: message       }).catch(() => {});
+    await db.insert(assistantMessagesTable).values({ role: "assistant", content: reply.message }).catch(() => {});
+
+    res.json({ message: reply.message, meta: reply._meta });
+  } catch (err: any) {
+    console.error("[assistant] Error:", err);
+    res.status(500).json({ error: err.message });
   }
-  const content = parsed.data.content.trim();
-  if (!content) {
-    res.status(400).json({ error: "content cannot be empty" });
-    return;
-  }
-
-  const [userMessage] = await db
-    .insert(assistantMessagesTable)
-    .values({ role: "user", content })
-    .returning();
-
-  const reply = await generateAssistantReply(content);
-  const [assistantMessage] = await db
-    .insert(assistantMessagesTable)
-    .values({ role: "assistant", content: reply })
-    .returning();
-
-  res.json(
-    SendAssistantMessageResponse.parse({
-      userMessage: serialize(userMessage!),
-      assistantMessage: serialize(assistantMessage!),
-    }),
-  );
 });
 
+// POST /api/command
 router.post("/command", async (req, res): Promise<void> => {
-  const parsed = RunCommandBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
+  try {
+    const { command } = req.body as { command: string };
+    if (!command?.trim()) {
+      res.status(400).json({ error: "command is required" });
+      return;
+    }
+    const ctx   = await buildContext();
+    const reply = await generateAssistantReply(command, ctx);
+    res.json({ reply: reply.message, meta: reply._meta });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
-  const reply = await generateAssistantReply(parsed.data.prompt);
-  res.json(RunCommandResponse.parse({ reply }));
+});
+
+// GET /api/assistant/messages
+router.get("/assistant/messages", async (req, res): Promise<void> => {
+  try {
+    const limit    = Math.min(parseInt((req.query.limit as string) ?? "50", 10), 200);
+    const messages = await db
+      .select()
+      .from(assistantMessagesTable)
+      .orderBy(desc(assistantMessagesTable.id))
+      .limit(limit);
+    res.json({ messages: messages.reverse() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
