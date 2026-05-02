@@ -3,8 +3,59 @@ import { cache, CacheKey }               from "../lib/contextCache";
 import { runScan }                        from "../lib/marketScanner";
 import { rebalanceNow }                  from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
+import { approvalGate }                  from "../lib/approvalGate";
 
 const router = Router();
+
+// GET /api/mode — current operation mode + threshold
+router.get("/mode", async (_req, res): Promise<void> => {
+  try {
+    const config = await approvalGate.getConfig();
+    res.json({ mode: config.mode, thresholdUsd: config.thresholdUsd });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /api/mode — set mode: { mode: "autonomous" | "approval" }
+router.post("/mode", async (req, res): Promise<void> => {
+  const { mode } = req.body as { mode?: "autonomous" | "approval" };
+  if (mode !== "autonomous" && mode !== "approval") {
+    res.status(400).json({ error: "mode must be 'autonomous' or 'approval'" });
+    return;
+  }
+  try {
+    await approvalGate.setMode(mode);
+    res.json({ ok: true, mode });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// GET /api/scan/signals — alias for latest cached scan results
+router.get("/scan/signals", async (_req, res): Promise<void> => {
+  try {
+    const result = await runScan();
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
+
+// POST /api/scan/signals — force a fresh scan and return signals
+router.post("/scan/signals", async (_req, res): Promise<void> => {
+  try {
+    cache.invalidate(CacheKey.marketScan());
+    const result = await runScan();
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ error: msg });
+  }
+});
 
 // POST /api/scan/run — trigger immediate scan
 router.post("/scan/run", async (_req, res): Promise<void> => {
