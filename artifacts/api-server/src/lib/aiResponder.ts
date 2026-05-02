@@ -6,7 +6,39 @@
 import { llm, type TaskType } from "./llmRouter";
 import { cache, TTL, CacheKey } from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
-import { db, profileTable } from "@workspace/db";
+import { db, profileTable, holdingsTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
+import { closePosition as etoroClose, getPortfolio } from "../brokers/etoro";
+
+interface EtoroPos {
+  positionId?: string | number;
+  symbol?: string;
+  investedAmount?: number;
+  profit?: number;
+  isBuy?: boolean;
+  assetClass?: string;
+}
+interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
+
+export async function syncHoldingsFromEtoro(): Promise<void> {
+  const portfolio = (await getPortfolio()) as EtoroPortfolio;
+  const positions = portfolio?.positions ?? [];
+  await db.delete(holdingsTable);
+  for (const p of positions) {
+    if (!p.symbol) continue;
+    const value = p.investedAmount ?? 0;
+    await db.insert(holdingsTable).values({
+      symbol:       p.symbol.toUpperCase(),
+      name:         p.symbol.toUpperCase(),
+      assetClass:   p.assetClass ?? "Equity",
+      quantity:     value,
+      price:        1,
+      change24hPct: p.profit && p.investedAmount
+        ? (p.profit / p.investedAmount) * 100
+        : 0,
+    });
+  }
+}
 
 export interface AssistantProfile {
   name:             string;
@@ -111,6 +143,64 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
   };
 }
 
+async function parseCloseSymbol(message: string): Promise<string | null> {
+  const res = await llm.json<{ symbol: string | null }>({
+    taskType:      "command_parse",
+    systemContext: "Extract the ticker symbol the user wants to close/exit. Reply JSON only.",
+    prompt:        `Message: "${message.slice(0, 200)}"\nReturn: {"symbol":"TICKER"} or {"symbol":null} if unclear.`,
+    schema: {
+      type: "object",
+      properties: { symbol: { type: ["string", "null"] } },
+    },
+    fallback: { symbol: null },
+  });
+  const sym = res.data.symbol;
+  return sym ? sym.toUpperCase() : null;
+}
+
+async function handleClosePosition(symbol: string): Promise<string> {
+  let portfolio: EtoroPortfolio;
+  try {
+    portfolio = (await getPortfolio()) as EtoroPortfolio;
+  } catch (err) {
+    return `❌ Could not fetch portfolio: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  const positions = portfolio?.positions ?? [];
+  const pos = positions.find(p =>
+    (p.symbol ?? "").toUpperCase() === symbol ||
+    String(p.positionId ?? "") === symbol
+  );
+
+  if (!pos) {
+    // Also remove from local holdings if present
+    await db.delete(holdingsTable).where(eq(holdingsTable.symbol, symbol));
+    return `⚠️ No open position found for ${symbol} on eToro. Local holding removed if it existed.`;
+  }
+
+  const posId = String(pos.positionId ?? "");
+  try {
+    await etoroClose(posId);
+  } catch (err) {
+    return `❌ Failed to close ${symbol}: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  const invested = pos.investedAmount ?? 0;
+  const profit   = pos.profit ?? 0;
+  const pnlSign  = profit >= 0 ? "+" : "";
+
+  // Remove from local holdings
+  await db.delete(holdingsTable).where(eq(holdingsTable.symbol, symbol));
+
+  return [
+    `✅ CLOSED ${symbol}`,
+    `Position ID: ${posId}`,
+    `Invested: $${invested.toFixed(2)}`,
+    `P/L: ${pnlSign}$${profit.toFixed(2)}`,
+    `Holdings: ${symbol} removed`,
+  ].join("\n");
+}
+
 async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<string> {
   const proposal = buildProposal({
     symbol:     trade.symbol,
@@ -118,7 +208,6 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     amountUsd:  trade.amountUsd,
     assetClass: trade.assetClass,
     rationale:  "NL instruction via assistant",
-    broker:     trade.broker,
   });
 
   const result = await approvalGate.submit(proposal);
@@ -133,12 +222,23 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
   if (result.action === "executed") {
     const leverage = trade.assetClass === "Crypto" ? 50 : 20;
     const exposure = (trade.amountUsd * leverage).toFixed(0);
+
+    // Sync local DB from eToro so /positions is immediately accurate
+    await syncHoldingsFromEtoro().catch(() => {});
+
+    const [holding] = await db.select().from(holdingsTable)
+      .where(eq(holdingsTable.symbol, trade.symbol)).limit(1);
+    const holdingLine = holding
+      ? `Holdings: ${trade.symbol} $${(holding.quantity * holding.price).toFixed(2)}`
+      : `Holdings: ${trade.symbol} $${trade.amountUsd}`;
+
     return [
       `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
       `Order ID: ${result.orderId ?? "N/A"}`,
       `Amount: $${trade.amountUsd} at ${leverage}x`,
       `Exposure: $${exposure}`,
       `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
+      holdingLine,
     ].join("\n");
   }
   return `❌ Execution failed: ${result.message}`;
@@ -202,6 +302,19 @@ export async function generateAssistantReply(
 
   // For trade requests: parse → execute → return status directly
   if (intent === "trade_request") {
+    // Check if it's a close/exit intent first
+    const closeLower = message.toLowerCase();
+    const isClose = /\b(close|exit|sell out|liquidate)\b/.test(closeLower) &&
+      !/\bshort\b/.test(closeLower);
+
+    if (isClose) {
+      const sym = await parseCloseSymbol(message);
+      if (sym) {
+        const statusMsg = await handleClosePosition(sym);
+        return { message: statusMsg };
+      }
+    }
+
     const trade = await parseTrade(message);
     if (trade) {
       const [profileRow] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1);

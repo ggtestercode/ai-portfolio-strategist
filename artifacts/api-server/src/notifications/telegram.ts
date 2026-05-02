@@ -3,12 +3,14 @@ import { approvalGate, type PendingApproval } from "../lib/approvalGate";
 import {
   generateAssistantReply,
   getCachedContext,
+  syncHoldingsFromEtoro,
   type AssistantContext,
 } from "../lib/aiResponder";
 import { getPortfolioSnapshot }            from "../lib/portfolio";
 import { runScan, type Recommendation }    from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
+import { getPortfolio }                    from "../brokers/etoro";
 import {
   db,
   profileTable,
@@ -375,6 +377,73 @@ export function startPolling(): void {
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /sync — rebuild local DB from eToro live positions ──────────────────
+  b.onText(/^\/sync(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      await syncHoldingsFromEtoro();
+      const holdings = await db.select().from(holdingsTable);
+      const lines = holdings.length
+        ? holdings.map(h => `• <b>${escapeHtml(h.symbol)}</b> $${(h.quantity * h.price).toFixed(2)}`).join("\n")
+        : "(none)";
+      await b.sendMessage(chatId, [
+        `🔄 <b>Sync complete — ${holdings.length} position(s)</b>`,
+        `<i>${utcNow()}</i>`,
+        ``,
+        lines,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ Sync failed: ${escapeHtml(m)}`);
+    }
+  });
+
+  // ── /positions — live eToro open positions ───────────────────────────────
+  b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      interface EtoroPos {
+        positionId?: string | number;
+        symbol?: string;
+        investedAmount?: number;
+        profit?: number;
+        isBuy?: boolean;
+      }
+      interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
+
+      const portfolio = (await getPortfolio()) as EtoroPortfolio;
+      const positions = portfolio?.positions ?? [];
+
+      if (!positions.length) {
+        await b.sendMessage(chatId,
+          `📊 <b>Open Positions</b>\n\nNo open positions on eToro.\n<i>${utcNow()}</i>`,
+          { parse_mode: "HTML" });
+        return;
+      }
+
+      const lines = positions.map((p, i) => {
+        const side    = p.isBuy !== false ? "LONG" : "SHORT";
+        const invested = (p.investedAmount ?? 0).toFixed(2);
+        const profit  = p.profit ?? 0;
+        const pnlSign = profit >= 0 ? "+" : "";
+        const pnlPct  = p.investedAmount
+          ? ((profit / p.investedAmount) * 100).toFixed(1)
+          : "0.0";
+        return `${i + 1}. <b>${escapeHtml(p.symbol ?? String(p.positionId))}</b> — $${invested} ${side}, ${pnlSign}$${profit.toFixed(2)} (${pnlSign}${pnlPct}%)`;
+      }).join("\n");
+
+      await b.sendMessage(chatId, [
+        `📊 <b>Open Positions (${positions.length})</b>`,
+        `<i>${utcNow()}</i>`,
+        ``,
+        lines,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ /positions failed: ${escapeHtml(m)}`);
     }
   });
 
