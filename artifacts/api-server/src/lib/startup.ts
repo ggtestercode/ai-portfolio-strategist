@@ -1,6 +1,7 @@
-import { approvalGate } from "./approvalGate";
-import { openPosition }  from "../brokers/etoro";
-import { placeOrder }    from "../brokers/bybit";
+import { approvalGate }        from "./approvalGate";
+import { openPosition }         from "../brokers/etoro";
+import { placeOrder }           from "../brokers/bybit";
+import { sendApprovalRequest }  from "../notifications/telegram";
 
 export function initBrokers(): void {
   approvalGate.registerExecutor("etoro", async (p) => {
@@ -17,5 +18,8 @@ export function initBrokers(): void {
     return { orderId: result.orderId };
   });
 
+  approvalGate.registerNotifier(sendApprovalRequest);
+
   console.log("[startup] Broker executors registered: etoro, bybit");
+  console.log("[startup] Telegram notifier registered");
 }

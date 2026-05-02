@@ -1,8 +1,10 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { initBrokers } from "./lib/startup";
+import { startPolling } from "./notifications/telegram";
 
 initBrokers();
+startPolling();
 
 const rawPort = process.env["PORT"];
 
