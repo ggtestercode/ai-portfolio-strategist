@@ -6,3 +6,7 @@ export * from "./transactions";
 export * from "./riskAlerts";
 export * from "./assistantMessages";
 export * from "./strategyOptions";
+export * from "./operation";
+export * from "./approvals";
+export * from "./watchlist";
+export * from "./scanSignals";

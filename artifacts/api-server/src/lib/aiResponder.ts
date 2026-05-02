@@ -1,103 +1,122 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
-import { getProfile } from "./profile";
-import {
-  getPortfolioSnapshot,
-  getAllocationRows,
-  getRebalancingActions,
-} from "./portfolio";
-import { logger } from "./logger";
+/**
+ * aiResponder.ts — Drop-in replacement
+ * Same generateAssistantReply signature. Now uses Claude via llmRouter.
+ */
 
-const MODEL = "gpt-5.4";
+import { llm, type TaskType } from "./llmRouter";
+import { cache, TTL, CacheKey } from "./contextCache";
 
-const fmtUsd = (n: number) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(n);
+export interface AssistantProfile {
+  name:             string;
+  riskTolerance:    "low" | "medium" | "high";
+  investmentGoal:   string;
+  monthlyBudgetUsd?: number;
+}
 
-const fmtPct = (n: number) => `${n > 0 ? "+" : ""}${n.toFixed(1)}%`;
+export interface AssistantHolding {
+  symbol:           string;
+  assetClass:       string;
+  currentValueUsd:  number;
+  unrealisedPnlPct: number;
+}
 
-async function buildPortfolioContext(): Promise<string> {
-  const profile = await getProfile();
-  const snap = await getPortfolioSnapshot(profile.totalCapital);
-  const allocation = await getAllocationRows();
-  const rebal = await getRebalancingActions();
+export interface AssistantContext {
+  profile:              AssistantProfile;
+  totalPortfolioUsd:    number;
+  availableCashUsd:     number;
+  holdings:             AssistantHolding[];
+  targetAllocations:    Record<string, number>;
+  activeStrategy:       string;
+  rebalancingStatus:    "on_track" | "needs_rebalance";
+  operationMode:        "autonomous" | "approval";
+  approvalThresholdUsd: number;
+}
 
-  const allocationLines = allocation
-    .map(
-      (a) =>
-        `  - ${a.assetClass}: ${a.currentPct.toFixed(1)}% current vs ${a.targetPct.toFixed(1)}% target (${a.status})`,
-    )
-    .join("\n");
+export interface AssistantReply {
+  message: string;
+  _meta?: {
+    model:            string;
+    taskType:         string;
+    estimatedCostUsd: number;
+    cachedTokens:     number;
+    latencyMs:        number;
+  };
+}
 
-  const rebalLines =
-    rebal.length === 0
-      ? "  (none — allocation within target bands)"
-      : rebal
-          .map((r) => `  - ${r.actionType} ${fmtUsd(r.amount)} of ${r.asset}`)
-          .join("\n");
+type Intent =
+  | "simple_question" | "trade_request" | "strategy_request"
+  | "rebalance_request" | "mode_change" | "risk_question" | "performance_query";
 
+const INTENT_TO_TASK: Record<Intent, TaskType> = {
+  simple_question:   "assistant_reply",
+  trade_request:     "trade_decision",
+  strategy_request:  "strategy_generation",
+  rebalance_request: "rebalance_plan",
+  mode_change:       "assistant_reply",
+  risk_question:     "risk_alert",
+  performance_query: "performance_analysis",
+};
+
+async function detectIntent(message: string): Promise<Intent> {
+  const res = await llm.json<{ intent: Intent }>({
+    taskType:      "command_parse",
+    systemContext: "You classify trading assistant messages. Reply JSON only.",
+    prompt:        `Classify intent: "${message.slice(0, 200)}"`,
+    schema: {
+      type: "object", required: ["intent"],
+      properties: { intent: { type: "string",
+        enum: ["simple_question","trade_request","strategy_request",
+               "rebalance_request","mode_change","risk_question","performance_query"] } },
+    },
+    fallback: { intent: "simple_question" as Intent },
+  });
+  return res.data.intent;
+}
+
+function buildSystemPrompt(ctx: AssistantContext): string {
+  const holdings = ctx.holdings.length
+    ? ctx.holdings.map(h =>
+        `${h.symbol}($${h.currentValueUsd.toFixed(0)},${h.unrealisedPnlPct >= 0 ? "+" : ""}${h.unrealisedPnlPct.toFixed(1)}%)`
+      ).join(" | ")
+    : "none";
+  const allocs = Object.entries(ctx.targetAllocations)
+    .map(([k, v]) => `${k}:${v}%`).join(", ");
   return [
-    `Investor profile:`,
-    `  Name: ${profile.name}`,
-    `  Total capital: ${fmtUsd(profile.totalCapital)}`,
-    `  Target return: ${profile.targetReturnPct}% over ${profile.timeHorizonMonths} months`,
-    `  Risk tolerance: ${profile.riskTolerance}`,
-    `Active strategy: "${profile.strategyType}" (${profile.strategyRiskLevel} risk)`,
-    `Strategy rules:`,
-    ...profile.strategyKeyRules.map((r) => `  - ${r}`),
-    ``,
-    `Portfolio snapshot:`,
-    `  Total value: ${fmtUsd(snap.totalValue)}`,
-    `  Total P/L: ${fmtUsd(snap.totalProfitLoss)} (${fmtPct(snap.totalProfitLossPct)})`,
-    `  24h change: ${fmtUsd(snap.change24h)} (${fmtPct(snap.change24hPct)})`,
-    ``,
-    `Allocation vs target:`,
-    allocationLines,
-    ``,
-    `Pending rebalancing actions:`,
-    rebalLines,
+    `You are an AI portfolio assistant for ${ctx.profile.name}.`,
+    `Risk: ${ctx.profile.riskTolerance}. Goal: ${ctx.profile.investmentGoal}.`,
+    `Mode: ${ctx.operationMode} (approval threshold: $${ctx.approvalThresholdUsd}).`,
+    `Strategy: ${ctx.activeStrategy} | Status: ${ctx.rebalancingStatus}.`,
+    `Portfolio: $${ctx.totalPortfolioUsd.toFixed(0)} total, $${ctx.availableCashUsd.toFixed(0)} cash.`,
+    `Holdings: ${holdings}.`,
+    `Target allocation: ${allocs}.`,
+    `UTC now: ${new Date().toUTCString()}.`,
+    `Be concise. Cite data timestamps. Never invent prices.`,
   ].join("\n");
 }
 
-export async function generateAssistantReply(prompt: string): Promise<string> {
-  try {
-    const context = await buildPortfolioContext();
-    const completion = await openai.chat.completions.create({
-      model: MODEL,
-      max_completion_tokens: 8192,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You are an AI portfolio strategist embedded in a sophisticated investment dashboard.",
-            "Always answer in 2-5 short sentences using the data provided. Be specific and reference dollar amounts, percentages, and asset names from the context.",
-            "Never invent data the context does not contain. If the user asks for something outside the dashboard, briefly say so and recommend an in-app action.",
-            "Do not use markdown headings or bullet symbols other than '-'. Do not use emojis.",
-            "",
-            "Live portfolio context:",
-            context,
-          ].join("\n"),
-        },
-        { role: "user", content: prompt },
-      ],
-    });
-    const reply = completion.choices[0]?.message?.content?.trim();
-    if (reply) return reply;
-    throw new Error("Empty reply from model");
-  } catch (err) {
-    logger.error({ err }, "generateAssistantReply failed, using fallback");
-    return fallbackReply(prompt);
-  }
+export async function generateAssistantReply(
+  message:  string,
+  ctx:      AssistantContext,
+  history?: Array<{ role: "user" | "assistant"; content: string }>
+): Promise<AssistantReply> {
+  const intent      = await detectIntent(message);
+  const taskType    = INTENT_TO_TASK[intent];
+  const systemContext = buildSystemPrompt(ctx);
+  const res = await llm.chat({ taskType, userMessage: message, systemContext, history });
+  return {
+    message: res.text,
+    _meta: {
+      model:            res.model,
+      taskType:         res.taskType,
+      estimatedCostUsd: res.estimatedCostUsd,
+      cachedTokens:     res.cachedTokens,
+      latencyMs:        res.latencyMs,
+    },
+  };
 }
 
-async function fallbackReply(prompt: string): Promise<string> {
-  const profile = await getProfile();
-  const snap = await getPortfolioSnapshot(profile.totalCapital);
-  return `Your "${profile.strategyType}" strategy is active. Portfolio is ${fmtUsd(
-    snap.totalValue,
-  )} with ${fmtPct(snap.totalProfitLossPct)} total return and ${fmtPct(
-    snap.change24hPct,
-  )} today. (Couldn't reach the live model — please retry: "${prompt.slice(0, 60)}".)`;
+export async function getCachedContext(
+  fetcher: () => Promise<AssistantContext>
+): Promise<AssistantContext> {
+  return cache.get(CacheKey.portfolio(), TTL.PORTFOLIO, fetcher);
 }
