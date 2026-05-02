@@ -5,6 +5,8 @@
 
 import { llm, type TaskType } from "./llmRouter";
 import { cache, TTL, CacheKey } from "./contextCache";
+import { approvalGate, buildProposal } from "./approvalGate";
+import { db, profileTable } from "@workspace/db";
 
 export interface AssistantProfile {
   name:             string;
@@ -73,6 +75,75 @@ async function detectIntent(message: string): Promise<Intent> {
   return res.data.intent;
 }
 
+interface ParsedTrade {
+  symbol:    string;
+  side:      "buy" | "sell";
+  amountUsd: number;
+  broker:    "etoro" | "bybit" | "mock";
+  assetClass: string;
+}
+
+async function parseTrade(message: string): Promise<ParsedTrade | null> {
+  const res = await llm.json<ParsedTrade | { symbol: null }>({
+    taskType:      "command_parse",
+    systemContext: "Extract trade parameters from a natural language message. Reply JSON only. If not a clear trade instruction, return {\"symbol\":null}.",
+    prompt: `Extract from: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER","side":"buy|sell","amountUsd":number,"broker":"etoro|bybit|mock","assetClass":"Equity|Crypto|ETF|Commodity"}`,
+    schema: {
+      type: "object",
+      properties: {
+        symbol:     { type: ["string","null"] },
+        side:       { type: "string", enum: ["buy","sell"] },
+        amountUsd:  { type: "number" },
+        broker:     { type: "string", enum: ["etoro","bybit","mock"] },
+        assetClass: { type: "string" },
+      },
+    },
+    fallback: { symbol: null },
+  });
+  const d = res.data as ParsedTrade & { symbol: string | null };
+  if (!d.symbol || !d.side || !d.amountUsd) return null;
+  return {
+    symbol:     d.symbol.toUpperCase(),
+    side:       d.side,
+    amountUsd:  d.amountUsd,
+    broker:     d.broker ?? "etoro",
+    assetClass: d.assetClass ?? "Equity",
+  };
+}
+
+async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<string> {
+  const proposal = buildProposal({
+    symbol:     trade.symbol,
+    side:       trade.side,
+    amountUsd:  trade.amountUsd,
+    assetClass: trade.assetClass,
+    rationale:  "NL instruction via assistant",
+    broker:     trade.broker,
+  });
+
+  const result = await approvalGate.submit(proposal);
+  const capPct = ((trade.amountUsd / totalCapital) * 100).toFixed(0);
+
+  if (result.action === "rejected") {
+    return `❌ Trade rejected: ${result.message}`;
+  }
+  if (result.action === "queued") {
+    return `⏳ Queued for approval — ${trade.side.toUpperCase()} $${trade.amountUsd} ${trade.symbol} on ${trade.broker}\nApproval ID: ${proposal.id}`;
+  }
+  if (result.action === "executed") {
+    const leverage = trade.assetClass === "Crypto" ? 50 : 20;
+    const exposure = (trade.amountUsd * leverage).toFixed(0);
+    return [
+      `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
+      `Order ID: ${result.orderId ?? "N/A"}`,
+      `Amount: $${trade.amountUsd} at ${leverage}x`,
+      `Exposure: $${exposure}`,
+      `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
+    ].join("\n");
+  }
+  return `❌ Execution failed: ${result.message}`;
+}
+
 async function fetchLivePrices(): Promise<string> {
   try {
     const symbols = "BTC-USD,ETH-USD,SOL-USD,AAPL,NVDA,MSFT";
@@ -109,20 +180,16 @@ function buildSystemPrompt(ctx: AssistantContext, livePrices: string): string {
   const totalCap = ctx.totalPortfolioUsd > 0 ? ctx.totalPortfolioUsd : 200;
   const maxTrade = (totalCap * 0.5).toFixed(0);
   return [
-    `You are an AI portfolio assistant for ${ctx.profile.name}.`,
-    `This investor has EXTREME risk tolerance. They use leverage up to 50x on crypto and 20x on stocks.`,
-    `Target is 50% return per month. Only suggest high-conviction momentum plays.`,
-    `Never suggest conservative or defensive positions. Always include leverage recommendations in trade signals.`,
-    `HARD RULE: Every trade must not exceed 50% of total capital ($${totalCap.toFixed(0)}). Maximum single trade = $${maxTrade}. Always state position size in dollar terms.`,
-    `Risk: ${ctx.profile.riskTolerance}. Goal: ${ctx.profile.investmentGoal}.`,
-    `Mode: ${ctx.operationMode} (approval threshold: $${ctx.approvalThresholdUsd}).`,
-    `Strategy: ${ctx.activeStrategy} | Status: ${ctx.rebalancingStatus}.`,
+    `You are a direct, no-fluff trading assistant for ${ctx.profile.name}.`,
+    `RESPONSE FORMAT: 2-4 sentences max. No headers, no bullet points, no disclaimers, no transparency notes, no risk warnings, no markdown. Plain text only.`,
+    `NEVER question, override, or comment on the investor's risk settings. They are intentional. Do not add safety caveats.`,
+    `This investor runs extreme risk: 50x crypto leverage, 20x stock leverage, 50% monthly return target. Always give actionable buy/sell/hold calls.`,
+    `HARD RULE: Max single trade = $${maxTrade} (50% of $${totalCap.toFixed(0)} capital). Always state position size in dollars.`,
+    `Mode: ${ctx.operationMode}. Strategy: ${ctx.activeStrategy}.`,
     `Portfolio: $${ctx.totalPortfolioUsd.toFixed(0)} total, $${ctx.availableCashUsd.toFixed(0)} cash.`,
     `Holdings: ${holdings}.`,
-    `Target allocation: ${allocs}.`,
     livePrices,
-    `UTC now: ${new Date().toUTCString()}.`,
-    `Be concise. Cite data timestamps.`,
+    `UTC: ${new Date().toUTCString()}.`,
   ].filter(Boolean).join("\n");
 }
 
@@ -132,7 +199,19 @@ export async function generateAssistantReply(
   history?: Array<{ role: "user" | "assistant"; content: string }>
 ): Promise<AssistantReply> {
   const [intent, livePrices] = await Promise.all([detectIntent(message), fetchLivePrices()]);
-  const taskType    = INTENT_TO_TASK[intent];
+
+  // For trade requests: parse → execute → return status directly
+  if (intent === "trade_request") {
+    const trade = await parseTrade(message);
+    if (trade) {
+      const [profileRow] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1);
+      const totalCapital = profileRow?.totalCapital ?? 200;
+      const statusMsg = await executeTrade(trade, totalCapital);
+      return { message: statusMsg };
+    }
+  }
+
+  const taskType      = INTENT_TO_TASK[intent];
   const systemContext = buildSystemPrompt(ctx, livePrices);
   const res = await llm.chat({ taskType, userMessage: message, systemContext, history });
   return {

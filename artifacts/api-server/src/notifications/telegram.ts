@@ -196,15 +196,18 @@ export function startPolling(): void {
     }
   });
 
-  // ── /mode autonomous | /mode approval ────────────────────────────────────
-  b.onText(/^\/mode(?:@\w+)?\s+(autonomous|approval)$/, async (msg, match) => {
+  // ── /mode — show current mode (no arg) or set mode ───────────────────────
+  b.onText(/^\/mode(?:@\w+)?(?:\s+(autonomous|approval))?$/, async (msg, match) => {
     const chatId  = String(msg.chat.id);
     const newMode = match?.[1] as "autonomous" | "approval" | undefined;
-    if (!newMode) {
-      await b.sendMessage(chatId, "Usage: /mode autonomous  or  /mode approval");
-      return;
-    }
     try {
+      if (!newMode) {
+        const { mode, thresholdUsd } = await approvalGate.getConfig();
+        await b.sendMessage(chatId,
+          `⚙️ <b>Operation Mode</b>\n\nCurrent mode: <b>${mode}</b>\nApproval threshold: <b>$${thresholdUsd}</b>\n\nTo change: /mode autonomous  or  /mode approval`,
+          { parse_mode: "HTML" });
+        return;
+      }
       await approvalGate.setMode(newMode);
       await b.sendMessage(chatId,
         `⚙️ Mode set to <b>${newMode}</b>\n<i>${utcNow()}</i>`,
@@ -340,6 +343,34 @@ export function startPolling(): void {
         removed
           ? `✅ <b>${escapeHtml(symbol)}</b> removed from watchlist.\n<i>${utcNow()}</i>`
           : `⚠️ <b>${escapeHtml(symbol)}</b> was not in the watchlist.`,
+        { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /capital [amount] — view or update totalCapital ─────────────────────
+  b.onText(/^\/capital(?:\s+(.+))?$/i, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const arg = match?.[1]?.trim();
+      if (!arg) {
+        const [row] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1);
+        const cap = row?.totalCapital ?? 0;
+        await b.sendMessage(chatId,
+          `💰 <b>Capital</b>\n\nTotal capital: <b>$${cap.toLocaleString()}</b>\nMax single trade: <b>$${(cap * 0.5).toLocaleString()}</b> (50% limit)`,
+          { parse_mode: "HTML" });
+        return;
+      }
+      const amount = parseFloat(arg.replace(/[$,]/g, ""));
+      if (isNaN(amount) || amount <= 0) {
+        await b.sendMessage(chatId, "❌ Invalid amount. Usage: <code>/capital 500</code>", { parse_mode: "HTML" });
+        return;
+      }
+      await db.update(profileTable).set({ totalCapital: amount });
+      await b.sendMessage(chatId,
+        `✅ <b>Capital updated</b>\n\nTotal capital: <b>$${amount.toLocaleString()}</b>\nMax single trade: <b>$${(amount * 0.5).toLocaleString()}</b> (50% limit)\n\n<i>${utcNow()}</i>`,
         { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);

@@ -24,7 +24,7 @@ async function main() {
     name: "Alex Morgan",
     email: "alex@portfolio.ai",
     avatarUrl: null,
-    totalCapital: 110000,
+    totalCapital: 200,
     targetReturnPct: 50,
     timeHorizonMonths: 1,
     riskTolerance: "extreme",
