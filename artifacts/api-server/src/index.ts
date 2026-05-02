@@ -1,5 +1,8 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { initBrokers } from "./lib/startup";
+
+initBrokers();
 
 const rawPort = process.env["PORT"];
 
