@@ -178,6 +178,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.91.1
         version: 0.91.1(zod@4.3.6)
+      '@types/node-cron':
+        specifier: ^3.0.11
+        version: 3.0.11
       '@workspace/api-zod':
         specifier: workspace:*
         version: link:../../lib/api-zod
@@ -205,6 +208,9 @@ importers:
       express:
         specifier: ^5
         version: 5.2.1
+      node-cron:
+        specifier: ^4.2.1
+        version: 4.2.1
       node-telegram-bot-api:
         specifier: ^0.67.0
         version: 0.67.0
@@ -1771,6 +1777,9 @@ packages:
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
 
+  '@types/node-cron@3.0.11':
+    resolution: {integrity: sha512-0ikrnug3/IyneSHqCBeslAhlK2aBfYek1fGo4bP4QnZPmiqSGRK+Oy7ZMisLWkesffJvQ1cqAcBnJC+8+nxIAg==}
+
   '@types/node-telegram-bot-api@0.64.14':
     resolution: {integrity: sha512-Nq1LAAw4PGpR8Vii5F7uGlAaAFmaT3cPIt7mUZv6VrftPsrt9xjmnhXD9hoKFstAzn/a5ZCr+ksbkmK+QBhZiA==}
 
@@ -3229,6 +3238,10 @@ packages:
     peerDependencies:
       react: ^16.8 || ^17 || ^18 || ^19 || ^19.0.0-rc
       react-dom: ^16.8 || ^17 || ^18 || ^19 || ^19.0.0-rc
+
+  node-cron@4.2.1:
+    resolution: {integrity: sha512-lgimEHPE/QDgFlywTd8yTR61ptugX3Qer29efeyWw2rv259HtGBNn1vZVmp8lB9uo9wC0t/AT4iGqXxia+CJFg==}
+    engines: {node: '>=6.0.0'}
 
   node-releases@2.0.36:
     resolution: {integrity: sha512-TdC8FSgHz8Mwtw9g5L4gR/Sh9XhSP/0DEkQxfEFXOpiul5IiHgHan2VhYYb6agDSfp4KuvltmGApc8HMgUrIkA==}
@@ -5561,6 +5574,8 @@ snapshots:
   '@types/json-schema@7.0.15':
     optional: true
 
+  '@types/node-cron@3.0.11': {}
+
   '@types/node-telegram-bot-api@0.64.14':
     dependencies:
       '@types/node': 25.3.5
@@ -7047,6 +7062,8 @@ snapshots:
     dependencies:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
+
+  node-cron@4.2.1: {}
 
   node-releases@2.0.36: {}
 

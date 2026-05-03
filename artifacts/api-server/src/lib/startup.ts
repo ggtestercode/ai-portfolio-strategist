@@ -1,12 +1,14 @@
 import { approvalGate }        from "./approvalGate";
 import { openPosition }         from "../brokers/etoro";
 import { placeOrder }           from "../brokers/bybit";
-import { openPosition as okxOpen } from "../brokers/okx";
+import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
+import { openPositionPaper }    from "../brokers/okxPaper";
 import { sendApprovalRequest }  from "../notifications/telegram";
-import { scheduleScan }         from "./marketScanner";
 import { checkAndRebalance }    from "./rebalancer";
 
-export function initBrokers(): void {
+export let okxPaperMode = false;
+
+export async function initBrokers(): Promise<void> {
   approvalGate.registerExecutor("etoro", async (p) => {
     const result = await openPosition(p.symbol, p.amountUsd, p.side === "buy");
     return { orderId: result.positionId };
@@ -21,14 +23,28 @@ export function initBrokers(): void {
     return { orderId: result.orderId };
   });
 
-  approvalGate.registerExecutor("okx", async (p) => {
-    const result = await okxOpen(p.symbol, p.side, p.amountUsd);
-    return { orderId: result.orderId };
-  });
+  // Probe OKX credentials; fall back to paper trading if keys are invalid
+  const { ok } = await testConnection().catch(() => ({ ok: false }));
+  if (ok) {
+    await setPositionMode("long_short_mode").catch(e =>
+      console.warn("[startup] OKX set-position-mode failed:", e.message)
+    );
+    approvalGate.registerExecutor("okx", async (p) => {
+      const result = await okxOpen(p.symbol, p.side, p.amountUsd);
+      return { orderId: result.orderId };
+    });
+    console.log("[startup] OKX: live API keys verified ✅");
+  } else {
+    okxPaperMode = true;
+    approvalGate.registerExecutor("okx", async (p) => {
+      const result = await openPositionPaper(p.symbol, p.side, p.amountUsd);
+      return { orderId: result.orderId };
+    });
+    console.log("[startup] OKX: keys rejected — paper trading mode activated 📄");
+  }
 
   approvalGate.registerNotifier(sendApprovalRequest);
 
-  scheduleScan();
   checkAndRebalance().catch(e => console.error("[startup] Initial rebalance check failed:", e));
 
   console.log("[startup] Broker executors registered: etoro, bybit, okx");

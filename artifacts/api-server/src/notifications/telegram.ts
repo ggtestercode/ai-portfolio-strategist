@@ -8,7 +8,7 @@ import {
   type AssistantContext,
 } from "../lib/aiResponder";
 import { getPortfolioSnapshot }            from "../lib/portfolio";
-import { runScan, type Recommendation }    from "../lib/marketScanner";
+import { runScan, type Recommendation, type ScanResult } from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
 import { getPortfolio, getOrders as etoroGetOrders } from "../brokers/etoro";
@@ -23,6 +23,14 @@ import {
   getBalancePaper,
 } from "../brokers/okxPaper";
 import { okxPaperMode } from "../lib/startup";
+import {
+  registerScanNotifier,
+  registerAlertNotifier,
+  setCronEnabled,
+  resumeTrading,
+  triggerNow,
+  getStatus as getCronStatus,
+} from "../lib/cronScanner";
 import {
   db,
   profileTable,
@@ -164,8 +172,45 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
   }
 };
 
+// ── Cron scanner notification ────────────────────────────────────────────────
+
+async function notifyScanComplete(result: ScanResult, triggered: "cron" | "manual"): Promise<void> {
+  const label = triggered === "manual" ? "Manual Scan" : "Auto Scan";
+  const top   = result.opportunities.slice(0, 5);
+
+  if (!top.length) {
+    await send(
+      `🔍 <b>${label}</b> — No signals found\n<i>${utcNow()}</i>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const lines = top.map((o, i) => {
+    const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
+    return [
+      `${i + 1}. ${emoji} <b>${escapeHtml(o.symbol)}</b> — ${o.recommendation} (${o.score})`,
+      `$${o.price.toLocaleString("en-US", { maximumFractionDigits: 4 })} · <i>${new Date(o.dataTimestamp).toUTCString()}</i>`,
+      escapeHtml(o.reasoning),
+    ].join("\n");
+  }).join("\n\n");
+
+  await send([
+    `🔍 <b>${label} Results</b>`,
+    `<i>${new Date(result.scanTimestamp).toUTCString()}</i>`,
+    ``,
+    lines,
+    ``,
+    `<i>${escapeHtml(result.summary)}</i>`,
+  ].join("\n"), { parse_mode: "HTML" });
+}
+
 export function startPolling(): void {
   const b = getBot();
+
+  // Register cron scanner callbacks
+  registerScanNotifier(notifyScanComplete);
+  registerAlertNotifier(async (msg) => send(escapeHtml(msg), { parse_mode: "HTML" }));
 
   // ── Inline button callbacks — approve / reject ───────────────────────────
   b.on("callback_query", async (query) => {
@@ -675,6 +720,64 @@ export function startPolling(): void {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`);
     }
+  });
+
+  // ── /autoscan [on|off|now|status] ────────────────────────────────────────
+  b.onText(/^\/autoscan(?:@\w+)?(?:\s+(on|off|now|status))?$/i, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    const arg    = match?.[1]?.toLowerCase();
+    try {
+      if (!arg || arg === "status") {
+        const s       = getCronStatus();
+        const lastStr = s.lastScan
+          ? s.lastScan.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
+          : "Never";
+        const lines = [
+          `🤖 <b>Auto-Scanner</b>`,
+          ``,
+          `Cron:    <b>${s.enabled ? "✅ Enabled" : "⏸ Disabled"}</b>`,
+          `Trading: <b>${s.paused  ? "🛑 Paused"  : "▶️ Active"}</b>`,
+          `Schedule: <code>${escapeHtml(s.interval)}</code>`,
+          `Last scan: ${lastStr}`,
+        ];
+        if (s.paused && s.pausedReason) {
+          lines.push(``, escapeHtml(s.pausedReason));
+        }
+        lines.push(``, `Commands: /autoscan on · off · now`);
+        await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
+        return;
+      }
+      if (arg === "on") {
+        setCronEnabled(true);
+        await b.sendMessage(chatId,
+          `✅ <b>Auto-scanner enabled</b>\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
+        return;
+      }
+      if (arg === "off") {
+        setCronEnabled(false);
+        await b.sendMessage(chatId,
+          `⏸ <b>Auto-scanner disabled</b>\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
+        return;
+      }
+      if (arg === "now") {
+        await b.sendMessage(chatId,
+          `🔍 Triggering scan now… <i>(~20 s)</i>`, { parse_mode: "HTML" });
+        triggerNow().catch(e => console.error("[telegram] /autoscan now:", e));
+        return;
+      }
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /resume — override daily loss limit pause ─────────────────────────────
+  b.onText(/^\/resume(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    resumeTrading();
+    await b.sendMessage(chatId,
+      `▶️ <b>Trading resumed</b> — daily loss limit overridden\n<i>${utcNow()}</i>`,
+      { parse_mode: "HTML" });
   });
 
   // ── Free-text NL — route to AI assistant ─────────────────────────────────
