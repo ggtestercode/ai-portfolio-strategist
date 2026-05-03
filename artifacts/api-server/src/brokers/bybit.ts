@@ -1,11 +1,12 @@
 import { createHmac } from "crypto";
 
 // ── Config ────────────────────────────────────────────────────────────────────
-function BASE(): string {
-  if (process.env["BYBIT_TRADING_MODE"] === "demo") return "https://api-demo.bybit.com";
-  if (process.env["BYBIT_TESTNET"] === "true")       return "https://api-testnet.bybit.com";
-  return "https://api.bybit.com";
-}
+const BYBIT_TRADING_MODE = process.env["BYBIT_TRADING_MODE"] ?? "testnet";
+const BASE_URL = BYBIT_TRADING_MODE === "live"
+  ? "https://api.bybit.com"
+  : "https://api-testnet.bybit.com";
+
+console.log(`[Bybit] mode=${BYBIT_TRADING_MODE} base=${BASE_URL}`);
 
 function creds() {
   const key    = process.env["BYBIT_API_KEY"];
@@ -25,7 +26,7 @@ async function get<T>(path: string, params: Record<string, string | number> = {}
   const qs  = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   const ts  = Date.now().toString();
   const sig = sign(secret, ts, key, qs);
-  const res = await fetch(`${BASE()}${path}${qs ? "?" + qs : ""}`, {
+  const res = await fetch(`${BASE_URL}${path}${qs ? "?" + qs : ""}`, {
     headers: {
       "X-BAPI-API-KEY": key, "X-BAPI-SIGN": sig,
       "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": RW,
@@ -42,7 +43,7 @@ async function bpost<T>(path: string, body: Record<string, unknown> = {}): Promi
   const bodyStr = JSON.stringify(body);
   const ts      = Date.now().toString();
   const sig     = sign(secret, ts, key, bodyStr);
-  const res = await fetch(`${BASE()}${path}`, {
+  const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
