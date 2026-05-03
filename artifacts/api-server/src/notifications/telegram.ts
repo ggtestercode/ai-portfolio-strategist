@@ -187,9 +187,38 @@ export function startPolling(): void {
         ? await approvalGate.approve(proposalId)
         : await approvalGate.reject(proposalId);
 
-      const icon = action === "approve" ? "✅" : "❌";
-      await b.editMessageText(
-        `${icon} ${escapeHtml(result.message)}\n<i>${utcNow()}</i>`,
+      let replyText: string;
+
+      if (action === "reject") {
+        replyText = `❌ ${escapeHtml(result.message)}\n<i>${utcNow()}</i>`;
+      } else if (result.action === "executed") {
+        const p    = result.proposal;
+        const base = p.symbol.includes("-") ? (p.symbol.split("-")[0] ?? p.symbol) : p.symbol;
+        let qtyLine = "";
+        try {
+          const okxBase = process.env["OKX_BASE_URL"] ?? "https://www.okx.com";
+          const tr = await fetch(
+            `${okxBase}/api/v5/market/ticker?instId=${encodeURIComponent(p.symbol)}`,
+            { signal: AbortSignal.timeout(4000) }
+          );
+          const tj = await tr.json() as { code: string; data: Array<{ last: string }> };
+          if (tj.code === "0" && tj.data[0]) {
+            const price = parseFloat(tj.data[0].last);
+            const qty   = (p.amountUsd / price).toFixed(6);
+            qtyLine = `\n$${p.amountUsd} → ~${qty} ${base}\nPrice: $${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+          }
+        } catch { /* price is optional */ }
+        replyText = [
+          `✅ <b>${p.side.toUpperCase()} ${escapeHtml(p.symbol)}</b> — Executed`,
+          result.orderId ? `Order ID: <code>${result.orderId}</code>` : null,
+          qtyLine.trimStart() || `$${p.amountUsd}`,
+          `<i>${utcNow()}</i>`,
+        ].filter(Boolean).join("\n");
+      } else {
+        replyText = `⚠️ ${escapeHtml(result.message)}\n<i>${utcNow()}</i>`;
+      }
+
+      await b.editMessageText(replyText,
         { chat_id: chatId, message_id: msgId, parse_mode: "HTML" },
       ).catch(() => {});
     } catch (err: unknown) {
