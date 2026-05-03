@@ -22,6 +22,10 @@ import {
   getPositionsPaper,
   getBalancePaper,
 } from "../brokers/okxPaper";
+import {
+  getPositions as bybitGetPositions,
+  getBalance   as bybitGetBalance,
+} from "../brokers/bybit";
 import { okxPaperMode } from "../lib/startup";
 import {
   registerScanNotifier,
@@ -31,6 +35,14 @@ import {
   triggerNow,
   getStatus as getCronStatus,
 } from "../lib/cronScanner";
+import {
+  getPortfolioLeverage,
+  getSuspendedCoins,
+  unsuspendCoin,
+  registerLeverageAlert,
+} from "../lib/leverageManager";
+import { startWatchdog, registerWatchdogAlert } from "../lib/watchdog";
+import { getRecentTrades, getRecentMemory, getDailyPnl } from "../lib/tradeMemoryLib";
 import {
   db,
   profileTable,
@@ -208,9 +220,13 @@ async function notifyScanComplete(result: ScanResult, triggered: "cron" | "manua
 export function startPolling(): void {
   const b = getBot();
 
-  // Register cron scanner callbacks
+  // Register all callbacks
   registerScanNotifier(notifyScanComplete);
-  registerAlertNotifier(async (msg) => send(escapeHtml(msg), { parse_mode: "HTML" }));
+  const alertHandler: (msg: string) => Promise<void> = async (msg) => send(escapeHtml(msg), { parse_mode: "HTML" });
+  registerAlertNotifier(alertHandler);
+  registerLeverageAlert(alertHandler);
+  registerWatchdogAlert(alertHandler);
+  startWatchdog();
 
   // ── Inline button callbacks — approve / reject ───────────────────────────
   b.on("callback_query", async (query) => {
@@ -272,36 +288,6 @@ export function startPolling(): void {
         `⚠️ ${escapeHtml(msg)}\n<i>${utcNow()}</i>`,
         { chat_id: chatId, message_id: msgId, parse_mode: "HTML" },
       ).catch(() => {});
-    }
-  });
-
-  // ── /status ──────────────────────────────────────────────────────────────
-  b.onText(/^\/status(?:@\w+)?$/, async (msg) => {
-    const chatId = String(msg.chat.id);
-    try {
-      const [snap, config] = await Promise.all([
-        getPortfolioSnapshot(0),
-        approvalGate.getConfig(),
-      ]);
-      const byClass = Object.entries(snap.byAssetClass)
-        .map(([k, v]) => `• ${escapeHtml(k)}: $${v.toFixed(2)}`)
-        .join("\n");
-      await b.sendMessage(chatId, [
-        `📊 <b>Portfolio Status</b>`,
-        `<i>${utcNow()}</i>`,
-        ``,
-        `Total: <b>$${snap.totalValue.toFixed(2)}</b>`,
-        `24h: ${snap.change24h >= 0 ? "+" : ""}$${snap.change24h.toFixed(2)} (${snap.change24hPct >= 0 ? "+" : ""}${snap.change24hPct.toFixed(2)}%)`,
-        `P&amp;L: ${snap.totalProfitLoss >= 0 ? "+" : ""}$${snap.totalProfitLoss.toFixed(2)} (${snap.totalProfitLossPct >= 0 ? "+" : ""}${snap.totalProfitLossPct.toFixed(2)}%)`,
-        ``,
-        `By asset class:`,
-        byClass || `• (empty)`,
-        ``,
-        `Mode: <b>${config.mode}</b> | Threshold: $${config.thresholdUsd}`,
-      ].join("\n"), { parse_mode: "HTML" });
-    } catch (err: unknown) {
-      const m = err instanceof Error ? err.message : String(err);
-      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
     }
   });
 
@@ -771,13 +757,117 @@ export function startPolling(): void {
     }
   });
 
-  // ── /resume — override daily loss limit pause ─────────────────────────────
-  b.onText(/^\/resume(?:@\w+)?$/, async (msg) => {
+  // ── /resume [coin] — resume trading or unsuspend specific coin ───────────
+  b.onText(/^\/resume(?:@\w+)?(?:\s+(\S+))?$/, async (msg, match) => {
     const chatId = String(msg.chat.id);
-    resumeTrading();
-    await b.sendMessage(chatId,
-      `▶️ <b>Trading resumed</b> — daily loss limit overridden\n<i>${utcNow()}</i>`,
-      { parse_mode: "HTML" });
+    const coin   = match?.[1]?.toUpperCase();
+    if (coin) {
+      await unsuspendCoin(coin);
+      await b.sendMessage(chatId,
+        `✅ <b>${escapeHtml(coin)}</b> unsuspended\n<i>${utcNow()}</i>`,
+        { parse_mode: "HTML" });
+    } else {
+      resumeTrading();
+      await b.sendMessage(chatId,
+        `▶️ <b>Trading resumed</b> — daily loss limit overridden\n<i>${utcNow()}</i>`,
+        { parse_mode: "HTML" });
+    }
+  });
+
+  // ── /status — full bot status ─────────────────────────────────────────────
+  b.onText(/^\/status(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const [snap, config, cron, leverage, suspended, dailyPnl, okxPos, bybitPos, localPending] =
+        await Promise.all([
+          getPortfolioSnapshot(0).catch(() => null),
+          approvalGate.getConfig(),
+          Promise.resolve(getCronStatus()),
+          getPortfolioLeverage().catch(() => 10),
+          getSuspendedCoins().catch(() => [] as string[]),
+          getDailyPnl().catch(() => 0),
+          okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
+          bybitGetPositions().catch(() => []),
+          Promise.resolve(getPendingOrders()),
+        ]);
+
+      const openCount = okxPos.length + bybitPos.length;
+      const pnlSign   = dailyPnl >= 0 ? "+" : "";
+      const lastScan  = cron.lastScan
+        ? cron.lastScan.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
+        : "Never";
+
+      await b.sendMessage(chatId, [
+        `🤖 <b>Bot Status</b>`,
+        `<i>${utcNow()}</i>`,
+        ``,
+        `Mode: <b>${config.mode}</b>`,
+        `Trading: <b>${cron.paused ? "🛑 Paused" : "▶️ Active"}</b>`,
+        `Portfolio leverage: <b>${leverage}x</b>`,
+        `Daily P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b>`,
+        snap ? `Portfolio: <b>$${snap.totalValue.toFixed(2)}</b>` : "",
+        `Open positions: <b>${openCount}</b> (OKX: ${okxPos.length}, Bybit: ${bybitPos.length})`,
+        `Pending orders: <b>${localPending.length}</b>`,
+        suspended.length ? `Suspended coins: <b>${suspended.map(escapeHtml).join(", ")}</b>` : "",
+        ``,
+        `Auto-scanner: <b>${cron.enabled ? "✅ On" : "⏸ Off"}</b>`,
+        `Schedule: <code>${escapeHtml(cron.interval)}</code>`,
+        `Last scan: ${lastScan}`,
+      ].filter(Boolean).join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /history — last 10 closed trades ─────────────────────────────────────
+  b.onText(/^\/history(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const trades = await getRecentTrades(10);
+      if (!trades.length) {
+        await b.sendMessage(chatId, `📋 No trade history yet.\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
+        return;
+      }
+      const lines = trades.map((t, i) => {
+        const pnl   = parseFloat(t.pnl  ?? "0");
+        const pnlPct = parseFloat(t.pnlPct ?? "0");
+        const sign  = pnl >= 0 ? "+" : "";
+        const dir   = t.direction === "long" ? "▲" : "▼";
+        const when  = t.exitAt
+          ? t.exitAt.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
+          : "open";
+        return `${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) · ${when} [${t.broker}]`;
+      }).join("\n");
+      await b.sendMessage(chatId, [
+        `📋 <b>Trade History (last ${trades.length})</b>`,
+        ``,
+        lines,
+        ``,
+        `<i>${utcNow()}</i>`,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /memory — last 5 trade reflections ───────────────────────────────────
+  b.onText(/^\/memory(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const memory = await getRecentMemory(5);
+      await b.sendMessage(chatId, [
+        `🧠 <b>Trade Memory</b>`,
+        ``,
+        escapeHtml(memory),
+        ``,
+        `<i>${utcNow()}</i>`,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
   });
 
   // ── Free-text NL — route to AI assistant ─────────────────────────────────

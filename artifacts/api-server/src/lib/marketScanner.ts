@@ -3,18 +3,70 @@ import { cache, TTL, CacheKey }     from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
+import { getKlines }                         from "../brokers/bybit";
+import { getRecentMemory }                   from "./tradeMemoryLib";
 import { db, profileTable, holdingsTable }   from "@workspace/db";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
+export type Conviction     = "low" | "medium" | "high" | "strong_buy" | "strong_sell";
 
 export interface ScanOpportunity {
-  symbol:         string;
-  assetClass:     string;
-  score:          number;
-  recommendation: Recommendation;
-  reasoning:      string;
-  price:          number;
-  dataTimestamp:  string;
+  symbol:              string;
+  assetClass:          string;
+  score:               number;
+  recommendation:      Recommendation;
+  reasoning:           string;
+  price:               number;
+  dataTimestamp:       string;
+  // Extended multi-timeframe fields
+  direction?:          "long" | "short" | "neutral";
+  conviction?:         Conviction;
+  entry?:              number;
+  stopLoss?:           number;
+  takeProfit?:         number;
+  leverage?:           number;
+  positionSizeUsd?:    number;
+  timeframeAlignment?: string;
+}
+
+// ── Technical indicators ──────────────────────────────────────────────────────
+function calcRSI(closes: number[], period = 14): number {
+  if (closes.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = (closes[i] ?? 0) - (closes[i - 1] ?? 0);
+    if (diff > 0) gains += diff; else losses -= diff;
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+function calcEMA(closes: number[], period: number): number {
+  if (closes.length < period) return closes[closes.length - 1] ?? 0;
+  const k = 2 / (period + 1);
+  let ema = closes.slice(0, period).reduce((s, v) => s + v, 0) / period;
+  for (let i = period; i < closes.length; i++) ema = (closes[i]! * k) + (ema * (1 - k));
+  return ema;
+}
+
+async function fetchMTFData(symbol: string): Promise<string> {
+  const intervals: Array<[string, string]> = [["1","1m"],["15","15m"],["60","1h"],["240","4h"],["D","1D"]];
+  const parts: string[] = [];
+  for (const [iv, label] of intervals) {
+    try {
+      const klines = await getKlines(symbol, iv, 50);
+      const closes = klines.map(k => k.close);
+      const rsi    = calcRSI(closes, 14).toFixed(1);
+      const ema20  = calcEMA(closes, 20).toFixed(2);
+      const ema50  = calcEMA(closes, 50).toFixed(2);
+      const last   = closes[closes.length - 1]?.toFixed(2) ?? "N/A";
+      parts.push(`${label}: price=$${last} RSI=${rsi} EMA20=$${ema20} EMA50=$${ema50}`);
+    } catch { parts.push(`${label}: unavailable`); }
+  }
+  return parts.join(" | ");
 }
 
 export interface ScanResult {
@@ -57,44 +109,53 @@ function formatRow(d: AssetData, assetClass: string): string {
 
 export async function runScan(): Promise<ScanResult> {
   return cache.get(CacheKey.marketScan(), TTL.MARKET_SCAN, async () => {
-    const [watchlist, profile, holdings] = await Promise.all([
+    const [watchlist, profile, holdings, tradeMemory] = await Promise.all([
       getWatchlist(),
       db.select().from(profileTable).limit(1).then(r => r[0]),
       db.select().from(holdingsTable),
+      getRecentMemory(20).catch(() => ""),
     ]);
 
-    // Attach assetClass lookup
     const classMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
-
     const assetData = await fetchAllData(watchlist);
-    if (assetData.length < 3) {
-      console.warn("[scanner] Insufficient data for scan");
-      return FALLBACK_RESULT;
+    if (assetData.length < 3) { console.warn("[scanner] Insufficient data"); return FALLBACK_RESULT; }
+
+    // Multi-timeframe data for top crypto symbols (limit to 5 to avoid timeout)
+    const cryptoSyms = watchlist.filter(e => e.assetClass === "Crypto").slice(0, 5).map(e => e.symbol);
+    const mtfLines: string[] = [];
+    for (const sym of cryptoSyms) {
+      try {
+        const mtf = await fetchMTFData(sym);
+        mtfLines.push(`${sym} MTF: ${mtf}`);
+      } catch { /* skip */ }
     }
 
-    const tableRows = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
+    const tableRows      = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
     const holdingSummary = holdings.map(h => `${h.symbol}:$${(h.quantity * h.price).toFixed(0)}`).join(" ");
     const totalPortfolio = holdings.reduce((s, h) => s + h.quantity * h.price, 0);
 
     const systemContext = [
-      "You are an elite portfolio analyst. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","positionSizeUsd":0,"leverageRecommended":1}],"scanTimestamp":"","summary":""}`,
-      "Rules: rank exactly 5 opportunities. Score 80-100=STRONG BUY, 60-79=BUY, 40-59=WATCH, <40=AVOID.",
-      "Consider: RSI <30 oversold (bullish), RSI >70 overbought (bearish). momentum (7d/30d), volume.",
-      "This is an EXTREME risk tolerance portfolio targeting 50% monthly returns.",
-      "Only surface high-conviction momentum plays. Never suggest defensive positions.",
-      "Always include leverage recommendations (up to 50x crypto, 20x stocks).",
-      `HARD RULE: Never suggest position size exceeding 50% of total capital ($${totalPortfolio.toFixed(0)}). Max single trade = $${(totalPortfolio * 0.5).toFixed(0)}. Always include recommended dollar position size in signals.`,
+      "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
+      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":""}],"scanTimestamp":"","summary":""}`,
+      "Rules: rank exactly 5 opportunities. 80-100=STRONG BUY(strong_buy), 60-79=BUY(high), 40-59=WATCH(medium), <40=AVOID.",
+      "Multi-timeframe alignment: confirm trend across 1h, 4h, 1D before signalling. Higher conviction = more TF alignment.",
+      "RSI <30 oversold (bullish), RSI >70 overbought (bearish). EMA20>EMA50 = uptrend.",
+      "This is an EXTREME risk portfolio: 50% monthly return target. Only surface high-conviction momentum plays.",
+      "Leverage: up to 50x crypto, 20x stocks. stopLoss must be realistic (5-15% from entry for futures).",
+      `Max position: $${(totalPortfolio * 0.5).toFixed(0)} (50% of $${totalPortfolio.toFixed(0)} capital).`,
     ].join("\n");
 
     const prompt = [
       `Portfolio: $${totalPortfolio.toFixed(0)} total. Holdings: ${holdingSummary || "none"}.`,
-      `Risk tolerance: ${profile?.riskTolerance ?? "medium"}. Strategy: ${profile?.strategyType ?? "Balanced Growth"}.`,
-      `Today UTC: ${new Date().toISOString()}`,
+      `Risk: ${profile?.riskTolerance ?? "high"}. Strategy: ${profile?.strategyType ?? "Momentum"}.`,
+      `UTC: ${new Date().toISOString()}`,
       ``,
-      `Market data (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
+      mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
+      `Market snapshot (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
       tableRows.join("\n"),
-    ].join("\n");
+      ``,
+      tradeMemory ? `Trade memory (last reflections):\n${tradeMemory}` : "",
+    ].filter(Boolean).join("\n");
 
     const res = await llm.json<ScanResult>({
       taskType:      "market_scan",
@@ -103,7 +164,22 @@ export async function runScan(): Promise<ScanResult> {
       schema: {
         type: "object",
         properties: {
-          opportunities: { type: "array" },
+          opportunities: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                symbol: { type: "string" }, assetClass: { type: "string" },
+                score: { type: "number" }, recommendation: { type: "string" },
+                reasoning: { type: "string" }, price: { type: "number" },
+                dataTimestamp: { type: "string" },
+                direction: { type: "string" }, conviction: { type: "string" },
+                entry: { type: "number" }, stopLoss: { type: "number" },
+                takeProfit: { type: "number" }, leverage: { type: "number" },
+                positionSizeUsd: { type: "number" }, timeframeAlignment: { type: "string" },
+              },
+            },
+          },
           scanTimestamp: { type: "string" },
           summary:       { type: "string" },
         },
