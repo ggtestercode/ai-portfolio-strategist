@@ -235,8 +235,8 @@ async function handleClosePosition(symbol: string): Promise<string> {
       return [
         `✅ CLOSED ${instId}`,
         `Order ID: ${result.orderId}`,
+        ...("message" in result && result.message ? [result.message] : []),
         `Broker: OKX${okxPaperMode ? " (Paper)" : ""}`,
-        ...(okxPaperMode && "message" in result ? [result.message] : []),
       ].join("\n");
     } catch (err) {
       if (isOKX) return `❌ Failed to close ${instId}: ${err instanceof Error ? err.message : String(err)}`;
@@ -337,6 +337,17 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     ].join("\n");
   }
 
+  // Fetch price once — used for qty estimation in both queued and executed paths
+  const price    = await fetchSymbolPrice(trade.symbol);
+  const priceStr = price ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "N/A";
+  const base     = trade.symbol.includes("-") ? (trade.symbol.split("-")[0] ?? trade.symbol) : trade.symbol;
+  const qtyUnit  = trade.assetClass === "Equity" ? "shares" : base;
+  const spotQty  = price ? (trade.amountUsd / price) : null;
+  const levQty   = price ? ((trade.amountUsd * leverage) / price) : null;
+  const qtyStr   = isOKXSpot
+    ? (spotQty ? `~${spotQty.toFixed(6)} ${base}` : "N/A")
+    : (levQty  ? `~${levQty.toFixed(6)} ${qtyUnit}` : "N/A");
+
   if (result.action === "queued") {
     if (trade.amountUsd > totalCapital * 0.5) {
       return [
@@ -348,7 +359,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     return [
       `⏳ ${trade.side.toUpperCase()} ${trade.symbol} — Awaiting approval`,
       `Approval ID: ${proposal.id}`,
-      `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure`,
+      `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure (${qtyStr})`,
     ].join("\n");
   }
 
@@ -369,7 +380,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
       return [
         `⏳ ${trade.side.toUpperCase()} ${trade.symbol} — Pending`,
         `Order ID: ${orderId}`,
-        `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure`,
+        `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure (${qtyStr})`,
         `Reason: Market closed or liquidity pause`,
         `US market opens: ${nextOpenStr(trade.assetClass)}`,
         `Use /orders to track this`,
@@ -378,17 +389,13 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
 
     // Filled immediately
     await syncHoldingsFromEtoro().catch(() => {});
-    const price    = await fetchSymbolPrice(trade.symbol);
-    const priceStr = price
-      ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-      : "N/A";
 
     if (isOKXSpot) {
       const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
       return [
         `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
         `Order ID: ${orderId}`,
-        `Amount: $${trade.amountUsd} (spot)`,
+        `Amount: $${trade.amountUsd} → ${qtyStr}`,
         `Mode: OKX ${okxMode}`,
         `Price: ${priceStr}`,
       ].join("\n");
@@ -397,8 +404,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     return [
       `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
       `Order ID: ${orderId}`,
-      `Amount: $${trade.amountUsd} at ${leverage}x`,
-      `Exposure: $${exposure}`,
+      `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} (${qtyStr})`,
       `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
       `Entry price: ${priceStr}`,
     ].join("\n");
