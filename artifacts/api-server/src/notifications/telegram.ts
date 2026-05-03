@@ -11,7 +11,12 @@ import { getPortfolioSnapshot }            from "../lib/portfolio";
 import { runScan, type Recommendation }    from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
-import { getPortfolio, getOrders }         from "../brokers/etoro";
+import { getPortfolio, getOrders as etoroGetOrders } from "../brokers/etoro";
+import {
+  getPositions as okxGetPositions,
+  getOrders    as okxGetOrders,
+  getAccountBalance,
+} from "../brokers/okx";
 import {
   db,
   profileTable,
@@ -381,22 +386,24 @@ export function startPolling(): void {
     }
   });
 
-  // ── /sync — rebuild local DB from eToro + report counts ─────────────────
+  // ── /sync — rebuild local DB from both brokers ───────────────────────────
   b.onText(/^\/sync(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      await syncHoldingsFromEtoro();
-      const [holdings, pending] = await Promise.all([
-        db.select().from(holdingsTable),
+      const [, okxPos, pending] = await Promise.all([
+        syncHoldingsFromEtoro().catch(() => {}),
+        okxGetPositions().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
+      const etoroHoldings = await db.select().from(holdingsTable);
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
       await b.sendMessage(chatId, [
-        `🔄 <b>Synced from eToro</b>`,
+        `🔄 <b>Synced from eToro + OKX</b>`,
         ``,
-        `Open positions: <b>${holdings.length}</b>`,
+        `OKX open positions: <b>${okxPos.length}</b>`,
+        `eToro open positions: <b>${etoroHoldings.length}</b>`,
         `Pending orders: <b>${pending.length}</b>`,
         `Last sync: ${now}`,
       ].join("\n"), { parse_mode: "HTML" });
@@ -406,67 +413,63 @@ export function startPolling(): void {
     }
   });
 
-  // ── /positions — open fills + pending orders ─────────────────────────────
+  // ── /positions — OKX + eToro combined ────────────────────────────────────
   b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
       interface EtoroPos {
-        positionId?: string | number;
-        symbol?: string;
-        investedAmount?: number;
-        profit?: number;
-        isBuy?: boolean;
-        openRate?: number;
-        currentRate?: number;
+        positionId?: string | number; symbol?: string;
+        investedAmount?: number; profit?: number;
+        isBuy?: boolean; openRate?: number;
       }
       interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
 
-      // Fetch eToro positions and pending orders in parallel
-      const [portfolio, etoroOrders] = await Promise.all([
+      const [okxPos, etoroPortfolio, localPending] = await Promise.all([
+        okxGetPositions().catch(() => []),
         getPortfolio().then(p => ((p as EtoroPortfolio)?.positions ?? []) as EtoroPos[]).catch(() => [] as EtoroPos[]),
-        getOrders().catch(() => []),
+        Promise.resolve(getPendingOrders()),
       ]);
-
-      // Merge eToro API orders with in-memory pending store (dedup by id)
-      const localPending = getPendingOrders();
-      const orderMap = new Map<string, { symbol: string; side: string; amountUsd: number; placedAt?: string }>();
-      for (const o of etoroOrders) orderMap.set(o.orderId, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.placedAt });
-      for (const o of localPending) if (!orderMap.has(o.id)) orderMap.set(o.id, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.queuedAt.toISOString() });
-      const pendingOrders = Array.from(orderMap.values());
 
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
 
-      if (!portfolio.length && !pendingOrders.length) {
+      if (!okxPos.length && !etoroPortfolio.length && !localPending.length) {
         await b.sendMessage(chatId,
-          `📊 No open positions or pending orders.\nLast synced: ${now}`,
+          `📊 No open positions or pending orders.\n<i>Last synced: ${now}</i>`,
           { parse_mode: "HTML" });
         return;
       }
 
-      const out: string[] = [`📊 <b>Positions &amp; Orders</b>`, ``];
+      const out: string[] = [`📊 <b>Positions</b>`, ``];
 
-      if (portfolio.length) {
-        out.push(`<b>Open (${portfolio.length}):</b>`);
-        for (const p of portfolio) {
-          const invested = (p.investedAmount ?? 0).toFixed(2);
-          const profit   = p.profit ?? 0;
-          const sign     = profit >= 0 ? "+" : "";
-          const pct      = p.investedAmount ? ((profit / p.investedAmount) * 100).toFixed(1) : "0.0";
-          const entry    = p.openRate ? ` · entry $${p.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-          out.push(`• <b>${escapeHtml(p.symbol ?? "?")}</b> — $${invested} long${entry} · P/L ${sign}$${profit.toFixed(2)} (${sign}${pct}%)`);
+      if (okxPos.length) {
+        const mode = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
+        out.push(`<b>OKX ${mode} (${okxPos.length}):</b>`);
+        for (const p of okxPos) {
+          const sign = p.pnl >= 0 ? "+" : "";
+          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} contracts ${p.side} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })} · P/L ${sign}$${p.pnl.toFixed(2)}`);
         }
         out.push(``);
       }
 
-      if (pendingOrders.length) {
-        out.push(`<b>Pending (${pendingOrders.length}):</b>`);
-        for (const o of pendingOrders) {
-          const timeStr = o.placedAt
-            ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT"
-            : "recently";
-          out.push(`• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} · placed ${timeStr} · waiting for market open`);
+      if (etoroPortfolio.length) {
+        out.push(`<b>eToro Demo (${etoroPortfolio.length}):</b>`);
+        for (const p of etoroPortfolio) {
+          const invested = (p.investedAmount ?? 0).toFixed(2);
+          const profit   = p.profit ?? 0;
+          const sign     = profit >= 0 ? "+" : "";
+          const entry    = p.openRate ? ` · entry $${p.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
+          out.push(`• <b>${escapeHtml(p.symbol ?? "?")}</b> — $${invested} long${entry} · P/L ${sign}$${profit.toFixed(2)}`);
+        }
+        out.push(``);
+      }
+
+      if (localPending.length) {
+        out.push(`<b>Pending (${localPending.length}):</b>`);
+        for (const o of localPending) {
+          const t = o.queuedAt.toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT";
+          out.push(`• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} [${o.broker}] · placed ${t} · waiting for market open`);
         }
         out.push(``);
       }
@@ -479,30 +482,33 @@ export function startPolling(): void {
     }
   });
 
-  // ── /orders — pending unfilled orders only ────────────────────────────────
+  // ── /orders — pending orders from OKX + eToro + in-memory ────────────────
   b.onText(/^\/orders(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [etoroOrders, localPending] = await Promise.all([
-        getOrders().catch(() => []),
+      const [okxOrders, etoroOrders, localPending] = await Promise.all([
+        okxGetOrders().catch(() => []),
+        etoroGetOrders().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
 
-      const orderMap = new Map<string, { symbol: string; side: string; amountUsd: number; placedAt?: string }>();
-      for (const o of etoroOrders) orderMap.set(o.orderId, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.placedAt });
-      for (const o of localPending) if (!orderMap.has(o.id)) orderMap.set(o.id, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.queuedAt.toISOString() });
-      const orders = Array.from(orderMap.values());
+      type Row = { id: string; symbol: string; side: string; amountUsd: number; broker: string; placedAt?: string };
+      const map = new Map<string, Row>();
+      for (const o of okxOrders)    map.set(o.orderId,  { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: 0, broker: "okx", placedAt: o.placedAt });
+      for (const o of etoroOrders)  map.set(o.orderId,  { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: "etoro", placedAt: o.placedAt });
+      for (const o of localPending) if (!map.has(o.id)) map.set(o.id, { id: o.id, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: o.broker, placedAt: o.queuedAt.toISOString() });
+      const orders = Array.from(map.values());
 
       if (!orders.length) {
-        await b.sendMessage(chatId, `📋 No pending orders.`, { parse_mode: "HTML" });
+        await b.sendMessage(chatId, `📋 No pending orders.`);
         return;
       }
 
       const lines = orders.map(o => {
-        const timeStr = o.placedAt
+        const t = o.placedAt
           ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT"
           : "recently";
-        return `• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} · placed ${timeStr}`;
+        return `• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()}${o.amountUsd ? ` $${o.amountUsd}` : ""} [${o.broker}] · placed ${t}`;
       }).join("\n");
 
       await b.sendMessage(chatId, [
@@ -515,6 +521,55 @@ export function startPolling(): void {
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /orders failed: ${escapeHtml(m)}`);
+    }
+  });
+
+  // ── /balance — OKX + eToro account balances ───────────────────────────────
+  b.onText(/^\/balance(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const [okxBal, etoroPortfolio] = await Promise.all([
+        getAccountBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
+        getPortfolio().catch(() => null),
+      ]);
+
+      interface EtoroPortfolio {
+        totalEquity?: number;
+        cashBalance?: number;
+        [k: string]: unknown;
+      }
+      const ep = etoroPortfolio as EtoroPortfolio | null;
+      const etoroTotal = ep?.totalEquity ?? 0;
+      const etoroCash  = ep?.cashBalance ?? 0;
+
+      const out: string[] = [`💰 <b>Account Balance</b>`, ``];
+
+      const okxMode = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
+      if ("error" in okxBal) {
+        out.push(`<b>OKX ${okxMode}:</b> ❌ ${escapeHtml(okxBal.error)}`);
+      } else {
+        out.push(
+          `<b>OKX ${okxMode}:</b>`,
+          `Total equity: <b>$${okxBal.totalEquity.toFixed(2)}</b>`,
+          `Available: <b>$${okxBal.availableBalance.toFixed(2)}</b>`,
+          ``
+        );
+      }
+
+      out.push(
+        `<b>eToro Demo:</b>`,
+        `Portfolio value: <b>$${etoroTotal.toFixed(2)}</b>`,
+        `Cash: <b>$${etoroCash.toFixed(2)}</b>`,
+        ``
+      );
+
+      const okxTotal = "error" in okxBal ? 0 : okxBal.totalEquity;
+      out.push(`Combined: <b>$${(okxTotal + etoroTotal).toFixed(2)}</b>`);
+
+      await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ /balance failed: ${escapeHtml(m)}`);
     }
   });
 

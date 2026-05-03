@@ -9,6 +9,7 @@ import { approvalGate, buildProposal } from "./approvalGate";
 import { db, profileTable, holdingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { closePosition as etoroClose, getPortfolio } from "../brokers/etoro";
+import { closePosition as okxClose, getPositions as okxGetPositions } from "../brokers/okx";
 
 interface EtoroPos {
   positionId?: string | number;
@@ -152,22 +153,22 @@ interface ParsedTrade {
   symbol:    string;
   side:      "buy" | "sell";
   amountUsd: number;
-  broker:    "etoro" | "bybit" | "mock";
+  broker:    "etoro" | "bybit" | "okx" | "mock";
   assetClass: string;
 }
 
 async function parseTrade(message: string): Promise<ParsedTrade | null> {
   const res = await llm.json<ParsedTrade | { symbol: null }>({
     taskType:      "command_parse",
-    systemContext: "Extract trade parameters from a natural language message. Reply JSON only. If not a clear trade instruction, return {\"symbol\":null}.",
-    prompt: `Extract from: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER","side":"buy|sell","amountUsd":number,"broker":"etoro|bybit|mock","assetClass":"Equity|Crypto|ETF|Commodity"}`,
+    systemContext: "Extract trade parameters from a natural language message. Reply JSON only. If not a clear trade instruction, return {\"symbol\":null}. Default broker to 'okx' for crypto, 'etoro' for stocks.",
+    prompt: `Extract from: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER or BTC-USDT-SWAP","side":"buy|sell","amountUsd":number,"broker":"okx|etoro|bybit|mock","assetClass":"Equity|Crypto|ETF|Commodity"}`,
     schema: {
       type: "object",
       properties: {
         symbol:     { type: ["string","null"] },
         side:       { type: "string", enum: ["buy","sell"] },
         amountUsd:  { type: "number" },
-        broker:     { type: "string", enum: ["etoro","bybit","mock"] },
+        broker:     { type: "string", enum: ["okx","etoro","bybit","mock"] },
         assetClass: { type: "string" },
       },
     },
@@ -200,6 +201,25 @@ async function parseCloseSymbol(message: string): Promise<string | null> {
 }
 
 async function handleClosePosition(symbol: string): Promise<string> {
+  const instId = symbol.toUpperCase();
+  const isOKX  = instId.includes("-");
+
+  // Try OKX first if symbol looks like OKX format, or try both
+  if (isOKX || !instId.match(/^[A-Z]{1,5}$/)) {
+    try {
+      const result = await okxClose(instId);
+      await syncHoldingsFromEtoro().catch(() => {});
+      return [
+        `✅ CLOSED ${instId}`,
+        `Order ID: ${result.orderId}`,
+        `Broker: OKX`,
+      ].join("\n");
+    } catch (err) {
+      if (isOKX) return `❌ Failed to close ${instId}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  // eToro fallback
   let portfolio: EtoroPortfolio;
   try {
     portfolio = (await getPortfolio()) as EtoroPortfolio;
@@ -214,9 +234,8 @@ async function handleClosePosition(symbol: string): Promise<string> {
   );
 
   if (!pos) {
-    // Also remove from local holdings if present
     await db.delete(holdingsTable).where(eq(holdingsTable.symbol, symbol));
-    return `⚠️ No open position found for ${symbol} on eToro. Local holding removed if it existed.`;
+    return `⚠️ No open position found for ${symbol} on eToro or OKX.`;
   }
 
   const posId = String(pos.positionId ?? "");
@@ -230,7 +249,6 @@ async function handleClosePosition(symbol: string): Promise<string> {
   const profit   = pos.profit ?? 0;
   const pnlSign  = profit >= 0 ? "+" : "";
 
-  // Remove from local holdings
   await db.delete(holdingsTable).where(eq(holdingsTable.symbol, symbol));
 
   return [
@@ -238,7 +256,7 @@ async function handleClosePosition(symbol: string): Promise<string> {
     `Position ID: ${posId}`,
     `Invested: $${invested.toFixed(2)}`,
     `P/L: ${pnlSign}$${profit.toFixed(2)}`,
-    `Holdings: ${symbol} removed`,
+    `Broker: eToro`,
   ].join("\n");
 }
 
@@ -263,6 +281,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     amountUsd:  trade.amountUsd,
     assetClass: trade.assetClass,
     rationale:  "NL instruction via assistant",
+    broker:     trade.broker,
   });
 
   const result = await approvalGate.submit(proposal);
@@ -288,16 +307,19 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
   }
 
   if (result.action === "executed") {
-    if (!isMarketOpen(trade.assetClass)) {
-      // eToro accepted the order but market is closed — it will fill on open
+    const isOKX = proposal.broker === "okx";
+    // OKX (crypto derivatives) is 24/7 — only check market hours for eToro equities
+    const marketClosed = !isOKX && !isMarketOpen(trade.assetClass);
+
+    if (marketClosed) {
       pendingOrdersMap.set(orderId, {
-        id:        orderId,
-        symbol:    trade.symbol,
-        side:      trade.side,
-        amountUsd: trade.amountUsd,
+        id:         orderId,
+        symbol:     trade.symbol,
+        side:       trade.side,
+        amountUsd:  trade.amountUsd,
         assetClass: trade.assetClass,
-        broker:    proposal.broker,
-        queuedAt:  new Date(),
+        broker:     proposal.broker,
+        queuedAt:   new Date(),
       });
       return [
         `⏳ ${trade.side.toUpperCase()} ${trade.symbol} — Pending`,
@@ -309,18 +331,22 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
       ].join("\n");
     }
 
-    // Market open — filled immediately
+    // Filled immediately
     await syncHoldingsFromEtoro().catch(() => {});
     const price    = await fetchSymbolPrice(trade.symbol);
     const priceStr = price
       ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
       : "N/A";
+    const mode = isOKX
+      ? `Mode: ${process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live"}`
+      : `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`;
 
     return [
-      `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Filled`,
+      `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
       `Order ID: ${orderId}`,
-      `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure`,
-      `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
+      `Amount: $${trade.amountUsd} at ${leverage}x`,
+      `Exposure: $${exposure}`,
+      mode,
       `Entry price: ${priceStr}`,
     ].join("\n");
   }

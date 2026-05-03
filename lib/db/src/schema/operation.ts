@@ -28,7 +28,7 @@ export const tradeProposals = pgTable("trade_proposals", {
   side:            text("side", { enum: ["buy", "sell"] }).notNull(),
   amountUsd:       numeric("amount_usd", { precision: 12, scale: 2 }).notNull(),
   assetClass:      text("asset_class").notNull(),
-  broker:          text("broker", { enum: ["etoro", "bybit", "mock"] })
+  broker:          text("broker", { enum: ["etoro", "bybit", "okx", "mock"] })
                      .notNull().default("mock"),
   rationale:       text("rationale").notNull(),
   score:           numeric("score", { precision: 5, scale: 2 }),

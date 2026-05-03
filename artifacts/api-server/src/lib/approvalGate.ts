@@ -20,7 +20,7 @@ export interface TradeProposal {
   side:           "buy" | "sell";
   amountUsd:      number;
   assetClass:     string;
-  broker:         "etoro" | "bybit" | "mock";
+  broker:         "etoro" | "bybit" | "okx" | "mock";
   rationale:      string;
   score?:         number;
   currentPrice?:  number;
@@ -55,9 +55,10 @@ const EXPIRY_MS   = 30 * 60 * 1000;
 const CRYPTO_SYMS = new Set(["BTC","ETH","SOL","BNB","AVAX","ARB","OP","MATIC","LINK","DOT","ATOM","INJ","TIA","SUI","SEI"]);
 
 class ApprovalGate {
-  private executors: Record<"etoro"|"bybit"|"mock", BrokerExecutor> = {
+  private executors: Record<"etoro"|"bybit"|"okx"|"mock", BrokerExecutor> = {
     etoro: mockExecutor,
     bybit: mockExecutor,
+    okx:   mockExecutor,
     mock:  mockExecutor,
   };
   private notifyFn: ((a: PendingApproval) => Promise<void>) | null = null;
@@ -86,7 +87,7 @@ class ApprovalGate {
     cache.invalidate(CacheKey.operationConfig());
   }
 
-  registerExecutor(broker: "etoro" | "bybit", fn: BrokerExecutor): void {
+  registerExecutor(broker: "etoro" | "bybit" | "okx", fn: BrokerExecutor): void {
     this.executors[broker] = fn;
     console.log(`[ApprovalGate] Registered executor: ${broker}`);
   }
@@ -238,12 +239,14 @@ class ApprovalGate {
 export const approvalGate = new ApprovalGate();
 
 export function buildProposal(
-  p: Omit<TradeProposal, "id"|"broker"|"proposedAt">
+  p: Omit<TradeProposal, "id"|"broker"|"proposedAt"> & { broker?: TradeProposal["broker"] }
 ): TradeProposal {
+  const isOKXSymbol = p.symbol.includes("-");
+  const defaultBroker = (CRYPTO_SYMS.has(p.symbol.toUpperCase()) || isOKXSymbol) ? "okx" : "etoro";
   return {
     ...p,
     id:         randomUUID(),
-    broker:     CRYPTO_SYMS.has(p.symbol.toUpperCase()) ? "bybit" : "etoro",
+    broker:     p.broker ?? defaultBroker,
     proposedAt: new Date().toISOString(),
   };
 }
