@@ -16,7 +16,13 @@ import {
   getPositions as okxGetPositions,
   getOrders    as okxGetOrders,
   getAccountBalance,
+  testConnection as okxTestConnection,
 } from "../brokers/okx";
+import {
+  getPositionsPaper,
+  getBalancePaper,
+} from "../brokers/okxPaper";
+import { okxPaperMode } from "../lib/startup";
 import {
   db,
   profileTable,
@@ -88,27 +94,74 @@ async function send(text: string, opts?: TelegramBot.SendMessageOptions): Promis
 
 export const sendApprovalRequest = async (approval: PendingApproval): Promise<void> => {
   const { proposal, summary, expiresAt } = approval;
-  const text = [
-    `🔔 <b>Trade Approval Required</b>`,
-    `<b>${proposal.side.toUpperCase()} ${escapeHtml(proposal.symbol)}</b> — $${proposal.amountUsd}`,
-    `Broker: ${proposal.broker} | Asset: ${escapeHtml(proposal.assetClass)}`,
-    ``,
-    escapeHtml(summary),
-    ``,
-    `ID: <code>${proposal.id}</code>`,
-    `Expires: ${new Date(expiresAt).toUTCString()}`,
-    `<i>${utcNow()}</i>`,
-  ].join("\n");
+  const clw    = approval.capitalLimitWarning;
+  const chatId = process.env["TELEGRAM_CHAT_ID"];
+  if (!chatId) throw new Error("TELEGRAM_CHAT_ID env var is required");
 
-  await send(text, {
+  let text: string;
+  let approveLabel: string;
+
+  if (clw) {
+    const xLabel = `${clw.multiple.toFixed(1)}x`;
+    const lines: string[] = [];
+    if (clw.autoModeOverride) {
+      lines.push(`⚠️ <b>Auto mode overridden</b>`);
+      lines.push(`Trade exceeds capital limit, manual approval required`);
+      lines.push(``);
+    }
+    lines.push(
+      `⚠️ <b>Trade exceeds 50% capital limit</b>`,
+      ``,
+      `<b>${proposal.side.toUpperCase()} ${escapeHtml(proposal.symbol)}</b>`,
+      `Amount: <b>$${proposal.amountUsd.toLocaleString("en-US")}</b> (exceeds $${clw.capLimit.toFixed(0)} limit)`,
+      ``,
+      `This is <b>${xLabel}</b> your normal limit.`,
+      `Do you want to proceed?`,
+      ``,
+      `ID: <code>${proposal.id}</code>`,
+      `<i>Expires in 5 min · ${utcNow()}</i>`,
+    );
+    text         = lines.join("\n");
+    approveLabel = "✅ Approve anyway";
+  } else {
+    text = [
+      `🔔 <b>Trade Approval Required</b>`,
+      `<b>${proposal.side.toUpperCase()} ${escapeHtml(proposal.symbol)}</b> — $${proposal.amountUsd}`,
+      `Broker: ${proposal.broker} | Asset: ${escapeHtml(proposal.assetClass)}`,
+      ``,
+      escapeHtml(summary),
+      ``,
+      `ID: <code>${proposal.id}</code>`,
+      `Expires: ${new Date(expiresAt).toUTCString()}`,
+      `<i>${utcNow()}</i>`,
+    ].join("\n");
+    approveLabel = "✅ Approve";
+  }
+
+  const sentMsg = await getBot().sendMessage(chatId, text, {
     parse_mode: "HTML",
     reply_markup: {
       inline_keyboard: [[
-        { text: "✅ Approve", callback_data: `approve:${proposal.id}` },
+        { text: approveLabel, callback_data: `approve:${proposal.id}` },
         { text: "❌ Reject",  callback_data: `reject:${proposal.id}`  },
       ]],
     },
   });
+
+  // Capital-limit approvals: auto-expire and edit message after 5 min with no response
+  if (clw && sentMsg?.message_id) {
+    const msgId = sentMsg.message_id;
+    setTimeout(async () => {
+      const stillPending = approvalGate.getPending().some(p => p.proposal.id === proposal.id);
+      if (stillPending) {
+        await approvalGate.reject(proposal.id).catch(() => {});
+        await getBot().editMessageText(
+          `❌ <b>Approval timeout</b> — trade cancelled\n<i>${utcNow()}</i>`,
+          { chat_id: chatId, message_id: msgId, parse_mode: "HTML" },
+        ).catch(() => {});
+      }
+    }, 5 * 60 * 1000);
+  }
 };
 
 export function startPolling(): void {
@@ -392,7 +445,7 @@ export function startPolling(): void {
     try {
       const [, okxPos, pending] = await Promise.all([
         syncHoldingsFromEtoro().catch(() => {}),
-        okxGetPositions().catch(() => []),
+        okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
       const etoroHoldings = await db.select().from(holdingsTable);
@@ -425,7 +478,7 @@ export function startPolling(): void {
       interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
 
       const [okxPos, etoroPortfolio, localPending] = await Promise.all([
-        okxGetPositions().catch(() => []),
+        okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
         getPortfolio().then(p => ((p as EtoroPortfolio)?.positions ?? []) as EtoroPos[]).catch(() => [] as EtoroPos[]),
         Promise.resolve(getPendingOrders()),
       ]);
@@ -444,11 +497,14 @@ export function startPolling(): void {
       const out: string[] = [`📊 <b>Positions</b>`, ``];
 
       if (okxPos.length) {
-        const mode = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
+        const mode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
         out.push(`<b>OKX ${mode} (${okxPos.length}):</b>`);
         for (const p of okxPos) {
-          const sign = p.pnl >= 0 ? "+" : "";
-          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} contracts ${p.side} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })} · P/L ${sign}$${p.pnl.toFixed(2)}`);
+          const sign    = p.pnl >= 0 ? "+" : "";
+          const base    = p.symbol.split("-")[0] ?? p.symbol;
+          const sizeStr = `${p.size.toFixed(6)} ${base}`;
+          const pnlStr  = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
+          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${sizeStr} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${pnlStr}`);
         }
         out.push(``);
       }
@@ -529,7 +585,9 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       const [okxBal, etoroPortfolio] = await Promise.all([
-        getAccountBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
+        okxPaperMode
+          ? getBalancePaper().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }))
+          : getAccountBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
         getPortfolio().catch(() => null),
       ]);
 
@@ -544,7 +602,7 @@ export function startPolling(): void {
 
       const out: string[] = [`💰 <b>Account Balance</b>`, ``];
 
-      const okxMode = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
+      const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
       if ("error" in okxBal) {
         out.push(`<b>OKX ${okxMode}:</b> ❌ ${escapeHtml(okxBal.error)}`);
       } else {
@@ -570,6 +628,23 @@ export function startPolling(): void {
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /balance failed: ${escapeHtml(m)}`);
+    }
+  });
+
+  // ── /okxtest — verify OKX API credentials ────────────────────────────────
+  b.onText(/^\/okxtest(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const result = await okxTestConnection();
+      const icon   = result.ok ? "✅" : "❌";
+      const output = [
+        `${icon} <b>OKX Connection Test</b>`,
+        ...result.lines.map(l => l ? escapeHtml(l) : ""),
+      ].join("\n");
+      await b.sendMessage(chatId, output, { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`);
     }
   });
 

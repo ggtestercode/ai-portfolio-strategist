@@ -33,6 +33,11 @@ export interface PendingApproval {
   summary:   string;
   expiresAt: string;
   status:    "pending";
+  capitalLimitWarning?: {
+    capLimit:         number;
+    multiple:         number;
+    autoModeOverride: boolean;
+  };
 }
 
 export interface GateResult {
@@ -103,7 +108,14 @@ class ApprovalGate {
     ]);
     const totalCapital = profileRow?.totalCapital ?? 10000;
     const capLimit     = totalCapital * 0.50;
+    const CAP_TTL      = 5 * 60 * 1000;
+
     if (proposal.amountUsd > capLimit) {
+      // Queue for manual approval with capital-limit warning instead of auto-rejecting
+      const multiple     = proposal.amountUsd / capLimit;
+      const autoOverride = mode === "autonomous";
+      const expiresAt    = new Date(Date.now() + CAP_TTL).toISOString();
+
       await db.insert(tradeProposals).values({
         id: proposal.id, symbol: proposal.symbol, side: proposal.side,
         amountUsd: String(proposal.amountUsd), assetClass: proposal.assetClass,
@@ -111,23 +123,27 @@ class ApprovalGate {
         score:        proposal.score        != null ? String(proposal.score)        : null,
         currentPrice: proposal.currentPrice != null ? String(proposal.currentPrice) : null,
         dataTimestamp: proposal.dataTimestamp ?? null,
-        status: "rejected",
-        resolvedAt: new Date(),
-        executionError: `Exceeds 50% single-trade capital limit ($${capLimit.toFixed(0)})`,
-        expiresAt: new Date(Date.now() + EXPIRY_MS),
+        status: "pending",
+        expiresAt: new Date(Date.now() + CAP_TTL),
       }).onConflictDoNothing();
-      const reason = `Exceeds 50% single-trade capital limit ($${capLimit.toFixed(0)} max, got $${proposal.amountUsd})`;
+
+      const approval: PendingApproval = {
+        proposal,
+        summary: "",
+        expiresAt,
+        status: "pending",
+        capitalLimitWarning: { capLimit, multiple, autoModeOverride: autoOverride },
+      };
+      pendingMap.set(proposal.id, approval);
+
       if (this.notifyFn) {
-        await this.notifyFn({
-          proposal,
-          summary: `AUTO-REJECTED: ${proposal.side.toUpperCase()} ${proposal.symbol} $${proposal.amountUsd} — ${reason}`,
-          expiresAt: new Date().toISOString(),
-          status: "pending",
-        }).catch(() => {});
+        await this.notifyFn(approval).catch(e => console.error("[Gate] Capital limit notify failed:", e));
       }
-      console.warn(`[ApprovalGate] Auto-rejected ${proposal.id}: ${reason}`);
-      return { action: "rejected", proposal, message: reason };
+
+      console.log(`[ApprovalGate] Capital-limit approval queued ${proposal.id}: $${proposal.amountUsd} vs $${capLimit} limit (${multiple.toFixed(1)}x)`);
+      return { action: "queued", proposal, message: `Capital limit approval required (${multiple.toFixed(1)}x limit)` };
     }
+
     await db.insert(tradeProposals).values({
       id: proposal.id, symbol: proposal.symbol, side: proposal.side,
       amountUsd: String(proposal.amountUsd), assetClass: proposal.assetClass,

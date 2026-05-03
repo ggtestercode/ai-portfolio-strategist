@@ -10,6 +10,8 @@ import { db, profileTable, holdingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { closePosition as etoroClose, getPortfolio } from "../brokers/etoro";
 import { closePosition as okxClose, getPositions as okxGetPositions } from "../brokers/okx";
+import { closePositionPaper, getPositionsPaper } from "../brokers/okxPaper";
+import { okxPaperMode } from "./startup";
 
 interface EtoroPos {
   positionId?: string | number;
@@ -160,8 +162,17 @@ interface ParsedTrade {
 async function parseTrade(message: string): Promise<ParsedTrade | null> {
   const res = await llm.json<ParsedTrade | { symbol: null }>({
     taskType:      "command_parse",
-    systemContext: "Extract trade parameters from a natural language message. Reply JSON only. If not a clear trade instruction, return {\"symbol\":null}. Default broker to 'okx' for crypto, 'etoro' for stocks.",
-    prompt: `Extract from: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER or BTC-USDT-SWAP","side":"buy|sell","amountUsd":number,"broker":"okx|etoro|bybit|mock","assetClass":"Equity|Crypto|ETF|Commodity"}`,
+    systemContext: [
+      "Extract trade parameters from a natural language message. Reply JSON only.",
+      "If not a clear trade instruction, return {\"symbol\":null}.",
+      "Symbol rules:",
+      "- 'BTC USDT', 'BTC/USDT', 'BTC-USDT', 'BTC-USDT-SWAP' → symbol='BTC-USDT', broker='okx'",
+      "- 'ETH USDT', 'ETH/USDT', 'ETH-USDT-SWAP'              → symbol='ETH-USDT', broker='okx'",
+      "- Other crypto pairs: BASE/QUOTE → symbol='BASE-QUOTE' (no -SWAP suffix), broker='okx'",
+      "- Bare 'BTC' with no quote currency → symbol='BTC', broker='etoro' (stock/CFD)",
+      "- Stocks/ETFs (AAPL, SPY, TSLA)     → broker='etoro'",
+    ].join(" "),
+    prompt: `Extract from: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER","side":"buy|sell","amountUsd":number,"broker":"okx|etoro|bybit|mock","assetClass":"Equity|Crypto|ETF|Commodity"}`,
     schema: {
       type: "object",
       properties: {
@@ -176,8 +187,11 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
   });
   const d = res.data as ParsedTrade & { symbol: string | null };
   if (!d.symbol || !d.side || !d.amountUsd) return null;
+  // Normalise: strip -SWAP suffix, replace / with -
+  const rawSym = d.symbol.toUpperCase().replace("/", "-").replace("-SWAP", "");
+  const symbol = rawSym;
   return {
-    symbol:     d.symbol.toUpperCase(),
+    symbol,
     side:       d.side,
     amountUsd:  d.amountUsd,
     broker:     d.broker ?? "etoro",
@@ -188,8 +202,12 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
 async function parseCloseSymbol(message: string): Promise<string | null> {
   const res = await llm.json<{ symbol: string | null }>({
     taskType:      "command_parse",
-    systemContext: "Extract the ticker symbol the user wants to close/exit. Reply JSON only.",
-    prompt:        `Message: "${message.slice(0, 200)}"\nReturn: {"symbol":"TICKER"} or {"symbol":null} if unclear.`,
+    systemContext: [
+      "Extract the symbol the user wants to close/exit. Reply JSON only.",
+      "Preserve the full pair: 'BTC/USDT' → 'BTC/USDT', 'BTC USDT' → 'BTC/USDT'.",
+      "Bare 'BTC' with no quote → 'BTC'.",
+    ].join(" "),
+    prompt: `Message: "${message.slice(0, 200)}"\nReturn: {"symbol":"TICKER or PAIR"} or {"symbol":null} if unclear.`,
     schema: {
       type: "object",
       properties: { symbol: { type: ["string", "null"] } },
@@ -201,21 +219,28 @@ async function parseCloseSymbol(message: string): Promise<string | null> {
 }
 
 async function handleClosePosition(symbol: string): Promise<string> {
-  const instId = symbol.toUpperCase();
-  const isOKX  = instId.includes("-");
+  // Strip -SWAP suffix — OKX is spot-only now
+  const raw    = symbol.toUpperCase().replace("/", "-").replace("-SWAP", "");
+  const instId = raw;
+  const isOKX  = raw.includes("-");
 
-  // Try OKX first if symbol looks like OKX format, or try both
-  if (isOKX || !instId.match(/^[A-Z]{1,5}$/)) {
+  // For paper mode: also try short-name lookup against stored positions
+  const tryOKX = isOKX || (okxPaperMode);
+  if (tryOKX) {
     try {
-      const result = await okxClose(instId);
+      const result = okxPaperMode
+        ? await closePositionPaper(instId)
+        : await okxClose(instId);
       await syncHoldingsFromEtoro().catch(() => {});
       return [
         `✅ CLOSED ${instId}`,
         `Order ID: ${result.orderId}`,
-        `Broker: OKX`,
+        `Broker: OKX${okxPaperMode ? " (Paper)" : ""}`,
+        ...(okxPaperMode && "message" in result ? [result.message] : []),
       ].join("\n");
     } catch (err) {
       if (isOKX) return `❌ Failed to close ${instId}: ${err instanceof Error ? err.message : String(err)}`;
+      // short symbol failed on OKX — fall through to eToro
     }
   }
 
@@ -262,6 +287,19 @@ async function handleClosePosition(symbol: string): Promise<string> {
 
 async function fetchSymbolPrice(symbol: string): Promise<number | null> {
   try {
+    // OKX spot/SWAP symbols — any dash-separated pair (BTC-USDT, ETH-USDT, BTC-USDT-SWAP)
+    if (symbol.includes("-")) {
+      const instId = symbol.toUpperCase().replace("-SWAP", ""); // normalise to spot
+      const base   = process.env["OKX_BASE_URL"] ?? "https://www.okx.com";
+      const res  = await fetch(
+        `${base}/api/v5/market/ticker?instId=${encodeURIComponent(instId)}`,
+        { signal: AbortSignal.timeout(4000) }
+      );
+      const json = await res.json() as { code: string; data: Array<{ last: string }> };
+      if (json.code === "0" && json.data[0]) return parseFloat(json.data[0].last);
+      return null;
+    }
+    // Equities/ETFs — Yahoo Finance
     const url = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbol)}&range=1d&interval=1d`;
     const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
@@ -284,11 +322,12 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     broker:     trade.broker,
   });
 
-  const result = await approvalGate.submit(proposal);
-  const capPct  = ((trade.amountUsd / totalCapital) * 100).toFixed(0);
-  const leverage = trade.assetClass === "Crypto" ? 50 : 20;
-  const exposure = (trade.amountUsd * leverage).toFixed(0);
-  const orderId  = result.orderId ?? proposal.id;
+  const result   = await approvalGate.submit(proposal);
+  const isOKXSpot = proposal.broker === "okx";
+  const capPct   = ((trade.amountUsd / totalCapital) * 100).toFixed(0);
+  const leverage  = isOKXSpot ? 1 : (trade.assetClass === "Crypto" ? 50 : 20);
+  const exposure  = (trade.amountUsd * leverage).toFixed(0);
+  const orderId   = result.orderId ?? proposal.id;
 
   if (result.action === "rejected") {
     return [
@@ -299,6 +338,13 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
   }
 
   if (result.action === "queued") {
+    if (trade.amountUsd > totalCapital * 0.5) {
+      return [
+        `⏳ Awaiting your approval — trade exceeds normal limit`,
+        `${trade.side.toUpperCase()} ${trade.symbol}: $${trade.amountUsd.toLocaleString("en-US")}`,
+        `Check Telegram for the approval request (expires in 5 min).`,
+      ].join("\n");
+    }
     return [
       `⏳ ${trade.side.toUpperCase()} ${trade.symbol} — Awaiting approval`,
       `Approval ID: ${proposal.id}`,
@@ -307,9 +353,8 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
   }
 
   if (result.action === "executed") {
-    const isOKX = proposal.broker === "okx";
-    // OKX (crypto derivatives) is 24/7 — only check market hours for eToro equities
-    const marketClosed = !isOKX && !isMarketOpen(trade.assetClass);
+    // OKX spot is 24/7 — only check market hours for eToro equities
+    const marketClosed = !isOKXSpot && !isMarketOpen(trade.assetClass);
 
     if (marketClosed) {
       pendingOrdersMap.set(orderId, {
@@ -337,16 +382,24 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     const priceStr = price
       ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
       : "N/A";
-    const mode = isOKX
-      ? `Mode: ${process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live"}`
-      : `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`;
+
+    if (isOKXSpot) {
+      const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
+      return [
+        `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
+        `Order ID: ${orderId}`,
+        `Amount: $${trade.amountUsd} (spot)`,
+        `Mode: OKX ${okxMode}`,
+        `Price: ${priceStr}`,
+      ].join("\n");
+    }
 
     return [
       `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
       `Order ID: ${orderId}`,
       `Amount: $${trade.amountUsd} at ${leverage}x`,
       `Exposure: $${exposure}`,
-      mode,
+      `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
       `Entry price: ${priceStr}`,
     ].join("\n");
   }
