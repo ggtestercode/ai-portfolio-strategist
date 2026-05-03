@@ -69,3 +69,34 @@ export async function closePosition(positionId: string): Promise<void> {
 export async function getPortfolio(): Promise<unknown> {
   return request<unknown>("GET", `/trading/info/${ENV}/portfolio`);
 }
+
+export interface PendingEtoroOrder {
+  orderId:   string;
+  symbol:    string;
+  side:      "buy" | "sell";
+  amountUsd: number;
+  placedAt?: string;
+}
+
+export async function getOrders(): Promise<PendingEtoroOrder[]> {
+  try {
+    const data = await request<{
+      orders?: Array<{
+        orderId?: number;
+        symbol?:  string;
+        isBuy?:   boolean;
+        amount?:  number;
+        createdDate?: string;
+      }>;
+    }>("GET", `/trading/info/${ENV}/orders`);
+    return (data.orders ?? []).map(o => ({
+      orderId:   String(o.orderId ?? ""),
+      symbol:    (o.symbol ?? "").toUpperCase(),
+      side:      o.isBuy !== false ? "buy" : "sell",
+      amountUsd: o.amount ?? 0,
+      placedAt:  o.createdDate,
+    }));
+  } catch {
+    return [];
+  }
+}

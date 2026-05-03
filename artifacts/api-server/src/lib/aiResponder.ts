@@ -40,6 +40,47 @@ export async function syncHoldingsFromEtoro(): Promise<void> {
   }
 }
 
+// ── Market hours ─────────────────────────────────────────────────────────────
+
+const CRYPTO_ASSET_CLASSES = new Set(["Crypto", "crypto"]);
+
+function isMarketOpen(assetClass: string): boolean {
+  if (CRYPTO_ASSET_CLASSES.has(assetClass)) return true; // 24/7
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false;
+  // US EDT = UTC-4 (Mar–Nov). Market: 9:30 AM–4:00 PM ET = 13:30–20:00 UTC
+  const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return utcMinutes >= 810 && utcMinutes < 1200; // 13:30–20:00 UTC
+}
+
+function nextOpenStr(assetClass: string): string {
+  if (CRYPTO_ASSET_CLASSES.has(assetClass)) return "now (24/7)";
+  return "9:30 PM SGT (Mon–Fri)";
+}
+
+// ── Pending orders (in-memory, resets on restart) ────────────────────────────
+
+export interface PendingOrder {
+  id:          string;
+  symbol:      string;
+  side:        "buy" | "sell";
+  amountUsd:   number;
+  assetClass:  string;
+  broker:      string;
+  queuedAt:    Date;
+}
+
+const pendingOrdersMap = new Map<string, PendingOrder>();
+
+export function getPendingOrders(): PendingOrder[] {
+  return Array.from(pendingOrdersMap.values());
+}
+
+export function removePendingOrder(id: string): void {
+  pendingOrdersMap.delete(id);
+}
+
 export interface AssistantProfile {
   name:             string;
   riskTolerance:    "low" | "medium" | "high";
@@ -201,6 +242,20 @@ async function handleClosePosition(symbol: string): Promise<string> {
   ].join("\n");
 }
 
+async function fetchSymbolPrice(symbol: string): Promise<number | null> {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbol)}&range=1d&interval=1d`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      spark?: { result?: Array<{ response?: Array<{ meta?: { regularMarketPrice?: number } }> }> }
+    };
+    return data?.spark?.result?.[0]?.response?.[0]?.meta?.regularMarketPrice ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<string> {
   const proposal = buildProposal({
     symbol:     trade.symbol,
@@ -211,37 +266,70 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
   });
 
   const result = await approvalGate.submit(proposal);
-  const capPct = ((trade.amountUsd / totalCapital) * 100).toFixed(0);
+  const capPct  = ((trade.amountUsd / totalCapital) * 100).toFixed(0);
+  const leverage = trade.assetClass === "Crypto" ? 50 : 20;
+  const exposure = (trade.amountUsd * leverage).toFixed(0);
+  const orderId  = result.orderId ?? proposal.id;
 
   if (result.action === "rejected") {
-    return `❌ Trade rejected: ${result.message}`;
-  }
-  if (result.action === "queued") {
-    return `⏳ Queued for approval — ${trade.side.toUpperCase()} $${trade.amountUsd} ${trade.symbol} on ${trade.broker}\nApproval ID: ${proposal.id}`;
-  }
-  if (result.action === "executed") {
-    const leverage = trade.assetClass === "Crypto" ? 50 : 20;
-    const exposure = (trade.amountUsd * leverage).toFixed(0);
-
-    // Sync local DB from eToro so /positions is immediately accurate
-    await syncHoldingsFromEtoro().catch(() => {});
-
-    const [holding] = await db.select().from(holdingsTable)
-      .where(eq(holdingsTable.symbol, trade.symbol)).limit(1);
-    const holdingLine = holding
-      ? `Holdings: ${trade.symbol} $${(holding.quantity * holding.price).toFixed(2)}`
-      : `Holdings: ${trade.symbol} $${trade.amountUsd}`;
-
     return [
-      `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
-      `Order ID: ${result.orderId ?? "N/A"}`,
-      `Amount: $${trade.amountUsd} at ${leverage}x`,
-      `Exposure: $${exposure}`,
-      `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
-      holdingLine,
+      `❌ ${trade.side.toUpperCase()} ${trade.symbol} — Rejected`,
+      `Reason: ${result.message ?? "Unknown error"}`,
+      `Nothing was placed.`,
     ].join("\n");
   }
-  return `❌ Execution failed: ${result.message}`;
+
+  if (result.action === "queued") {
+    return [
+      `⏳ ${trade.side.toUpperCase()} ${trade.symbol} — Awaiting approval`,
+      `Approval ID: ${proposal.id}`,
+      `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure`,
+    ].join("\n");
+  }
+
+  if (result.action === "executed") {
+    if (!isMarketOpen(trade.assetClass)) {
+      // eToro accepted the order but market is closed — it will fill on open
+      pendingOrdersMap.set(orderId, {
+        id:        orderId,
+        symbol:    trade.symbol,
+        side:      trade.side,
+        amountUsd: trade.amountUsd,
+        assetClass: trade.assetClass,
+        broker:    proposal.broker,
+        queuedAt:  new Date(),
+      });
+      return [
+        `⏳ ${trade.side.toUpperCase()} ${trade.symbol} — Pending`,
+        `Order ID: ${orderId}`,
+        `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure`,
+        `Reason: Market closed or liquidity pause`,
+        `US market opens: ${nextOpenStr(trade.assetClass)}`,
+        `Use /orders to track this`,
+      ].join("\n");
+    }
+
+    // Market open — filled immediately
+    await syncHoldingsFromEtoro().catch(() => {});
+    const price    = await fetchSymbolPrice(trade.symbol);
+    const priceStr = price
+      ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+      : "N/A";
+
+    return [
+      `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Filled`,
+      `Order ID: ${orderId}`,
+      `Amount: $${trade.amountUsd} at ${leverage}x → $${exposure} exposure`,
+      `Capital used: $${trade.amountUsd} / $${totalCapital} (${capPct}%)`,
+      `Entry price: ${priceStr}`,
+    ].join("\n");
+  }
+
+  return [
+    `❌ ${trade.side.toUpperCase()} ${trade.symbol} — Rejected`,
+    `Reason: ${result.message ?? "Unknown error"}`,
+    `Nothing was placed.`,
+  ].join("\n");
 }
 
 async function fetchLivePrices(): Promise<string> {

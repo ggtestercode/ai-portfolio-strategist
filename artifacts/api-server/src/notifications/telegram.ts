@@ -4,13 +4,14 @@ import {
   generateAssistantReply,
   getCachedContext,
   syncHoldingsFromEtoro,
+  getPendingOrders,
   type AssistantContext,
 } from "../lib/aiResponder";
 import { getPortfolioSnapshot }            from "../lib/portfolio";
 import { runScan, type Recommendation }    from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
-import { getPortfolio }                    from "../brokers/etoro";
+import { getPortfolio, getOrders }         from "../brokers/etoro";
 import {
   db,
   profileTable,
@@ -380,20 +381,24 @@ export function startPolling(): void {
     }
   });
 
-  // ── /sync — rebuild local DB from eToro live positions ──────────────────
+  // ── /sync — rebuild local DB from eToro + report counts ─────────────────
   b.onText(/^\/sync(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
       await syncHoldingsFromEtoro();
-      const holdings = await db.select().from(holdingsTable);
-      const lines = holdings.length
-        ? holdings.map(h => `• <b>${escapeHtml(h.symbol)}</b> $${(h.quantity * h.price).toFixed(2)}`).join("\n")
-        : "(none)";
+      const [holdings, pending] = await Promise.all([
+        db.select().from(holdingsTable),
+        Promise.resolve(getPendingOrders()),
+      ]);
+      const now = new Date().toLocaleTimeString("en-SG", {
+        hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
+      }) + " SGT";
       await b.sendMessage(chatId, [
-        `🔄 <b>Sync complete — ${holdings.length} position(s)</b>`,
-        `<i>${utcNow()}</i>`,
+        `🔄 <b>Synced from eToro</b>`,
         ``,
-        lines,
+        `Open positions: <b>${holdings.length}</b>`,
+        `Pending orders: <b>${pending.length}</b>`,
+        `Last sync: ${now}`,
       ].join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
@@ -401,7 +406,7 @@ export function startPolling(): void {
     }
   });
 
-  // ── /positions — live eToro open positions ───────────────────────────────
+  // ── /positions — open fills + pending orders ─────────────────────────────
   b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
@@ -411,39 +416,105 @@ export function startPolling(): void {
         investedAmount?: number;
         profit?: number;
         isBuy?: boolean;
+        openRate?: number;
+        currentRate?: number;
       }
       interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
 
-      const portfolio = (await getPortfolio()) as EtoroPortfolio;
-      const positions = portfolio?.positions ?? [];
+      // Fetch eToro positions and pending orders in parallel
+      const [portfolio, etoroOrders] = await Promise.all([
+        getPortfolio().then(p => ((p as EtoroPortfolio)?.positions ?? []) as EtoroPos[]).catch(() => [] as EtoroPos[]),
+        getOrders().catch(() => []),
+      ]);
 
-      if (!positions.length) {
+      // Merge eToro API orders with in-memory pending store (dedup by id)
+      const localPending = getPendingOrders();
+      const orderMap = new Map<string, { symbol: string; side: string; amountUsd: number; placedAt?: string }>();
+      for (const o of etoroOrders) orderMap.set(o.orderId, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.placedAt });
+      for (const o of localPending) if (!orderMap.has(o.id)) orderMap.set(o.id, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.queuedAt.toISOString() });
+      const pendingOrders = Array.from(orderMap.values());
+
+      const now = new Date().toLocaleTimeString("en-SG", {
+        hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
+      }) + " SGT";
+
+      if (!portfolio.length && !pendingOrders.length) {
         await b.sendMessage(chatId,
-          `📊 <b>Open Positions</b>\n\nNo open positions on eToro.\n<i>${utcNow()}</i>`,
+          `📊 No open positions or pending orders.\nLast synced: ${now}`,
           { parse_mode: "HTML" });
         return;
       }
 
-      const lines = positions.map((p, i) => {
-        const side    = p.isBuy !== false ? "LONG" : "SHORT";
-        const invested = (p.investedAmount ?? 0).toFixed(2);
-        const profit  = p.profit ?? 0;
-        const pnlSign = profit >= 0 ? "+" : "";
-        const pnlPct  = p.investedAmount
-          ? ((profit / p.investedAmount) * 100).toFixed(1)
-          : "0.0";
-        return `${i + 1}. <b>${escapeHtml(p.symbol ?? String(p.positionId))}</b> — $${invested} ${side}, ${pnlSign}$${profit.toFixed(2)} (${pnlSign}${pnlPct}%)`;
-      }).join("\n");
+      const out: string[] = [`📊 <b>Positions &amp; Orders</b>`, ``];
 
-      await b.sendMessage(chatId, [
-        `📊 <b>Open Positions (${positions.length})</b>`,
-        `<i>${utcNow()}</i>`,
-        ``,
-        lines,
-      ].join("\n"), { parse_mode: "HTML" });
+      if (portfolio.length) {
+        out.push(`<b>Open (${portfolio.length}):</b>`);
+        for (const p of portfolio) {
+          const invested = (p.investedAmount ?? 0).toFixed(2);
+          const profit   = p.profit ?? 0;
+          const sign     = profit >= 0 ? "+" : "";
+          const pct      = p.investedAmount ? ((profit / p.investedAmount) * 100).toFixed(1) : "0.0";
+          const entry    = p.openRate ? ` · entry $${p.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
+          out.push(`• <b>${escapeHtml(p.symbol ?? "?")}</b> — $${invested} long${entry} · P/L ${sign}$${profit.toFixed(2)} (${sign}${pct}%)`);
+        }
+        out.push(``);
+      }
+
+      if (pendingOrders.length) {
+        out.push(`<b>Pending (${pendingOrders.length}):</b>`);
+        for (const o of pendingOrders) {
+          const timeStr = o.placedAt
+            ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT"
+            : "recently";
+          out.push(`• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} · placed ${timeStr} · waiting for market open`);
+        }
+        out.push(``);
+      }
+
+      out.push(`<i>Last synced: ${now}</i>`);
+      await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /positions failed: ${escapeHtml(m)}`);
+    }
+  });
+
+  // ── /orders — pending unfilled orders only ────────────────────────────────
+  b.onText(/^\/orders(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const [etoroOrders, localPending] = await Promise.all([
+        getOrders().catch(() => []),
+        Promise.resolve(getPendingOrders()),
+      ]);
+
+      const orderMap = new Map<string, { symbol: string; side: string; amountUsd: number; placedAt?: string }>();
+      for (const o of etoroOrders) orderMap.set(o.orderId, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.placedAt });
+      for (const o of localPending) if (!orderMap.has(o.id)) orderMap.set(o.id, { symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, placedAt: o.queuedAt.toISOString() });
+      const orders = Array.from(orderMap.values());
+
+      if (!orders.length) {
+        await b.sendMessage(chatId, `📋 No pending orders.`, { parse_mode: "HTML" });
+        return;
+      }
+
+      const lines = orders.map(o => {
+        const timeStr = o.placedAt
+          ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT"
+          : "recently";
+        return `• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} · placed ${timeStr}`;
+      }).join("\n");
+
+      await b.sendMessage(chatId, [
+        `📋 <b>Pending Orders (${orders.length})</b>`,
+        ``,
+        lines,
+        ``,
+        `<i>These will fill when market opens.</i>`,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ /orders failed: ${escapeHtml(m)}`);
     }
   });
 
