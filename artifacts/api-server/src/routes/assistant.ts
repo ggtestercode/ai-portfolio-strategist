@@ -84,13 +84,14 @@ router.post("/assistant/messages", async (req, res): Promise<void> => {
 // POST /api/command
 router.post("/command", async (req, res): Promise<void> => {
   try {
-    const { command } = req.body as { command: string };
-    if (!command?.trim()) {
-      res.status(400).json({ error: "command is required" });
+    const { prompt, command } = req.body as { prompt?: string; command?: string };
+    const text = (prompt ?? command ?? "").trim();
+    if (!text) {
+      res.status(400).json({ error: "prompt is required" });
       return;
     }
     const ctx   = await buildContext();
-    const reply = await generateAssistantReply(command, ctx);
+    const reply = await generateAssistantReply(text, ctx);
     res.json({ reply: reply.message, meta: reply._meta });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
