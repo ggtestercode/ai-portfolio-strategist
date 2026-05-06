@@ -138,16 +138,30 @@ export async function runScan(): Promise<ScanResult> {
     const holdingSummary = holdings.map(h => `${h.symbol}:$${(h.quantity * h.price).toFixed(0)}`).join(" ");
     const totalPortfolio = holdings.reduce((s, h) => s + h.quantity * h.price, 0);
 
+    const risk            = (profile?.riskTolerance ?? "medium").toLowerCase();
+    const targetReturn    = profile?.targetReturnPct ?? 10;
+    const capital         = profile?.totalCapital ?? 200;
+    const strategyName    = profile?.strategyType ?? "Balanced";
+    const maxPosition     = Math.max(10, (totalPortfolio || capital) * 0.5);
+
+    const riskDirective =
+      risk === "extreme" || risk === "high"
+        ? `EXTREME/HIGH risk: surface only high-conviction momentum plays. Crypto leverage up to 50x. Target: ${targetReturn}%/period.`
+        : risk === "low"
+          ? `LOW risk: prefer defensive, low-volatility assets. Avoid leverage >3x. Target: ${targetReturn}%/period.`
+          : `MEDIUM risk: balanced approach. Leverage max 10x. Target: ${targetReturn}%/period.`;
+
     const systemContext = [
       "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
       `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":""}],"scanTimestamp":"","summary":""}`,
       "Rules: rank exactly 5 opportunities. 80-100=STRONG BUY(strong_buy), 60-79=BUY(high), 40-59=WATCH(medium), <40=AVOID.",
       "Multi-timeframe alignment: confirm trend across 1h, 4h, 1D before signalling. Higher conviction = more TF alignment.",
       "RSI <30 oversold (bullish), RSI >70 overbought (bearish). EMA20>EMA50 = uptrend.",
-      "This is an EXTREME risk portfolio: 50% monthly return target. Only surface high-conviction momentum plays.",
+      `User profile: Strategy=${strategyName}, Risk=${risk}, Target=${targetReturn}%/period, Capital=$${capital}. Only suggest signals matching this profile.`,
+      riskDirective,
       "Leverage: up to 50x crypto, 20x stocks. stopLoss must be realistic (5-15% from entry for futures).",
       "Order type: use 'market'(IOC) for strong momentum/STRONG_BUY/STRONG_SELL. Use 'limit'(GTC) for support/resistance entries. Set limitPrice only for limit orders.",
-      `Max position: $${(totalPortfolio * 0.5).toFixed(0)} (50% of $${totalPortfolio.toFixed(0)} capital).`,
+      `Max position: $${maxPosition.toFixed(0)} (50% of capital).`,
     ].join("\n");
 
     const prompt = [

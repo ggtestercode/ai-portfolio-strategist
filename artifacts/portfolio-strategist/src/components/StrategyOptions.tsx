@@ -7,6 +7,7 @@ import {
   Flame,
   Check,
   TrendingUp,
+  Rocket,
 } from "lucide-react";
 import {
   useGetStrategyOptions,
@@ -54,6 +55,22 @@ function formatPickWeight(n: number) {
   return `${n.toFixed(1)}%`;
 }
 
+interface ExecuteOrder {
+  symbol:     string;
+  assetClass: string;
+  amountUsd:  number;
+  status:     "queued" | "executed" | "skipped" | "failed";
+  reason:     string;
+}
+
+interface ExecuteResult {
+  availableCash:     number;
+  totalDeployed:     number;
+  orders:            ExecuteOrder[];
+  allocationSummary: Array<{ assetClass: string; targetPct: number; amountUsd: number }>;
+  mode:              string;
+}
+
 export default function StrategyOptions() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -62,10 +79,15 @@ export default function StrategyOptions() {
 
   const [selected, setSelected] = useState<Set<SelectionKey>>(new Set());
   const [planName, setPlanName] = useState("Custom Mix");
+  const [strategyApplied, setStrategyApplied] = useState(false);
+  const [executing, setExecuting]             = useState(false);
+  const [executeResult, setExecuteResult]     = useState<ExecuteResult | null>(null);
 
-  // When options change (e.g. after a regenerate), reset selection.
+  // When options change (e.g. after a regenerate), reset selection and execute result.
   useEffect(() => {
     setSelected(new Set());
+    setStrategyApplied(false);
+    setExecuteResult(null);
   }, [options?.[0]?.generatedAt]);
 
   const selectedPicks = useMemo(() => {
@@ -145,11 +167,36 @@ export default function StrategyOptions() {
       ]);
       toast({
         title: "Strategy applied",
-        description: `${picksPayload.length} picks now drive your target allocation.`,
+        description: `${picksPayload.length} picks set as target allocation. Click "Build Portfolio" to deploy capital.`,
       });
+      setStrategyApplied(true);
+      setExecuteResult(null);
       clearSelection();
     } catch {
       toast({ title: "Could not apply strategy", variant: "destructive" });
+    }
+  };
+
+  const handleExecute = async () => {
+    setExecuting(true);
+    try {
+      const res = await fetch("/api/strategy/execute", { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText })) as { error?: string };
+        throw new Error(err.error ?? "Execute failed");
+      }
+      const result = await res.json() as ExecuteResult;
+      setExecuteResult(result);
+      const queued   = result.orders.filter(o => o.status === "queued").length;
+      const executed = result.orders.filter(o => o.status === "executed").length;
+      toast({
+        title: "Portfolio build started",
+        description: `$${result.totalDeployed.toFixed(2)} deployed — ${executed} executed, ${queued} pending approval (${result.mode} mode).`,
+      });
+    } catch (err: unknown) {
+      toast({ title: "Could not build portfolio", description: String(err), variant: "destructive" });
+    } finally {
+      setExecuting(false);
     }
   };
 
@@ -350,7 +397,57 @@ export default function StrategyOptions() {
           <Sparkles className="w-4 h-4 mr-2" />
           {apply.isPending ? "Applying…" : "Apply to portfolio"}
         </Button>
+        {strategyApplied && (
+          <Button
+            variant="outline"
+            onClick={handleExecute}
+            disabled={executing}
+            className="md:w-52 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+          >
+            <Rocket className="w-4 h-4 mr-2" />
+            {executing ? "Building…" : "Build Portfolio"}
+          </Button>
+        )}
       </div>
+
+      {executeResult && (
+        <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold">
+              Portfolio Build — ${executeResult.totalDeployed.toFixed(2)} deployed
+            </p>
+            <span className="text-xs text-muted-foreground capitalize">{executeResult.mode} mode</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            {executeResult.allocationSummary.map(a => (
+              <div key={a.assetClass} className="flex justify-between bg-card/40 rounded px-2 py-1">
+                <span className="text-muted-foreground">{a.assetClass} {a.targetPct}%</span>
+                <span className="font-medium">${a.amountUsd.toFixed(0)}</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-1">
+            {executeResult.orders.filter(o => o.status !== "skipped").map((o, i) => (
+              <div key={`${o.symbol}-${i}`} className="flex items-center justify-between text-xs">
+                <span className="font-mono">{o.symbol}</span>
+                <span className="text-muted-foreground">${o.amountUsd.toFixed(2)}</span>
+                <span className={
+                  o.status === "executed" ? "text-emerald-400" :
+                  o.status === "queued"   ? "text-amber-400" :
+                  "text-rose-400"
+                }>
+                  {o.status === "executed" ? "Executed" : o.status === "queued" ? "Pending approval" : "Failed"}
+                </span>
+              </div>
+            ))}
+          </div>
+          {executeResult.availableCash > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Broker available cash: ${executeResult.availableCash.toFixed(2)}
+            </p>
+          )}
+        </div>
+      )}
     </Card>
   );
 }

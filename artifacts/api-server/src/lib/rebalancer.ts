@@ -1,5 +1,6 @@
 import { llm }                          from "./llmRouter";
 import { approvalGate, buildProposal }  from "./approvalGate";
+import { buildPortfolioFromTargets }    from "./strategyExecutor";
 import { db, holdingsTable, targetAllocationsTable, profileTable } from "@workspace/db";
 
 interface RebalanceTrade {
@@ -26,6 +27,27 @@ async function buildRebalanceResult(): Promise<RebalanceResult> {
   ]);
 
   const totalValue = holdings.reduce((s, h) => s + h.quantity * h.price, 0);
+
+  // Empty portfolio + targets set → build from scratch via strategy executor
+  if (totalValue === 0 && targets.length > 0) {
+    console.log("[rebalancer] Empty portfolio with targets — triggering initial portfolio build");
+    const execResult = await buildPortfolioFromTargets();
+    const trades = execResult.orders
+      .filter(o => o.status === "queued" || o.status === "executed")
+      .map(o => ({
+        symbol:     o.symbol,
+        assetClass: o.assetClass,
+        side:       "buy" as const,
+        amountUsd:  o.amountUsd,
+        rationale:  "Initial portfolio build from strategy targets",
+      }));
+    return {
+      trades,
+      summary: `Initial build: $${execResult.totalDeployed.toFixed(0)} queued across ${trades.length} orders (mode: ${execResult.mode})`,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   if (totalValue === 0) return { ...FALLBACK, summary: "No portfolio value to rebalance" };
 
   const currentAlloc = holdings.reduce<Record<string, number>>((acc, h) => {
