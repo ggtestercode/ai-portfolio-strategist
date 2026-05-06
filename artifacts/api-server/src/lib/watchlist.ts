@@ -26,12 +26,12 @@ export async function getWatchlist(): Promise<WatchlistEntry[]> {
     } catch { /* fall through */ }
   }
 
-  // Build default: OKX perpetuals + top-20 crypto + top-50 S&P 500
-  const okxDerivatives: WatchlistEntry[] = [
-    { symbol: "BTC-USDT-SWAP", assetClass: "Derivative" },
-    { symbol: "ETH-USDT-SWAP", assetClass: "Derivative" },
-    { symbol: "SOL-USDT-SWAP", assetClass: "Derivative" },
-    { symbol: "BNB-USDT-SWAP", assetClass: "Derivative" },
+  // Build default: OKX spot crypto + top-20 crypto + top-50 S&P 500
+  const okxSpot: WatchlistEntry[] = [
+    { symbol: "BTC-USDT", assetClass: "Crypto" },
+    { symbol: "ETH-USDT", assetClass: "Crypto" },
+    { symbol: "SOL-USDT", assetClass: "Crypto" },
+    { symbol: "BNB-USDT", assetClass: "Crypto" },
   ];
 
   const crypto: WatchlistEntry[] = [];
@@ -47,7 +47,7 @@ export async function getWatchlist(): Promise<WatchlistEntry[]> {
     .slice(0, 50)
     .map(s => ({ symbol: s, assetClass: "Equity" }));
 
-  _cache = [...okxDerivatives, ...crypto, ...stocks];
+  _cache = [...okxSpot, ...crypto, ...stocks];
   persist(_cache);
   return _cache;
 }

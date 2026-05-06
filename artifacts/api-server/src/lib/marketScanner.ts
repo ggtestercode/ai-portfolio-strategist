@@ -27,6 +27,10 @@ export interface ScanOpportunity {
   leverage?:           number;
   positionSizeUsd?:    number;
   timeframeAlignment?: string;
+  orderType?:      "market" | "limit";
+  limitPrice?:     number;
+  timeInForce?:    "IOC" | "GTC";
+  orderReasoning?: string;
 }
 
 // ── Technical indicators ──────────────────────────────────────────────────────
@@ -136,12 +140,13 @@ export async function runScan(): Promise<ScanResult> {
 
     const systemContext = [
       "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":""}],"scanTimestamp":"","summary":""}`,
+      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":""}],"scanTimestamp":"","summary":""}`,
       "Rules: rank exactly 5 opportunities. 80-100=STRONG BUY(strong_buy), 60-79=BUY(high), 40-59=WATCH(medium), <40=AVOID.",
       "Multi-timeframe alignment: confirm trend across 1h, 4h, 1D before signalling. Higher conviction = more TF alignment.",
       "RSI <30 oversold (bullish), RSI >70 overbought (bearish). EMA20>EMA50 = uptrend.",
       "This is an EXTREME risk portfolio: 50% monthly return target. Only surface high-conviction momentum plays.",
       "Leverage: up to 50x crypto, 20x stocks. stopLoss must be realistic (5-15% from entry for futures).",
+      "Order type: use 'market'(IOC) for strong momentum/STRONG_BUY/STRONG_SELL. Use 'limit'(GTC) for support/resistance entries. Set limitPrice only for limit orders.",
       `Max position: $${(totalPortfolio * 0.5).toFixed(0)} (50% of $${totalPortfolio.toFixed(0)} capital).`,
     ].join("\n");
 
@@ -177,6 +182,8 @@ export async function runScan(): Promise<ScanResult> {
                 entry: { type: "number" }, stopLoss: { type: "number" },
                 takeProfit: { type: "number" }, leverage: { type: "number" },
                 positionSizeUsd: { type: "number" }, timeframeAlignment: { type: "string" },
+                orderType: { type: "string" }, limitPrice: { type: "number" },
+                timeInForce: { type: "string" }, orderReasoning: { type: "string" },
               },
             },
           },
@@ -195,7 +202,7 @@ export async function runScan(): Promise<ScanResult> {
 
     // Auto-propose top BUY / STRONG BUY opportunities
     if (profile) {
-      const tradeAmount = (profile.totalCapital ?? 10000) * 0.02;
+      const tradeAmount = Math.max(10, (profile.totalCapital ?? 200) * 0.10);
       const autoPropose = result.opportunities.filter(
         o => o.recommendation === "BUY" || o.recommendation === "STRONG BUY"
       ).slice(0, 2);

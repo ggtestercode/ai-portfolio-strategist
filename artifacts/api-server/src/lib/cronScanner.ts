@@ -2,10 +2,9 @@ import cron, { type ScheduledTask } from "node-cron";
 import { runScan, type ScanResult }        from "./marketScanner";
 import { cache, CacheKey }                 from "./contextCache";
 import { approvalGate, buildProposal }     from "./approvalGate";
-import { getLeverageForCoin, isCoinSuspended, updateDailyPnl, getSuspendedCoins } from "./leverageManager";
-import { getDailyPnl }                     from "./tradeMemoryLib";
-import { openPosition as bybitOpen, setTrailingStop } from "../brokers/bybit";
-import { openPosition as okxOpen }         from "../brokers/okx";
+import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
+import { getDailyPnl, logOpenTrade }       from "./tradeMemoryLib";
+import { openPosition as okxOpen, openLimitPosition as okxOpenLimit } from "../brokers/okx";
 import { db, profileTable, botStateTable } from "@workspace/db";
 import { eq }                              from "drizzle-orm";
 
@@ -29,7 +28,6 @@ export function registerAlertNotifier(fn: AlertNotifier): void { alertFn  = fn; 
 const SCAN_INTERVAL    = process.env["SCAN_INTERVAL"] ?? "0 */4 * * *";
 const MAX_AUTO_TRADES  = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
 const LOSS_LIMIT_PCT   = 0.30;
-const TRAILING_STOP    = 0.40; // 40% trailing stop on Bybit positions
 
 // ── Daily loss limit (uses trade_log) ────────────────────────────────────────
 async function checkDailyLossLimit(): Promise<boolean> {
@@ -62,41 +60,85 @@ async function checkDailyLossLimit(): Promise<boolean> {
   } catch { return true; }
 }
 
-// ── Auto-execute strong conviction signals ────────────────────────────────────
-async function executeSignal(opp: ScanResult["opportunities"][0], totalCapital: number): Promise<void> {
-  const sym   = opp.symbol;
-  const isCrypto = opp.assetClass === "Crypto" || sym.includes("USDT");
+// ── Convert Bybit-style symbol to OKX spot (BTCUSDT → BTC-USDT) ─────────────
+function toOkxSpot(sym: string): string {
+  if (sym.includes("-")) return sym; // already OKX format
+  const quote = sym.endsWith("USDC") ? "USDC" : "USDT";
+  const base  = sym.replace(/USDT$/, "").replace(/USDC$/, "");
+  return `${base}-${quote}`;
+}
 
-  if (await isCoinSuspended(sym)) {
-    console.log(`[cronScanner] ${sym} skipped — suspended`);
+// ── Auto-execute strong conviction signals — OKX spot only ───────────────────
+async function executeSignal(opp: ScanResult["opportunities"][0], totalCapital: number): Promise<void> {
+  const rawSym = opp.symbol;
+
+  // Stocks/equities can only trade on eToro — skip for OKX auto-execution
+  const assetClass = opp.assetClass ?? "Crypto";
+  if (assetClass === "Equity" || assetClass === "Stock" || assetClass === "ETF") {
+    console.log(`[cronScanner] ${rawSym} skipped — ${assetClass} not supported on OKX`);
     return;
   }
 
-  let leverage = 10;
-  try { leverage = await getLeverageForCoin(sym); }
-  catch (e) { console.warn(`[cronScanner] Leverage error for ${sym}:`, e); return; }
+  if (await isCoinSuspended(rawSym)) {
+    console.log(`[cronScanner] ${rawSym} skipped — suspended`);
+    return;
+  }
 
-  const amount = Math.min(opp.positionSizeUsd ?? 50, totalCapital * 0.5, 50);
-  const side   = opp.direction === "short" ? "Sell" : "Buy";
+  const maxPerTrade = totalCapital * 0.50;
+  const amount      = Math.max(10, Math.min(opp.positionSizeUsd || 50, maxPerTrade, 50));
+  const side        = opp.direction === "short" ? "sell" : "buy";
+  const okxSym      = toOkxSpot(rawSym);
+  const orderType   = opp.orderType ?? "market";
+  const limitPrice  = opp.limitPrice ?? null;
+  const okxMode     = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
+
+  console.log(`[cronScanner] Auto-trade sizing: ${okxSym} totalCapital=$${totalCapital} amount=$${amount} orderType=${orderType}`);
+
+  if (amount < 5) {
+    console.warn(`[cronScanner] Skipping ${okxSym} — amount $${amount} below $5 minimum`);
+    await alertFn?.(`⚠️ Skipping ${okxSym} — amount $${amount.toFixed(2)} below $5 minimum`).catch(() => {});
+    return;
+  }
 
   try {
-    if (isCrypto) {
-      // Futures on Bybit for crypto
-      const { orderId } = await bybitOpen(sym, side as "Buy" | "Sell", amount, leverage);
-      // Set 40% trailing stop
-      await setTrailingStop(sym, TRAILING_STOP);
-      console.log(`[cronScanner] Auto-executed ${side} ${sym} $${amount} ${leverage}x → ${orderId}`);
-      await alertFn?.(`🤖 Auto-trade: ${side} ${sym}\n$${amount} at ${leverage}x\nOrderId: ${orderId}\nStop: 40% trailing`).catch(() => {});
+    let orderId: string;
+    let entryPrice: number;
+
+    if (orderType === "limit" && limitPrice) {
+      const r = await okxOpenLimit(okxSym, side as "buy" | "sell", amount, limitPrice);
+      orderId    = r.orderId;
+      entryPrice = limitPrice;
     } else {
-      // Spot on OKX for non-crypto
-      const { orderId } = await okxOpen(sym, side.toLowerCase() as "buy" | "sell", amount);
-      console.log(`[cronScanner] Auto-executed ${side} ${sym} $${amount} spot → ${orderId}`);
-      await alertFn?.(`🤖 Auto-trade (spot): ${side} ${sym} $${amount}\nOrderId: ${orderId}`).catch(() => {});
+      const r = await okxOpen(okxSym, side as "buy" | "sell", amount);
+      orderId    = r.orderId;
+      entryPrice = r.entryPrice;  // real OKX ticker price at execution time
     }
+
+    // Log open trade for /history and reflection
+    await logOpenTrade({
+      symbol:    okxSym,
+      broker:    "okx",
+      direction: side === "sell" ? "short" : "long",
+      entryPrice,
+      leverage:  1,
+      amountUsd: amount,
+      reasoning: opp.reasoning,
+    }).catch(e => console.error(`[cronScanner] Trade log insert failed:`, e));
+
+    const orderLabel = orderType === "limit" ? `Limit @$${limitPrice}` : "Market";
+    console.log(`[cronScanner] Auto-executed ${side} ${okxSym} $${amount} spot (${orderLabel}) → ${orderId}`);
+    await alertFn?.([
+      `🤖 Auto-trade: ${side.toUpperCase()} ${okxSym} — Executed`,
+      `Order ID: ${orderId}`,
+      `Amount: $${amount} (spot)`,
+      `Order: ${orderLabel}`,
+      `Broker: OKX ${okxMode}`,
+      `Time: ${new Date().toUTCString()}`,
+    ].join("\n")).catch(() => {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[cronScanner] Auto-execute ${sym} failed:`, msg);
-    await alertFn?.(`❌ Auto-trade failed: ${sym}\n${msg}`).catch(() => {});
+    console.error(`[cronScanner] Auto-execute ${okxSym} failed:`, msg);
+    await alertFn?.(`❌ Auto-trade failed: ${okxSym}\n${msg}`).catch(() => {});
   }
 }
 
@@ -143,7 +185,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         const proposal = buildProposal({
           symbol:       opp.symbol,
           side:         opp.direction === "short" ? "sell" : "buy",
-          amountUsd:    Math.min(opp.positionSizeUsd ?? 50, totalCapital * 0.5),
+          amountUsd:    Math.max(10, Math.min(opp.positionSizeUsd || 50, totalCapital * 0.5, 50)),
           assetClass:   opp.assetClass,
           rationale:    `[Cron] ${opp.recommendation} score=${opp.score}. ${opp.reasoning}`,
           score:        opp.score,

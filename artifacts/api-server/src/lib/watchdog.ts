@@ -3,7 +3,8 @@ import { sql }               from "drizzle-orm";
 import { getAccountBalance } from "../brokers/okx";
 import { getBalance }        from "../brokers/bybit";
 
-const INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+const INTERVAL_MS      = 5 * 60 * 1000;
+const WATCHDOG_ENABLED = process.env["WATCHDOG_ENABLED"] !== "false";
 
 let alertFn: ((msg: string) => Promise<void>) | null = null;
 export function registerWatchdogAlert(fn: (msg: string) => Promise<void>): void { alertFn = fn; }
@@ -26,6 +27,7 @@ async function check(name: string, fn: () => Promise<unknown>): Promise<boolean>
 }
 
 async function runChecks(): Promise<void> {
+  if (!WATCHDOG_ENABLED) return;
   await Promise.allSettled([
     check("Database",    () => db.execute(sql`SELECT 1`)),
     check("OKX API",     () => getAccountBalance()),

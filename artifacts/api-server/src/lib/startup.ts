@@ -1,6 +1,6 @@
 import { approvalGate }        from "./approvalGate";
 import { openPosition }         from "../brokers/etoro";
-import { placeOrder }           from "../brokers/bybit";
+import { openPosition as bybitOpen } from "../brokers/bybit";
 import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
 import { openPositionPaper }    from "../brokers/okxPaper";
 import { sendApprovalRequest }  from "../notifications/telegram";
@@ -15,11 +15,7 @@ export async function initBrokers(): Promise<void> {
   });
 
   approvalGate.registerExecutor("bybit", async (p) => {
-    const result = await placeOrder(
-      p.symbol,
-      p.side === "buy" ? "Buy" : "Sell",
-      p.amountUsd,
-    );
+    const result = await bybitOpen(p.symbol, p.side === "buy" ? "Buy" : "Sell", p.amountUsd, 10);
     return { orderId: result.orderId };
   });
 

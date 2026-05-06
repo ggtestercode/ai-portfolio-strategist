@@ -1,5 +1,5 @@
 import { db, tradeLogTable, tradeMemoryTable } from "@workspace/db";
-import { desc, isNotNull }                       from "drizzle-orm";
+import { desc, isNotNull, and, eq, isNull }      from "drizzle-orm";
 import { llm }                                   from "./llmRouter";
 import { recordTradeOutcome }                    from "./leverageManager";
 
@@ -99,6 +99,13 @@ export async function getRecentTrades(limit = 10): Promise<typeof tradeLogTable.
     .limit(limit);
 }
 
+export async function getOpenTrades(): Promise<typeof tradeLogTable.$inferSelect[]> {
+  return db.select()
+    .from(tradeLogTable)
+    .where(isNull(tradeLogTable.exitAt))
+    .orderBy(desc(tradeLogTable.entryAt));
+}
+
 export async function getDailyPnl(): Promise<number> {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -108,4 +115,97 @@ export async function getDailyPnl(): Promise<number> {
   // Filter in JS since drizzle gte needs importing separately
   const today = rows.filter((_, i) => i === i); // all rows — sum them
   return today.reduce((sum, r) => sum + parseFloat(r.pnl ?? "0"), 0);
+}
+
+export async function logOpenTrade(params: {
+  symbol: string; broker: string; direction: "long" | "short";
+  entryPrice: number; leverage: number; amountUsd: number; reasoning?: string;
+}): Promise<void> {
+  try {
+    await db.insert(tradeLogTable).values({
+      symbol:     params.symbol,
+      broker:     params.broker,
+      direction:  params.direction,
+      entryPrice: String(params.entryPrice),
+      amountUsd:  String(params.amountUsd),
+      leverage:   params.leverage,
+      reasoning:  params.reasoning ?? null,
+      entryAt:    new Date(),
+    });
+  } catch (e) {
+    console.error("[tradeMemory] logOpenTrade failed:", e);
+  }
+}
+
+export async function closeOpenTrade(params: {
+  symbol: string; broker: string; exitPrice: number; amountUsd: number;
+  pnlOverride?: number;      // use broker-reported P/L directly (e.g. eToro)
+  entryPriceOverride?: number; // use broker-reported entry price (overrides trade_log)
+}): Promise<void> {
+  // Fetch all open entries for this symbol+broker — close the most recent, purge duplicates
+  const openTrades = await db.select()
+    .from(tradeLogTable)
+    .where(and(
+      eq(tradeLogTable.symbol, params.symbol),
+      eq(tradeLogTable.broker, params.broker),
+      isNull(tradeLogTable.exitAt),
+    ))
+    .orderBy(desc(tradeLogTable.entryAt));
+
+  if (!openTrades.length) {
+    console.log(`[tradeMemory] No open trade found for ${params.symbol} on ${params.broker} — skipping reflection`);
+    return;
+  }
+
+  const openTrade  = openTrades[0]!;
+  const duplicates = openTrades.slice(1);
+
+  // Broker-reported entry price wins over whatever was logged (avoids cron-scan price mismatch)
+  const entryPrice = params.entryPriceOverride
+    ? params.entryPriceOverride
+    : parseFloat(openTrade.entryPrice ?? "0");
+  const direction  = openTrade.direction as "long" | "short";
+  const qty        = params.amountUsd / (entryPrice || params.exitPrice || 1);
+
+  const pnl    = params.pnlOverride !== undefined
+    ? params.pnlOverride
+    : direction === "long"
+      ? (params.exitPrice - entryPrice) * qty
+      : (entryPrice - params.exitPrice) * qty;
+  const pnlPct = params.pnlOverride !== undefined
+    ? (params.amountUsd > 0 ? (params.pnlOverride / params.amountUsd) * 100 : 0)
+    : entryPrice > 0
+      ? ((params.exitPrice - entryPrice) / entryPrice) * 100 * (direction === "long" ? 1 : -1)
+      : 0;
+
+  // Close the primary open entry with real P/L
+  await db.update(tradeLogTable)
+    .set({
+      exitPrice:  params.exitPrice > 0 ? String(params.exitPrice) : openTrade.exitPrice,
+      entryPrice: String(entryPrice),
+      pnl:        String(pnl.toFixed(4)),
+      pnlPct:     String(pnlPct.toFixed(4)),
+      exitAt:     new Date(),
+    })
+    .where(eq(tradeLogTable.id, openTrade.id));
+
+  // Delete duplicate open entries — they're stale logs from cron re-runs
+  for (const dup of duplicates) {
+    await db.delete(tradeLogTable).where(eq(tradeLogTable.id, dup.id));
+  }
+  if (duplicates.length) {
+    console.log(`[tradeMemory] Deleted ${duplicates.length} duplicate open entr${duplicates.length === 1 ? "y" : "ies"} for ${params.symbol}`);
+  }
+
+  await recordTradeOutcome(params.symbol, pnlPct).catch(() => {});
+
+  generateReflection({
+    symbol:    params.symbol,
+    direction,
+    entryPrice,
+    exitPrice: params.exitPrice || entryPrice,
+    pnl,
+    pnlPct,
+    reasoning: openTrade.reasoning ?? undefined,
+  }).catch(e => console.error("[tradeMemory] reflection failed:", e));
 }

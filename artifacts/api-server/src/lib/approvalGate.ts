@@ -106,7 +106,8 @@ class ApprovalGate {
       this.getConfig(),
       db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1).then(r => r[0]),
     ]);
-    const totalCapital = profileRow?.totalCapital ?? 10000;
+    const totalCapital = profileRow?.totalCapital ?? 200;
+    if (totalCapital > 10000) console.warn(`[ApprovalGate] ⚠️ totalCapital seems wrong: $${totalCapital} — check DB`);
     const capLimit     = totalCapital * 0.50;
     const CAP_TTL      = 5 * 60 * 1000;
 

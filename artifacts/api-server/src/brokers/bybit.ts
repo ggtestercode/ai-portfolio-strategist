@@ -72,14 +72,25 @@ export interface BybitBalance { totalEquity: number; availableBalance: number; c
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
 
 // ── Market ────────────────────────────────────────────────────────────────────
+export async function getInstrumentFilters(symbol: string): Promise<{ minQty: number; qtyStep: number; tickSize: number }> {
+  const r = await fetch(`${BASE_URL}/v5/market/instruments-info?category=linear&symbol=${symbol}`, { signal: AbortSignal.timeout(5000) });
+  const j = await r.json() as { result?: { list?: Array<{ lotSizeFilter?: { minOrderQty?: string; qtyStep?: string }; priceFilter?: { tickSize?: string } }> } };
+  const s = j.result?.list?.[0];
+  return {
+    minQty:   parseFloat(s?.lotSizeFilter?.minOrderQty  ?? "0.001"),
+    qtyStep:  parseFloat(s?.lotSizeFilter?.qtyStep      ?? "0.001"),
+    tickSize: parseFloat(s?.priceFilter?.tickSize       ?? "0.10"),
+  };
+}
+
 export async function getTicker(symbol: string): Promise<BybitTicker> {
   const sym = normalise(symbol);
-  const r   = await get<{ list: Array<{ symbol: string; lastPrice: string; bid1Price: string; ask1Price: string; price24hPcnt: string }> }>(
+  const r   = await get<{ list: Array<{ symbol: string; lastPrice: string; bid1Price: string; ask1Price: string; price24hPcnt: string; markPrice: string }> }>(
     "/v5/market/tickers", { category: "linear", symbol: sym }
   );
   const d = r.list[0];
   if (!d) throw new Error(`Bybit: no ticker for ${sym}`);
-  return { symbol: d.symbol, lastPrice: parseFloat(d.lastPrice), bid: parseFloat(d.bid1Price), ask: parseFloat(d.ask1Price), change24h: parseFloat(d.price24hPcnt) * 100 };
+  return { symbol: d.symbol, lastPrice: parseFloat(d.markPrice || d.lastPrice), bid: parseFloat(d.bid1Price), ask: parseFloat(d.ask1Price), change24h: parseFloat(d.price24hPcnt) * 100 };
 }
 
 export async function getKlines(symbol: string, interval: string, limit = 50): Promise<BybitKline[]> {
@@ -101,10 +112,20 @@ export async function getAllSymbols(): Promise<string[]> {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 export async function getPositions(): Promise<BybitPosition[]> {
-  const r = await get<{ list: Array<{ symbol: string; side: string; size: string; avgPrice: string; leverage: string; unrealisedPnl: string }> }>(
-    "/v5/position/list", { category: "linear", settleCoin: "USDT" }
-  );
-  return r.list.filter(p => parseFloat(p.size) > 0).map(p => {
+  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; leverage: string; unrealisedPnl: string };
+  const r = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear", settleCoin: "USDT" });
+  console.log("[Bybit] Raw positions (settleCoin=USDT):", JSON.stringify(r.list));
+
+  let list = r.list.filter(p => parseFloat(p.size) > 0);
+
+  // If settleCoin filter returns nothing, retry without it (testnet quirk)
+  if (list.length === 0 && r.list.length === 0) {
+    const r2 = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear" });
+    console.log("[Bybit] Raw positions (no filter):", JSON.stringify(r2.list));
+    list = r2.list.filter(p => parseFloat(p.size) > 0);
+  }
+
+  return list.map(p => {
     const entry = parseFloat(p.avgPrice);
     const pnl   = parseFloat(p.unrealisedPnl);
     const cost  = parseFloat(p.size) * entry;
@@ -135,17 +156,32 @@ export async function setLeverage(symbol: string, leverage: number): Promise<voi
     .catch(e => { if (!e.message.includes("110043")) throw e; }); // 110043 = leverage not modified
 }
 
-export async function openPosition(symbol: string, side: "Buy" | "Sell", amountUsd: number, leverage = 10): Promise<{ orderId: string }> {
-  const sym    = normalise(symbol);
+export async function openPosition(symbol: string, side: "Buy" | "Sell", amountUsd: number, leverage = 10): Promise<{ orderId: string; entryPrice: number }> {
+  if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
+  const sym = normalise(symbol);
   await setLeverage(sym, leverage);
-  const ticker = await getTicker(sym);
-  const qty    = (amountUsd / ticker.lastPrice).toFixed(3);
-  const r      = await bpost<{ orderId: string }>("/v5/order/create", { category: "linear", symbol: sym, side, orderType: "Market", qty, timeInForce: "GoodTillCancel", reduceOnly: false });
-  console.log(`[Bybit] ${side} ${sym} qty=${qty} @~$${ticker.lastPrice.toFixed(2)} leverage=${leverage}x orderId=${r.orderId}`);
-  return { orderId: r.orderId };
+
+  const [ticker, filters] = await Promise.all([getTicker(sym), getInstrumentFilters(sym)]);
+  const markPrice = ticker.lastPrice;
+
+  const rawQty  = amountUsd / markPrice;
+  const steps   = Math.ceil(rawQty / filters.qtyStep);
+  const qty     = Math.max(steps * filters.qtyStep, filters.minQty);
+  const qtyStr  = qty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+
+  const orderValue = qty * markPrice;
+  console.log(`[Bybit] Order: ${sym} price=$${markPrice} amountUsd=$${amountUsd} rawQty=${rawQty.toFixed(6)} finalQty=${qtyStr} minQty=${filters.minQty} qtyStep=${filters.qtyStep} orderValue=$${orderValue.toFixed(2)} orderType=Market`);
+
+  const r = await bpost<{ orderId: string }>("/v5/order/create", {
+    category: "linear", symbol: sym, side,
+    orderType: "Market", qty: qtyStr,
+    timeInForce: "IOC", reduceOnly: false,
+  });
+  console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x → orderId=${r.orderId}`);
+  return { orderId: r.orderId, entryPrice: markPrice };
 }
 
-export async function closePosition(symbol: string): Promise<{ orderId: string }> {
+export async function closePosition(symbol: string): Promise<{ orderId: string; entryPrice: number; size: number; side: "Buy" | "Sell" }> {
   const sym       = normalise(symbol);
   const positions = await getPositions();
   const pos       = positions.find(p => p.symbol === sym);
@@ -153,7 +189,7 @@ export async function closePosition(symbol: string): Promise<{ orderId: string }
   const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
   const r = await bpost<{ orderId: string }>("/v5/order/create", { category: "linear", symbol: sym, side: closeSide, orderType: "Market", qty: String(pos.size), reduceOnly: true });
   console.log(`[Bybit] Close ${sym} qty=${pos.size} orderId=${r.orderId}`);
-  return { orderId: r.orderId };
+  return { orderId: r.orderId, entryPrice: pos.entryPrice, size: pos.size, side: pos.side };
 }
 
 export async function setTrailingStop(symbol: string, trailingPct = 0.40): Promise<void> {
@@ -170,6 +206,73 @@ export async function setStopLoss(symbol: string, stopLossPrice: number): Promis
   const sym = normalise(symbol);
   await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, stopLoss: String(stopLossPrice), positionIdx: 0 })
     .catch(e => console.warn(`[Bybit] setStopLoss ${sym}: ${e.message}`));
+}
+
+// ── Limit order (GTC) ─────────────────────────────────────────────────────────
+export async function openLimitPosition(symbol: string, side: "Buy" | "Sell", amountUsd: number, limitPrice: number, leverage = 10): Promise<{ orderId: string }> {
+  if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
+  const sym     = normalise(symbol);
+  await setLeverage(sym, leverage);
+  const filters = await getInstrumentFilters(sym);
+
+  const rawQty  = amountUsd / limitPrice;
+  const steps   = Math.ceil(rawQty / filters.qtyStep);
+  const qty     = Math.max(steps * filters.qtyStep, filters.minQty);
+  const qtyStr  = qty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+  const tickDp  = String(filters.tickSize).split(".")[1]?.length ?? 2;
+  const px      = (Math.round(limitPrice / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+
+  const r = await bpost<{ orderId: string }>("/v5/order/create", {
+    category: "linear", symbol: sym, side,
+    orderType: "Limit", price: px, qty: qtyStr,
+    timeInForce: "GTC", reduceOnly: false,
+  });
+  console.log(`[Bybit] LimitGTC ${side} ${sym} qty=${qtyStr} @$${px} ${leverage}x → orderId=${r.orderId}`);
+  return { orderId: r.orderId };
+}
+
+// ── Partial close ─────────────────────────────────────────────────────────────
+export async function closePartialByAmount(symbol: string, amountUsd: number): Promise<{ orderId: string }> {
+  const sym       = normalise(symbol);
+  const positions = await getPositions();
+  const pos       = positions.find(p => p.symbol === sym);
+  if (!pos || pos.size <= 0) throw new Error(`Bybit: no open position for ${sym}`);
+
+  const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
+  const ticker    = await getTicker(sym);
+  const filters   = await getInstrumentFilters(sym);
+  const rawQty    = amountUsd / ticker.lastPrice;
+  const steps     = Math.floor(rawQty / filters.qtyStep);
+  const qty       = Math.min(Math.max(steps * filters.qtyStep, filters.minQty), pos.size);
+  const qtyStr    = qty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+
+  const r = await bpost<{ orderId: string }>("/v5/order/create", {
+    category: "linear", symbol: sym, side: closeSide,
+    orderType: "Market", qty: qtyStr, reduceOnly: true,
+  });
+  console.log(`[Bybit] Partial close ${sym} ~$${amountUsd} qty=${qtyStr} orderId=${r.orderId}`);
+  return { orderId: r.orderId };
+}
+
+export async function closePercentPosition(symbol: string, pct: number): Promise<{ orderId: string }> {
+  const sym       = normalise(symbol);
+  const positions = await getPositions();
+  const pos       = positions.find(p => p.symbol === sym);
+  if (!pos || pos.size <= 0) throw new Error(`Bybit: no open position for ${sym}`);
+
+  const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
+  const filters   = await getInstrumentFilters(sym);
+  const rawQty    = pos.size * (pct / 100);
+  const steps     = Math.floor(rawQty / filters.qtyStep);
+  const qty       = Math.max(steps * filters.qtyStep, filters.minQty);
+  const qtyStr    = qty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+
+  const r = await bpost<{ orderId: string }>("/v5/order/create", {
+    category: "linear", symbol: sym, side: closeSide,
+    orderType: "Market", qty: qtyStr, reduceOnly: true,
+  });
+  console.log(`[Bybit] Close ${pct}% of ${sym} qty=${qtyStr} orderId=${r.orderId}`);
+  return { orderId: r.orderId };
 }
 
 // ── Backward-compat wrapper ───────────────────────────────────────────────────

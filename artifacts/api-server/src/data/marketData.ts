@@ -125,13 +125,42 @@ export async function fetchOKXData(instId: string): Promise<AssetData> {
   });
 }
 
+export async function fetchBybitData(symbol: string): Promise<AssetData> {
+  return cache.get(CacheKey.marketPrice(symbol), TTL.MARKET_PRICES, async () => {
+    const { getKlines } = await import("../brokers/bybit");
+    // Normalise: "BTC" → "BTCUSDT"
+    const sym = symbol.toUpperCase().replace(/[-/]/g, "");
+    const instId = sym.endsWith("USDT") || sym.endsWith("USDC") ? sym : `${sym}USDT`;
+    const candles = await getKlines(instId, "D", 32); // daily, 32 bars
+    if (!candles.length) throw new Error(`Bybit klines: no data for ${instId}`);
+
+    const closes  = candles.map(c => c.close); // already oldest-first from getKlines
+    const volumes = candles.map(c => c.volume);
+    const price   = closes.at(-1) ?? 0;
+    const p7      = closes.at(-8)  ?? closes[0] ?? price;
+    const p30     = closes[0]      ?? price;
+
+    return {
+      symbol:    instId,
+      price,
+      change7d:  +(p7  ? ((price - p7)  / p7)  * 100 : 0).toFixed(2),
+      change30d: +(p30 ? ((price - p30) / p30) * 100 : 0).toFixed(2),
+      volume:    volumes.at(-1) ?? 0,
+      rsi:       computeRsi(closes),
+      dataTimestamp: new Date().toISOString(),
+    };
+  });
+}
+
 export async function fetchAssetData(symbol: string, assetClass: string): Promise<AssetData> {
   if (symbol.includes("-USDT-") || symbol.includes("-SWAP") || assetClass === "Derivative") {
     return fetchOKXData(symbol);
   }
-  return CRYPTO_CLASSES.has(assetClass)
-    ? fetchCoinGeckoData(symbol)
-    : fetchYahooData(symbol);
+  // Crypto: use Bybit directly (our primary crypto broker, real-time exchange data)
+  if (CRYPTO_CLASSES.has(assetClass)) {
+    return fetchBybitData(symbol).catch(() => fetchCoinGeckoData(symbol)); // CoinGecko as fallback
+  }
+  return fetchYahooData(symbol);
 }
 
 export async function getTopCryptoByMarketCap(limit = 20): Promise<Array<{ symbol: string; name: string }>> {

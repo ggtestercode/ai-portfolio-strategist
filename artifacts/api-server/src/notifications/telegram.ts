@@ -25,6 +25,8 @@ import {
 import {
   getPositions as bybitGetPositions,
   getBalance   as bybitGetBalance,
+  getTicker    as bybitGetTicker,
+  getOrders,
 } from "../brokers/bybit";
 import { okxPaperMode } from "../lib/startup";
 import {
@@ -42,7 +44,7 @@ import {
   registerLeverageAlert,
 } from "../lib/leverageManager";
 import { startWatchdog, registerWatchdogAlert } from "../lib/watchdog";
-import { getRecentTrades, getRecentMemory, getDailyPnl } from "../lib/tradeMemoryLib";
+import { getRecentTrades, getOpenTrades, getRecentMemory, getDailyPnl } from "../lib/tradeMemoryLib";
 import {
   db,
   profileTable,
@@ -220,6 +222,28 @@ async function notifyScanComplete(result: ScanResult, triggered: "cron" | "manua
 export function startPolling(): void {
   const b = getBot();
 
+  // Register bot command list (shows when user types "/" in Telegram)
+  b.setMyCommands([
+    { command: "positions",  description: "View open positions (Bybit, OKX, eToro)" },
+    { command: "orders",     description: "View pending orders" },
+    { command: "balance",    description: "Account balance across brokers" },
+    { command: "scan",       description: "Run live market scan (Claude)" },
+    { command: "autoscan",   description: "Auto-scanner: on | off | now | status" },
+    { command: "sync",       description: "Sync all brokers to local DB" },
+    { command: "status",     description: "Full bot status overview" },
+    { command: "history",    description: "Last 10 closed trades" },
+    { command: "memory",     description: "Last 5 trade reflections (AI journal)" },
+    { command: "pending",    description: "Pending trade approvals" },
+    { command: "mode",       description: "Operation mode: autonomous | approval" },
+    { command: "capital",    description: "View or set total capital (/capital 500)" },
+    { command: "watchlist",  description: "View watchlist" },
+    { command: "add",        description: "Add symbol to watchlist (/add BTC Crypto)" },
+    { command: "remove",     description: "Remove symbol from watchlist" },
+    { command: "rebalance",  description: "Propose portfolio rebalance trades" },
+    { command: "resume",     description: "Resume trading after pause (/resume [COIN])" },
+    { command: "okxtest",    description: "Test OKX API connection" },
+  ]).catch(e => console.warn("[telegram] setMyCommands failed:", e));
+
   // Register all callbacks
   registerScanNotifier(notifyScanComplete);
   const alertHandler: (msg: string) => Promise<void> = async (msg) => send(escapeHtml(msg), { parse_mode: "HTML" });
@@ -253,28 +277,57 @@ export function startPolling(): void {
       if (action === "reject") {
         replyText = `❌ ${escapeHtml(result.message)}\n<i>${utcNow()}</i>`;
       } else if (result.action === "executed") {
-        const p    = result.proposal;
-        const base = p.symbol.includes("-") ? (p.symbol.split("-")[0] ?? p.symbol) : p.symbol;
-        let qtyLine = "";
+        const p      = result.proposal;
+        const base   = p.symbol.includes("-") ? (p.symbol.split("-")[0] ?? p.symbol) : p.symbol;
+        const isBybit = p.broker === "bybit";
+        const isOKX   = p.broker === "okx";
+        const leverage = isBybit ? 10 : 1;
+        const exposure = (p.amountUsd * leverage).toFixed(0);
+
+        let price: number | null = null;
         try {
-          const okxBase = process.env["OKX_BASE_URL"] ?? "https://www.okx.com";
-          const tr = await fetch(
-            `${okxBase}/api/v5/market/ticker?instId=${encodeURIComponent(p.symbol)}`,
-            { signal: AbortSignal.timeout(4000) }
-          );
-          const tj = await tr.json() as { code: string; data: Array<{ last: string }> };
-          if (tj.code === "0" && tj.data[0]) {
-            const price = parseFloat(tj.data[0].last);
-            const qty   = (p.amountUsd / price).toFixed(6);
-            qtyLine = `\n$${p.amountUsd} → ~${qty} ${base}\nPrice: $${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+          if (isBybit) {
+            const ticker = await bybitGetTicker(p.symbol);
+            price = ticker.lastPrice;
+          } else if (isOKX) {
+            const okxBase = process.env["OKX_BASE_URL"] ?? "https://www.okx.com";
+            const tr = await fetch(
+              `${okxBase}/api/v5/market/ticker?instId=${encodeURIComponent(p.symbol)}`,
+              { signal: AbortSignal.timeout(4000) }
+            );
+            const tj = await tr.json() as { code: string; data: Array<{ last: string }> };
+            if (tj.code === "0" && tj.data[0]) price = parseFloat(tj.data[0].last);
           }
         } catch { /* price is optional */ }
-        replyText = [
+
+        const priceStr  = price ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : null;
+        const notional  = p.amountUsd * leverage;
+        const unitsStr  = price ? `~${(notional / price).toFixed(4)} ${base}` : null;
+
+        const lines: (string | null)[] = [
           `✅ <b>${p.side.toUpperCase()} ${escapeHtml(p.symbol)}</b> — Executed`,
           result.orderId ? `Order ID: <code>${result.orderId}</code>` : null,
-          qtyLine.trimStart() || `$${p.amountUsd}`,
-          `<i>${utcNow()}</i>`,
-        ].filter(Boolean).join("\n");
+        ];
+
+        if (isBybit) {
+          const mode = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet";
+          lines.push(`Amount: $${p.amountUsd} at ${leverage}x`);
+          lines.push(`Exposure: $${exposure}`);
+          if (unitsStr)  lines.push(`Units: ${unitsStr}`);
+          lines.push(`Broker: Bybit ${mode}`);
+          if (priceStr)  lines.push(`Price: ${priceStr}`);
+        } else if (isOKX) {
+          const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
+          lines.push(`Amount: $${p.amountUsd} (spot)`);
+          if (unitsStr)  lines.push(`Units: ${unitsStr}`);
+          lines.push(`Broker: OKX ${okxMode}`);
+          if (priceStr)  lines.push(`Price: ${priceStr}`);
+        } else {
+          lines.push(`Amount: $${p.amountUsd}`);
+        }
+        lines.push(`<i>${utcNow()}</i>`);
+
+        replyText = lines.filter(Boolean).join("\n");
       } else {
         replyText = `⚠️ ${escapeHtml(result.message)}\n<i>${utcNow()}</i>`;
       }
@@ -499,26 +552,26 @@ export function startPolling(): void {
     }
   });
 
-  // ── /sync — rebuild local DB from both brokers ───────────────────────────
+  // ── /sync — rebuild local DB from all brokers ────────────────────────────
   b.onText(/^\/sync(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [, okxPos, pending] = await Promise.all([
+      const [, bybitPos, okxPos] = await Promise.all([
         syncHoldingsFromEtoro().catch(() => {}),
+        bybitGetPositions().catch(() => []),
         okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
-        Promise.resolve(getPendingOrders()),
       ]);
       const etoroHoldings = await db.select().from(holdingsTable);
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
       await b.sendMessage(chatId, [
-        `🔄 <b>Synced from eToro + OKX</b>`,
+        `🔄 <b>Synced all brokers</b>`,
         ``,
-        `OKX open positions: <b>${okxPos.length}</b>`,
-        `eToro open positions: <b>${etoroHoldings.length}</b>`,
-        `Pending orders: <b>${pending.length}</b>`,
-        `Last sync: ${now}`,
+        `Bybit: <b>${bybitPos.length} position(s)</b>`,
+        `OKX: <b>${okxPos.length} position(s)</b>`,
+        `eToro: <b>${etoroHoldings.length} position(s)</b>`,
+        `Time: ${now}`,
       ].join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
@@ -537,17 +590,19 @@ export function startPolling(): void {
       }
       interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
 
-      const [okxPos, etoroPortfolio, localPending] = await Promise.all([
+      const [okxPos, bybitPos, etoroPortfolio, localPending] = await Promise.all([
         okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
+        bybitGetPositions().catch(() => []),
         getPortfolio().then(p => ((p as EtoroPortfolio)?.positions ?? []) as EtoroPos[]).catch(() => [] as EtoroPos[]),
         Promise.resolve(getPendingOrders()),
       ]);
+      console.log("[telegram] /positions — Bybit:", JSON.stringify(bybitPos), "OKX:", JSON.stringify(okxPos));
 
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
 
-      if (!okxPos.length && !etoroPortfolio.length && !localPending.length) {
+      if (!okxPos.length && !bybitPos.length && !etoroPortfolio.length && !localPending.length) {
         await b.sendMessage(chatId,
           `📊 No open positions or pending orders.\n<i>Last synced: ${now}</i>`,
           { parse_mode: "HTML" });
@@ -556,15 +611,30 @@ export function startPolling(): void {
 
       const out: string[] = [`📊 <b>Positions</b>`, ``];
 
+      if (bybitPos.length) {
+        const isTestnet = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") !== "live";
+        const mode = isTestnet ? "Testnet" : "Live";
+        out.push(`<b>Bybit ${mode} (${bybitPos.length}):</b>`);
+        for (const p of bybitPos) {
+          const sign        = p.pnl >= 0 ? "+" : "";
+          const pnlStr      = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
+          const testnetNote = isTestnet ? " ⚠️ testnet price" : "";
+          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${testnetNote}${pnlStr}`);
+        }
+        out.push(``);
+      }
+
       if (okxPos.length) {
         const mode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
         out.push(`<b>OKX ${mode} (${okxPos.length}):</b>`);
         for (const p of okxPos) {
-          const sign    = p.pnl >= 0 ? "+" : "";
-          const base    = p.symbol.split("-")[0] ?? p.symbol;
-          const sizeStr = `${p.size.toFixed(6)} ${base}`;
-          const pnlStr  = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
-          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${sizeStr} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${pnlStr}`);
+          const sign         = p.pnl >= 0 ? "+" : "";
+          const base         = p.symbol.split("-")[0] ?? p.symbol;
+          const sizeStr      = `${p.size.toFixed(6)} ${base}`;
+          const currentValue = p.entryPrice * p.size + p.pnl;
+          const valueStr     = `$${currentValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+          const pnlStr       = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
+          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${sizeStr} · value ${valueStr} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${pnlStr}`);
         }
         out.push(``);
       }
@@ -598,11 +668,12 @@ export function startPolling(): void {
     }
   });
 
-  // ── /orders — pending orders from OKX + eToro + in-memory ────────────────
+  // ── /orders — pending orders from Bybit + OKX + eToro + in-memory ──────────
   b.onText(/^\/orders(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [okxOrders, etoroOrders, localPending] = await Promise.all([
+      const [bybitOrders, okxOrders, etoroOrders, localPending] = await Promise.all([
+        getOrders().catch(() => []),
         okxGetOrders().catch(() => []),
         etoroGetOrders().catch(() => []),
         Promise.resolve(getPendingOrders()),
@@ -610,13 +681,14 @@ export function startPolling(): void {
 
       type Row = { id: string; symbol: string; side: string; amountUsd: number; broker: string; placedAt?: string };
       const map = new Map<string, Row>();
-      for (const o of okxOrders)    map.set(o.orderId,  { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: 0, broker: "okx", placedAt: o.placedAt });
-      for (const o of etoroOrders)  map.set(o.orderId,  { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: "etoro", placedAt: o.placedAt });
+      for (const o of bybitOrders)  map.set(o.orderId, { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.qty * o.price, broker: "bybit", placedAt: o.placedAt });
+      for (const o of okxOrders)    map.set(o.orderId, { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.price > 0 && o.size > 0 ? o.price * o.size : 0, broker: "okx", placedAt: o.placedAt });
+      for (const o of etoroOrders)  map.set(o.orderId, { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: "etoro", placedAt: o.placedAt });
       for (const o of localPending) if (!map.has(o.id)) map.set(o.id, { id: o.id, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: o.broker, placedAt: o.queuedAt.toISOString() });
       const orders = Array.from(map.values());
 
       if (!orders.length) {
-        await b.sendMessage(chatId, `📋 No pending orders.`);
+        await b.sendMessage(chatId, `📋 No pending orders.\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
         return;
       }
 
@@ -624,7 +696,8 @@ export function startPolling(): void {
         const t = o.placedAt
           ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT"
           : "recently";
-        return `• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()}${o.amountUsd ? ` $${o.amountUsd}` : ""} [${o.broker}] · placed ${t}`;
+        const amtStr = o.amountUsd > 0 ? ` $${o.amountUsd.toFixed(2)}` : "";
+        return `• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()}${amtStr} [${o.broker}] · placed ${t}`;
       }).join("\n");
 
       await b.sendMessage(chatId, [
@@ -632,7 +705,7 @@ export function startPolling(): void {
         ``,
         lines,
         ``,
-        `<i>These will fill when market opens.</i>`,
+        `<i>${utcNow()}</i>`,
       ].join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
@@ -640,11 +713,12 @@ export function startPolling(): void {
     }
   });
 
-  // ── /balance — OKX + eToro account balances ───────────────────────────────
+  // ── /balance — Bybit + OKX + eToro account balances ─────────────────────────
   b.onText(/^\/balance(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [okxBal, etoroPortfolio] = await Promise.all([
+      const [bybitBal, okxBal, etoroPortfolio] = await Promise.all([
+        bybitGetBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
         okxPaperMode
           ? getBalancePaper().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }))
           : getAccountBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
@@ -662,9 +736,21 @@ export function startPolling(): void {
 
       const out: string[] = [`💰 <b>Account Balance</b>`, ``];
 
+      const bybitMode = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet";
+      if ("error" in bybitBal) {
+        out.push(`<b>Bybit ${bybitMode}:</b> ❌ ${escapeHtml(bybitBal.error)}`, ``);
+      } else {
+        out.push(
+          `<b>Bybit ${bybitMode}:</b>`,
+          `Total equity: <b>$${bybitBal.totalEquity.toFixed(2)}</b>`,
+          `Available: <b>$${bybitBal.availableBalance.toFixed(2)}</b>`,
+          ``
+        );
+      }
+
       const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
       if ("error" in okxBal) {
-        out.push(`<b>OKX ${okxMode}:</b> ❌ ${escapeHtml(okxBal.error)}`);
+        out.push(`<b>OKX ${okxMode}:</b> ❌ ${escapeHtml(okxBal.error)}`, ``);
       } else {
         out.push(
           `<b>OKX ${okxMode}:</b>`,
@@ -681,8 +767,12 @@ export function startPolling(): void {
         ``
       );
 
-      const okxTotal = "error" in okxBal ? 0 : okxBal.totalEquity;
-      out.push(`Combined: <b>$${(okxTotal + etoroTotal).toFixed(2)}</b>`);
+      const bybitTotal = "error" in bybitBal ? 0 : bybitBal.totalEquity;
+      const okxTotal   = "error" in okxBal   ? 0 : okxBal.totalEquity;
+      out.push(
+        `Combined: <b>$${(bybitTotal + okxTotal + etoroTotal).toFixed(2)}</b>`,
+        `<i>${utcNow()}</i>`,
+      );
 
       await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
@@ -820,32 +910,53 @@ export function startPolling(): void {
     }
   });
 
-  // ── /history — last 10 closed trades ─────────────────────────────────────
+  // ── /history — open + closed trades ─────────────────────────────────────
   b.onText(/^\/history(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const trades = await getRecentTrades(10);
-      if (!trades.length) {
-        await b.sendMessage(chatId, `📋 No trade history yet.\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
+      const [openTrades, closedTrades] = await Promise.all([
+        getOpenTrades(),
+        getRecentTrades(10),
+      ]);
+
+      if (!openTrades.length && !closedTrades.length) {
+        await b.sendMessage(chatId,
+          `📋 No trade history yet. Trades are logged after you execute a buy or sell.\n<i>${utcNow()}</i>`,
+          { parse_mode: "HTML" });
         return;
       }
-      const lines = trades.map((t, i) => {
-        const pnl   = parseFloat(t.pnl  ?? "0");
-        const pnlPct = parseFloat(t.pnlPct ?? "0");
-        const sign  = pnl >= 0 ? "+" : "";
-        const dir   = t.direction === "long" ? "▲" : "▼";
-        const when  = t.exitAt
-          ? t.exitAt.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
-          : "open";
-        return `${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) · ${when} [${t.broker}]`;
-      }).join("\n");
-      await b.sendMessage(chatId, [
-        `📋 <b>Trade History (last ${trades.length})</b>`,
-        ``,
-        lines,
-        ``,
-        `<i>${utcNow()}</i>`,
-      ].join("\n"), { parse_mode: "HTML" });
+
+      const out: string[] = [`📋 <b>Trade History</b>`, ``];
+
+      if (openTrades.length) {
+        out.push(`<b>Open (${openTrades.length}):</b>`);
+        for (const t of openTrades) {
+          const dir    = t.direction === "long" ? "▲" : "▼";
+          const when   = t.entryAt.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT";
+          const amt    = t.amountUsd ? ` · $${parseFloat(t.amountUsd).toFixed(0)}` : "";
+          const ep     = t.entryPrice ? ` · entry $${parseFloat(t.entryPrice).toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
+          out.push(`• <b>${escapeHtml(t.symbol)}</b> ${dir} ${t.direction}${amt}${ep} · ${when} [${t.broker}]`);
+        }
+        out.push(``);
+      }
+
+      if (closedTrades.length) {
+        out.push(`<b>Closed (last ${closedTrades.length}):</b>`);
+        const lines = closedTrades.map((t, i) => {
+          const pnl    = parseFloat(t.pnl  ?? "0");
+          const pnlPct = parseFloat(t.pnlPct ?? "0");
+          const sign   = pnl >= 0 ? "+" : "";
+          const dir    = t.direction === "long" ? "▲" : "▼";
+          const when   = t.exitAt
+            ? t.exitAt.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
+            : "—";
+          return `${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) · ${when} [${t.broker}]`;
+        });
+        out.push(...lines, ``);
+      }
+
+      out.push(`<i>${utcNow()}</i>`);
+      await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
@@ -876,11 +987,25 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       const ctx   = await buildContext();
-      const reply = await generateAssistantReply(msg.text, ctx);
+      const reply = await generateAssistantReply(msg.text, ctx, undefined, chatId);
       await b.sendMessage(chatId, reply.message);
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // Exit only on 409 Conflict (multiple polling instances) — let PM2 restart cleanly.
+  // Do NOT exit on ECONNRESET or other transient network errors; the library retries those.
+  b.on("polling_error", (err: Error & { code?: string; cause?: { code?: string } }) => {
+    const msg   = err.message ?? "";
+    const cause = err.cause?.code ?? "";
+    const is409 = msg.includes("409") || msg.toLowerCase().includes("conflict");
+    if (err.code === "EFATAL" && is409) {
+      console.warn("[telegram] Polling 409 Conflict — exiting for PM2 clean restart…");
+      process.exit(1);
+    } else {
+      console.warn("[telegram] Polling error (will retry):", msg || cause || err.code);
     }
   });
 
