@@ -4,9 +4,8 @@ import {
   strategyOptionsTable,
   profileTable,
 } from "@workspace/db";
-import { approvalGate, buildProposal } from "./approvalGate";
-import * as okx from "../brokers/okx";
-import * as bybit from "../brokers/bybit";
+import { approvalGate, buildProposal }           from "./approvalGate";
+import { syncTotalCapitalToDB, type BrokerBalances } from "./brokerBalance";
 
 const SKIP_CLASSES = new Set([
   "Cash", "cash", "Stablecoin", "stablecoin",
@@ -35,26 +34,19 @@ export interface ExecuteOrder {
 }
 
 export interface ExecuteResult {
-  availableCash:     number;
+  brokerBalances:    { okx: number; bybit: number; etoro: number; total: number };
+  availableCash:     number;  // alias for brokerBalances.total
   totalDeployed:     number;
   orders:            ExecuteOrder[];
   allocationSummary: Array<{ assetClass: string; targetPct: number; amountUsd: number }>;
   mode:              string;
 }
 
-async function getBrokerCash(): Promise<number> {
-  try {
-    const bal = await okx.getAccountBalance();
-    if (bal.availableBalance > 0) return bal.availableBalance;
-  } catch { /* fall through */ }
-  try {
-    const bal = await bybit.getBalance();
-    if (bal.availableBalance > 0) return bal.availableBalance;
-  } catch { /* fall through */ }
-  return 0;
-}
-
 export async function buildPortfolioFromTargets(): Promise<ExecuteResult> {
+  // Sync live broker balances into profileTable.totalCapital so the approval gate
+  // and all other DB reads see the real number.
+  const balances = await syncTotalCapitalToDB();
+
   const [targets, profile, allOptions, gateConfig] = await Promise.all([
     db.select().from(targetAllocationsTable),
     db.select().from(profileTable).limit(1).then(r => r[0]),
@@ -62,19 +54,24 @@ export async function buildPortfolioFromTargets(): Promise<ExecuteResult> {
     approvalGate.getConfig(),
   ]);
 
-  if (targets.length === 0) {
-    return {
-      availableCash: 0, totalDeployed: 0, orders: [],
-      allocationSummary: [], mode: gateConfig.mode,
-    };
-  }
+  const emptyResult: ExecuteResult = {
+    brokerBalances: balances,
+    availableCash:  balances.total,
+    totalDeployed:  0,
+    orders:         [],
+    allocationSummary: [],
+    mode:           gateConfig.mode,
+  };
 
-  const brokerCash  = await getBrokerCash();
-  const profileCap  = profile?.totalCapital ?? 0;
-  // Use profile capital as the reference; cap by broker cash so we don't over-commit
-  const budget      = profileCap > 0 ? Math.min(brokerCash || profileCap, profileCap) : brokerCash;
+  if (targets.length === 0) return emptyResult;
 
-  // Build assetClass → deduplicated picks map from all strategy options
+  // Budget = real total broker balance (just synced to DB).
+  // Fall back to profile capital only if all brokers return 0.
+  const budget = balances.total > 0 ? balances.total : (profile?.totalCapital ?? 0);
+
+  if (budget === 0) return emptyResult;
+
+  // Build assetClass → deduplicated picks from all strategy options
   const picksByClass: Record<string, Array<{ symbol: string; name: string; assetClass: string; weightPct: number }>> = {};
   for (const opt of allOptions) {
     for (const pick of opt.picks) {
@@ -138,5 +135,12 @@ export async function buildPortfolioFromTargets(): Promise<ExecuteResult> {
     }
   }
 
-  return { availableCash: brokerCash, totalDeployed, orders, allocationSummary, mode: gateConfig.mode };
+  return {
+    brokerBalances: balances,
+    availableCash:  balances.total,
+    totalDeployed,
+    orders,
+    allocationSummary,
+    mode: gateConfig.mode,
+  };
 }

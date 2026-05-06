@@ -64,6 +64,7 @@ interface ExecuteOrder {
 }
 
 interface ExecuteResult {
+  brokerBalances:    { okx: number; bybit: number; etoro: number; total: number };
   availableCash:     number;
   totalDeployed:     number;
   orders:            ExecuteOrder[];
@@ -414,10 +415,32 @@ export default function StrategyOptions() {
         <div className="mt-4 rounded-lg border border-border/60 bg-muted/20 p-4 space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold">
-              Portfolio Build — ${executeResult.totalDeployed.toFixed(2)} deployed
+              Portfolio Build — ${executeResult.totalDeployed.toFixed(2)} deploying
             </p>
             <span className="text-xs text-muted-foreground capitalize">{executeResult.mode} mode</span>
           </div>
+
+          {/* Broker balance breakdown */}
+          <div className="rounded-md bg-card/50 border border-border/40 p-3 space-y-1">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-2">Available Balance</p>
+            {[
+              { label: "OKX Demo",       val: executeResult.brokerBalances?.okx   ?? 0 },
+              { label: "Bybit Testnet",  val: executeResult.brokerBalances?.bybit  ?? 0 },
+              { label: "eToro Demo",     val: executeResult.brokerBalances?.etoro  ?? 0 },
+            ].map(b => (
+              <div key={b.label} className="flex justify-between text-xs">
+                <span className="text-muted-foreground">{b.label}</span>
+                <span className={b.val > 0 ? "font-medium" : "text-muted-foreground"}>
+                  ${b.val.toFixed(2)}
+                </span>
+              </div>
+            ))}
+            <div className="flex justify-between text-xs border-t border-border/40 pt-1 mt-1">
+              <span className="font-medium">Total</span>
+              <span className="font-semibold">${(executeResult.brokerBalances?.total ?? executeResult.availableCash).toFixed(2)}</span>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-2 text-xs">
             {executeResult.allocationSummary.map(a => (
               <div key={a.assetClass} className="flex justify-between bg-card/40 rounded px-2 py-1">
@@ -426,6 +449,7 @@ export default function StrategyOptions() {
               </div>
             ))}
           </div>
+
           <div className="space-y-1">
             {executeResult.orders.filter(o => o.status !== "skipped").map((o, i) => (
               <div key={`${o.symbol}-${i}`} className="flex items-center justify-between text-xs">
@@ -436,16 +460,12 @@ export default function StrategyOptions() {
                   o.status === "queued"   ? "text-amber-400" :
                   "text-rose-400"
                 }>
-                  {o.status === "executed" ? "Executed" : o.status === "queued" ? "Pending approval" : "Failed"}
+                  {o.status === "executed" ? "Executed" :
+                   o.status === "queued"   ? "Pending approval" : "Failed"}
                 </span>
               </div>
             ))}
           </div>
-          {executeResult.availableCash > 0 && (
-            <p className="text-xs text-muted-foreground">
-              Broker available cash: ${executeResult.availableCash.toFixed(2)}
-            </p>
-          )}
         </div>
       )}
     </Card>

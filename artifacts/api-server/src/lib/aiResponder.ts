@@ -929,7 +929,6 @@ export async function generateAssistantReply(
 
   const [profileRow] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1);
   const totalCapital = profileRow?.totalCapital ?? 200;
-  if (totalCapital > 10000) console.warn(`[aiResponder] ⚠️ totalCapital seems wrong: $${totalCapital} — check DB`);
 
   // ── Resume pending session step (confirmation / clarification) ────────────
   if (sessionId) {

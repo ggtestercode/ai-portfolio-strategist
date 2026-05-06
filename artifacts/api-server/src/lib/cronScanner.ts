@@ -2,6 +2,7 @@ import cron, { type ScheduledTask }   from "node-cron";
 import { runScan, type ScanResult }    from "./marketScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
+import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
 import { getDailyPnl, logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
 import { llm }                         from "./llmRouter";
@@ -351,6 +352,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
   cache.invalidate(CacheKey.marketScan());
 
   try {
+    // Sync live broker balances into DB before sizing trades
+    const balances = await syncTotalCapitalToDB().catch(() => null);
+
     const result = await runScan();
 
     // Notify scan complete (sends to Telegram via registered notifier)
@@ -358,7 +362,10 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     const [profile] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1)
       .catch(() => [null]);
-    const totalCapital = (profile as { totalCapital?: number } | null)?.totalCapital ?? 200;
+    // Use live balance if available, fall back to DB value
+    const totalCapital = (balances?.total ?? 0) > 0
+      ? balances!.total
+      : ((profile as { totalCapital?: number } | null)?.totalCapital ?? 200);
 
     const config = await approvalGate.getConfig();
     const outcomes: SignalOutcome[] = [];
