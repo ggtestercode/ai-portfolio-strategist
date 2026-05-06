@@ -18,13 +18,18 @@ import { generateStrategyOptions } from "../lib/strategyGenerator";
 
 const router: IRouter = Router();
 
+function titleCase(s: string | null | undefined): string {
+  if (!s) return "Medium";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
 async function buildStrategy() {
   const profile = await getProfile();
   const targets = await db.select().from(targetAllocationsTable);
   return {
     strategyType: profile.strategyType,
     lastGenerated: profile.strategyLastGenerated.toISOString(),
-    riskLevel: profile.strategyRiskLevel,
+    riskLevel: titleCase(profile.strategyRiskLevel),
     allocation: targets
       .map((t) => ({ assetClass: t.assetClass, percentage: t.targetPct }))
       .sort((a, b) => b.percentage - a.percentage),
@@ -38,7 +43,7 @@ function serializeOption(o: typeof strategyOptionsTable.$inferSelect) {
     optionIndex: o.optionIndex,
     name: o.name,
     summary: o.summary,
-    riskLevel: o.riskLevel,
+    riskLevel: titleCase(o.riskLevel),
     expectedReturnPct: o.expectedReturnPct,
     picks: o.picks,
     generatedAt: o.generatedAt.toISOString(),
