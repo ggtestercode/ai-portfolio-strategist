@@ -1,12 +1,19 @@
-import cron, { type ScheduledTask } from "node-cron";
-import { runScan, type ScanResult }        from "./marketScanner";
-import { cache, CacheKey }                 from "./contextCache";
-import { approvalGate, buildProposal }     from "./approvalGate";
+import cron, { type ScheduledTask }   from "node-cron";
+import { runScan, type ScanResult }    from "./marketScanner";
+import { cache, CacheKey }             from "./contextCache";
+import { approvalGate, buildProposal } from "./approvalGate";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
-import { getDailyPnl, logOpenTrade }       from "./tradeMemoryLib";
-import { openPosition as okxOpen, openLimitPosition as okxOpenLimit } from "../brokers/okx";
-import { db, profileTable, botStateTable } from "@workspace/db";
-import { eq }                              from "drizzle-orm";
+import { getDailyPnl, logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
+import { llm }                         from "./llmRouter";
+import {
+  openPosition    as okxOpen,
+  openLimitPosition as okxOpenLimit,
+  closePosition   as okxClose,
+  getPositions    as okxGetPositions,
+  type OKXPosition,
+} from "../brokers/okx";
+import { db, profileTable, botStateTable, tradeMemoryTable } from "@workspace/db";
+import { eq, and, desc }               from "drizzle-orm";
 
 // ── Runtime state ─────────────────────────────────────────────────────────────
 export let cronEnabled   = true;
@@ -14,7 +21,8 @@ export let tradingPaused = false;
 export let pausedReason  = "";
 export let lastScanTime: Date | null = null;
 
-let cronTask: ScheduledTask | null = null;
+let cronTask:   ScheduledTask | null = null;
+let isScanning: boolean             = false;
 
 type ScanNotifier  = (result: ScanResult, triggered: "cron" | "manual") => Promise<void>;
 type AlertNotifier = (message: string) => Promise<void>;
@@ -25,11 +33,30 @@ let alertFn:  AlertNotifier | null = null;
 export function registerScanNotifier(fn: ScanNotifier): void  { notifyFn = fn; }
 export function registerAlertNotifier(fn: AlertNotifier): void { alertFn  = fn; }
 
-const SCAN_INTERVAL    = process.env["SCAN_INTERVAL"] ?? "0 */4 * * *";
-const MAX_AUTO_TRADES  = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
-const LOSS_LIMIT_PCT   = 0.30;
+const SCAN_INTERVAL   = process.env["SCAN_INTERVAL"] ?? "*/30 * * * *";
+const MAX_AUTO_TRADES = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
+const LOSS_LIMIT_PCT  = 0.30;
 
-// ── Daily loss limit (uses trade_log) ────────────────────────────────────────
+function humanInterval(crontab: string): string {
+  if (crontab === "*/30 * * * *") return "every 30 minutes";
+  if (crontab === "*/15 * * * *") return "every 15 minutes";
+  if (crontab === "0 */4 * * *")  return "every 4 hours";
+  if (crontab === "0 */1 * * *")  return "every hour";
+  return crontab;
+}
+
+// ── Scaling decision types ─────────────────────────────────────────────────────
+type ScalingAction = "NEW" | "ADD" | "HOLD" | "CUT";
+
+interface SignalOutcome {
+  symbol:   string;
+  action:   ScalingAction;
+  amount?:  number;
+  reason?:  string;
+  pnlPct?:  number;
+}
+
+// ── Daily loss limit ───────────────────────────────────────────────────────────
 async function checkDailyLossLimit(): Promise<boolean> {
   try {
     const [profile] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1);
@@ -47,11 +74,8 @@ async function checkDailyLossLimit(): Promise<boolean> {
       ].join("\n");
       tradingPaused = true;
       pausedReason  = msg;
-
-      // Persist to DB
       await db.update(botStateTable).set({ tradingPaused: true, pausedReason: msg, lastUpdated: new Date() })
         .where(eq(botStateTable.id, 1)).catch(() => {});
-
       await alertFn?.(msg).catch(() => {});
       console.warn("[cronScanner] Loss limit hit — trading paused");
       return false;
@@ -60,48 +84,191 @@ async function checkDailyLossLimit(): Promise<boolean> {
   } catch { return true; }
 }
 
-// ── Convert Bybit-style symbol to OKX spot (BTCUSDT → BTC-USDT) ─────────────
+// ── Convert Bybit-style symbol to OKX spot ────────────────────────────────────
 function toOkxSpot(sym: string): string {
-  if (sym.includes("-")) return sym; // already OKX format
+  if (sym.includes("-")) return sym;
   const quote = sym.endsWith("USDC") ? "USDC" : "USDT";
   const base  = sym.replace(/USDT$/, "").replace(/USDC$/, "");
   return `${base}-${quote}`;
 }
 
-// ── Auto-execute strong conviction signals — OKX spot only ───────────────────
-async function executeSignal(opp: ScanResult["opportunities"][0], totalCapital: number): Promise<void> {
+// ── Log scaling decision to trade_memory ──────────────────────────────────────
+async function logScalingDecision(
+  symbol:    string,
+  action:    ScalingAction,
+  reasoning: string,
+  pnlPct?:   number,
+): Promise<void> {
+  await db.insert(tradeMemoryTable).values({
+    symbol,
+    reflection: reasoning,
+    whatWorked: action,
+    whatDidnt:  pnlPct != null ? `P/L at decision: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : null,
+  }).catch(e => console.error("[cronScanner] logScalingDecision failed:", e));
+}
+
+// ── Check if this position was already scaled once ────────────────────────────
+async function wasAlreadyScaled(symbol: string): Promise<boolean> {
+  const row = await db.select({ whatWorked: tradeMemoryTable.whatWorked })
+    .from(tradeMemoryTable)
+    .where(and(eq(tradeMemoryTable.symbol, symbol), eq(tradeMemoryTable.whatWorked, "ADD")))
+    .orderBy(desc(tradeMemoryTable.createdAt))
+    .limit(1)
+    .then(r => r[0]);
+  return !!row;
+}
+
+// ── Ask Claude whether to ADD / HOLD / CUT ───────────────────────────────────
+async function makeScalingDecision(
+  opp:          ScanResult["opportunities"][0],
+  pos:          OKXPosition,
+  totalCapital: number,
+): Promise<{ action: "ADD" | "HOLD" | "CUT"; reasoning: string }> {
+  const posValue     = pos.entryPrice * pos.size;
+  const exposurePct  = totalCapital > 0 ? (posValue / totalCapital) * 100 : 0;
+  const newExposure  = totalCapital > 0 ? ((posValue + 50) / totalCapital) * 100 : 0;
+
+  let prompt: string;
+
+  if (pos.pnl > 0) {
+    // ── Winning position ──
+    if (await wasAlreadyScaled(opp.symbol)) {
+      return { action: "HOLD", reasoning: "Already added to this position once — no further scaling." };
+    }
+    prompt = [
+      `You already hold ${opp.symbol}.`,
+      `Entry price: $${pos.entryPrice.toFixed(4)}`,
+      `Current P/L: +${pos.pnlPct.toFixed(2)}%`,
+      `Position size: ~$${posValue.toFixed(2)} (${exposurePct.toFixed(1)}% of capital)`,
+      `New signal conviction: ${opp.conviction}`,
+      `Price vs entry: +${pos.pnlPct.toFixed(2)}% above entry`,
+      `If you ADD ~$50 more, total exposure would be ${newExposure.toFixed(1)}% of capital.`,
+      ``,
+      `Should you ADD to this position?`,
+      `Rules:`,
+      `- Only ADD if conviction is strong_buy`,
+      `- Only ADD if total exposure after adding stays under 40% of capital`,
+      ``,
+      `Respond with JSON: { "action": "ADD" or "HOLD", "reasoning": "one sentence" }`,
+    ].join("\n");
+  } else {
+    // ── Losing position ──
+    const lossPct = Math.abs(pos.pnlPct);
+    prompt = [
+      `You hold ${opp.symbol} at a loss.`,
+      `Entry price: $${pos.entryPrice.toFixed(4)}`,
+      `Current P/L: -${lossPct.toFixed(2)}%`,
+      `Position size: ~$${posValue.toFixed(2)}`,
+      `New signal conviction: ${opp.conviction}`,
+      ``,
+      `Market context from scanner:`,
+      opp.reasoning ?? "No additional context.",
+      ``,
+      `Decide:`,
+      `ADD  — looks like stop hunt or wick; higher timeframe trend intact; loss within 5% of entry`,
+      `HOLD — signal mixed, wait for clarity`,
+      `CUT  — structure broken, trend reversed, close the position now`,
+      ``,
+      `Hard rules you cannot override:`,
+      `- Never ADD if loss exceeds 8% from entry`,
+      `- Never ADD more than once to a losing position`,
+      ``,
+      `Respond with JSON: { "action": "ADD" or "HOLD" or "CUT", "reasoning": "two sentences max" }`,
+    ].join("\n");
+  }
+
+  const res = await llm.json<{ action: "ADD" | "HOLD" | "CUT"; reasoning: string }>({
+    taskType:      "assistant_reply",
+    systemContext: "You are a disciplined trading risk manager. Respond in JSON only. Be concise and specific.",
+    prompt,
+    schema: {
+      type: "object", required: ["action", "reasoning"],
+      properties: {
+        action:    { type: "string", enum: ["ADD", "HOLD", "CUT"] },
+        reasoning: { type: "string" },
+      },
+    },
+    fallback: { action: "HOLD", reasoning: "Could not determine scaling decision." },
+  });
+
+  return { action: res.data.action, reasoning: res.data.reasoning };
+}
+
+// ── Execute a single signal with position-scaling logic ───────────────────────
+async function evaluateAndExecuteSignal(
+  opp:          ScanResult["opportunities"][0],
+  totalCapital: number,
+  livePositions: OKXPosition[],
+): Promise<SignalOutcome> {
   const rawSym = opp.symbol;
 
-  // Stocks/equities can only trade on eToro — skip for OKX auto-execution
+  // Skip non-crypto (equities only trade on eToro)
   const assetClass = opp.assetClass ?? "Crypto";
   if (assetClass === "Equity" || assetClass === "Stock" || assetClass === "ETF") {
     console.log(`[cronScanner] ${rawSym} skipped — ${assetClass} not supported on OKX`);
-    return;
+    return { symbol: rawSym, action: "HOLD", reason: `${assetClass} not tradeable on OKX` };
   }
 
   if (await isCoinSuspended(rawSym)) {
     console.log(`[cronScanner] ${rawSym} skipped — suspended`);
-    return;
+    return { symbol: rawSym, action: "HOLD", reason: "coin suspended" };
   }
 
-  const maxPerTrade = totalCapital * 0.50;
-  const amount      = Math.max(10, Math.min(opp.positionSizeUsd || 50, maxPerTrade, 50));
-  const side        = opp.direction === "short" ? "sell" : "buy";
-  const okxSym      = toOkxSpot(rawSym);
-  const orderType   = opp.orderType ?? "market";
-  const limitPrice  = opp.limitPrice ?? null;
-  const okxMode     = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
-
-  console.log(`[cronScanner] Auto-trade sizing: ${okxSym} totalCapital=$${totalCapital} amount=$${amount} orderType=${orderType}`);
+  const okxSym    = toOkxSpot(rawSym);
+  const amount    = Math.max(10, Math.min(opp.positionSizeUsd || 50, totalCapital * 0.50, 50));
+  const side      = opp.direction === "short" ? "sell" : "buy";
+  const orderType = opp.orderType ?? "market";
+  const limitPrice = opp.limitPrice ?? null;
+  const okxMode   = process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live";
 
   if (amount < 5) {
-    console.warn(`[cronScanner] Skipping ${okxSym} — amount $${amount} below $5 minimum`);
-    await alertFn?.(`⚠️ Skipping ${okxSym} — amount $${amount.toFixed(2)} below $5 minimum`).catch(() => {});
-    return;
+    return { symbol: okxSym, action: "HOLD", reason: `amount $${amount.toFixed(2)} below $5 minimum` };
   }
 
+  // Check for existing open position
+  const existingPos = livePositions.find(p =>
+    p.symbol === okxSym || p.symbol.split("-")[0] === okxSym.split("-")[0]
+  );
+
+  if (existingPos) {
+    // ── Position exists — ask Claude ──────────────────────────────────────────
+    console.log(`[cronScanner] ${okxSym} — existing position (P/L ${existingPos.pnlPct.toFixed(2)}%), asking Claude…`);
+    const { action, reasoning } = await makeScalingDecision(opp, existingPos, totalCapital);
+
+    await logScalingDecision(okxSym, action, reasoning, existingPos.pnlPct);
+    console.log(`[cronScanner] ${okxSym} scaling decision: ${action} — ${reasoning}`);
+
+    if (action === "HOLD") {
+      return { symbol: okxSym, action: "HOLD", reason: reasoning, pnlPct: existingPos.pnlPct };
+    }
+
+    if (action === "CUT") {
+      try {
+        await okxClose(okxSym);
+        const exitPrice = opp.price ?? existingPos.entryPrice;
+        await closeOpenTrade({
+          symbol:             okxSym,
+          broker:             "okx",
+          exitPrice,
+          amountUsd:          existingPos.size * existingPos.entryPrice,
+          entryPriceOverride: existingPos.entryPrice,
+        }).catch(() => {});
+        console.log(`[cronScanner] CUT ${okxSym} — ${reasoning}`);
+        return { symbol: okxSym, action: "CUT", reason: reasoning, pnlPct: existingPos.pnlPct };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[cronScanner] CUT ${okxSym} failed:`, msg);
+        return { symbol: okxSym, action: "HOLD", reason: `CUT failed: ${msg}` };
+      }
+    }
+
+    // action === "ADD" — fall through to execution below
+  }
+
+  // ── New entry or ADD ─────────────────────────────────────────────────────────
+  const actionLabel: ScalingAction = existingPos ? "ADD" : "NEW";
   try {
-    let orderId: string;
+    let orderId:    string;
     let entryPrice: number;
 
     if (orderType === "limit" && limitPrice) {
@@ -111,10 +278,9 @@ async function executeSignal(opp: ScanResult["opportunities"][0], totalCapital: 
     } else {
       const r = await okxOpen(okxSym, side as "buy" | "sell", amount);
       orderId    = r.orderId;
-      entryPrice = r.entryPrice;  // real OKX ticker price at execution time
+      entryPrice = r.entryPrice;
     }
 
-    // Log open trade for /history and reflection
     await logOpenTrade({
       symbol:    okxSym,
       broker:    "okx",
@@ -125,31 +291,61 @@ async function executeSignal(opp: ScanResult["opportunities"][0], totalCapital: 
       reasoning: opp.reasoning,
     }).catch(e => console.error(`[cronScanner] Trade log insert failed:`, e));
 
+    if (existingPos) {
+      await logScalingDecision(okxSym, "ADD", `Added $${amount} to existing position`, existingPos.pnlPct);
+    }
+
     const orderLabel = orderType === "limit" ? `Limit @$${limitPrice}` : "Market";
-    console.log(`[cronScanner] Auto-executed ${side} ${okxSym} $${amount} spot (${orderLabel}) → ${orderId}`);
-    await alertFn?.([
-      `🤖 Auto-trade: ${side.toUpperCase()} ${okxSym} — Executed`,
-      `Order ID: ${orderId}`,
-      `Amount: $${amount} (spot)`,
-      `Order: ${orderLabel}`,
-      `Broker: OKX ${okxMode}`,
-      `Time: ${new Date().toUTCString()}`,
-    ].join("\n")).catch(() => {});
+    console.log(`[cronScanner] ${actionLabel} ${side} ${okxSym} $${amount} (${orderLabel}) → ${orderId}`);
+    return {
+      symbol:  okxSym,
+      action:  actionLabel,
+      amount,
+      pnlPct:  existingPos?.pnlPct,
+      reason:  existingPos ? `added to winner (+${existingPos.pnlPct.toFixed(1)}%)` : undefined,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[cronScanner] Auto-execute ${okxSym} failed:`, msg);
-    await alertFn?.(`❌ Auto-trade failed: ${okxSym}\n${msg}`).catch(() => {});
+    console.error(`[cronScanner] ${actionLabel} ${okxSym} failed:`, msg);
+    return { symbol: okxSym, action: "HOLD", reason: `execution failed: ${msg}` };
   }
+}
+
+// ── Format scan summary for Telegram ─────────────────────────────────────────
+function formatScanSummary(outcomes: SignalOutcome[], total: number): string {
+  const lines: string[] = [`🔍 Scan complete — ${total} signal${total !== 1 ? "s" : ""} found`];
+
+  for (const o of outcomes) {
+    const pnlTag = o.pnlPct != null ? ` (${o.pnlPct >= 0 ? "+" : ""}${o.pnlPct.toFixed(1)}%)` : "";
+    switch (o.action) {
+      case "NEW":
+        lines.push(`✅ New entry: ${o.symbol} — $${o.amount ?? 50}`);
+        break;
+      case "ADD":
+        lines.push(`📈 Adding to winner: ${o.symbol} — +$${o.amount ?? 50}${pnlTag}${o.reason ? `\n   (${o.reason})` : ""}`);
+        break;
+      case "HOLD":
+        lines.push(`⏸️ Hold existing: ${o.symbol}${pnlTag}${o.reason ? `\n   (${o.reason})` : ""}`);
+        break;
+      case "CUT":
+        lines.push(`✂️ Cut position: ${o.symbol}${pnlTag}${o.reason ? `\n   (${o.reason})` : ""}`);
+        break;
+    }
+  }
+
+  return lines.join("\n");
 }
 
 // ── Core scan logic ───────────────────────────────────────────────────────────
 async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void> {
   if (!cronEnabled && triggered === "cron") { console.log("[cronScanner] Skipped — disabled"); return; }
   if (tradingPaused)                         { console.log("[cronScanner] Skipped — trading paused"); return; }
+  if (isScanning)                            { console.log("[cronScanner] Skipped — scan already in progress"); return; }
 
   const safe = await checkDailyLossLimit();
   if (!safe) return;
 
+  isScanning = true;
   console.log(`[cronScanner] ${triggered === "manual" ? "Manual" : "Cron"} scan starting…`);
   lastScanTime = new Date();
   cache.invalidate(CacheKey.marketScan());
@@ -157,25 +353,38 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
   try {
     const result = await runScan();
 
-    // Notify scan complete
+    // Notify scan complete (sends to Telegram via registered notifier)
     await notifyFn?.(result, triggered).catch(e => console.error("[cronScanner] notify failed:", e));
 
-    // Auto-execute strong conviction signals (bypass approval gate)
     const [profile] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1)
       .catch(() => [null]);
     const totalCapital = (profile as { totalCapital?: number } | null)?.totalCapital ?? 200;
 
     const config = await approvalGate.getConfig();
+    const outcomes: SignalOutcome[] = [];
+
     if (config.mode === "autonomous") {
+      // Fetch live OKX positions once for all signals
+      const livePositions = await okxGetPositions().catch(() => [] as OKXPosition[]);
+
       const strong = result.opportunities
         .filter(o => o.conviction === "strong_buy" || o.conviction === "strong_sell")
         .slice(0, MAX_AUTO_TRADES);
 
       for (const sig of strong) {
-        await executeSignal(sig, totalCapital);
+        const outcome = await evaluateAndExecuteSignal(sig, totalCapital, livePositions);
+        outcomes.push(outcome);
+      }
+
+      // Push scan summary to Telegram
+      if (outcomes.length > 0) {
+        const summary = formatScanSummary(outcomes, result.opportunities.length);
+        await alertFn?.(summary).catch(() => {});
+      } else {
+        await alertFn?.(`🔍 Scan complete — ${result.opportunities.length} signal${result.opportunities.length !== 1 ? "s" : ""} found\n⏭️ No strong conviction signals to act on`).catch(() => {});
       }
     } else {
-      // Approval mode: submit high-conviction signals for approval
+      // Approval mode: queue high-conviction signals
       const actionable = result.opportunities.filter(o =>
         o.conviction === "high" || o.conviction === "strong_buy" || o.conviction === "strong_sell"
       ).slice(0, MAX_AUTO_TRADES);
@@ -199,17 +408,19 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals`);
   } catch (err) {
     console.error("[cronScanner] Scan failed:", err);
+  } finally {
+    isScanning = false;
   }
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 export function startCronScanner(): void {
-  const interval = cron.validate(SCAN_INTERVAL) ? SCAN_INTERVAL : "0 */4 * * *";
-  if (!cron.validate(SCAN_INTERVAL)) console.warn(`[cronScanner] Invalid SCAN_INTERVAL, using every 4h`);
+  const interval = cron.validate(SCAN_INTERVAL) ? SCAN_INTERVAL : "*/30 * * * *";
+  if (!cron.validate(SCAN_INTERVAL)) console.warn(`[cronScanner] Invalid SCAN_INTERVAL, using every 30 min`);
 
   cronTask = cron.schedule(interval, () => { void runCronScan("cron"); });
   setTimeout(() => { void runCronScan("cron"); }, 10_000);
-  console.log(`[cronScanner] Started — interval: ${interval}`);
+  console.log(`[cronScanner] Started — schedule: ${humanInterval(interval)}`);
 }
 
 export function setCronEnabled(enabled: boolean): void {
@@ -229,5 +440,12 @@ export function resumeTrading(): void {
 export async function triggerNow(): Promise<void> { return runCronScan("manual"); }
 
 export function getStatus() {
-  return { enabled: cronEnabled, paused: tradingPaused, pausedReason, lastScan: lastScanTime, interval: SCAN_INTERVAL };
+  return {
+    enabled:      cronEnabled,
+    paused:       tradingPaused,
+    pausedReason,
+    lastScan:     lastScanTime,
+    interval:     SCAN_INTERVAL,
+    schedule:     humanInterval(SCAN_INTERVAL),
+  };
 }

@@ -726,13 +726,17 @@ export function startPolling(): void {
       ]);
 
       interface EtoroPortfolio {
-        totalEquity?: number;
-        cashBalance?: number;
+        clientPortfolio?: {
+          credit?:    number;
+          positions?: Array<{ amount?: number }>;
+          [k: string]: unknown;
+        };
         [k: string]: unknown;
       }
-      const ep = etoroPortfolio as EtoroPortfolio | null;
-      const etoroTotal = ep?.totalEquity ?? 0;
-      const etoroCash  = ep?.cashBalance ?? 0;
+      const cp           = (etoroPortfolio as EtoroPortfolio | null)?.clientPortfolio;
+      const etoroCash    = cp?.credit ?? 0;
+      const etoroInvested = (cp?.positions ?? []).reduce((s, p) => s + (p.amount ?? 0), 0);
+      const etoroTotal   = etoroCash + etoroInvested;
 
       const out: string[] = [`💰 <b>Account Balance</b>`, ``];
 
@@ -762,8 +766,9 @@ export function startPolling(): void {
 
       out.push(
         `<b>eToro Demo:</b>`,
-        `Portfolio value: <b>$${etoroTotal.toFixed(2)}</b>`,
         `Cash: <b>$${etoroCash.toFixed(2)}</b>`,
+        `Invested: <b>$${etoroInvested.toFixed(2)}</b>`,
+        `Total: <b>$${etoroTotal.toFixed(2)}</b>`,
         ``
       );
 

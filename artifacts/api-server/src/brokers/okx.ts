@@ -527,14 +527,15 @@ export async function getAccountBalance(): Promise<OKXBalance> {
   const data = await request<Array<{
     totalEq: string;
     adjEq:   string;
-    details: Array<{ ccy: string; availEq: string }>;
+    details: Array<{ ccy: string; availBal: string; availEq: string; cashBal: string }>;
   }>>("GET", "/account/balance");
   const d = data[0];
   if (!d) throw new Error("OKX: no balance data");
-  const usdt = d.details.find(x => x.ccy === "USDT");
+  const usdt    = d.details.find(x => x.ccy === "USDT");
+  const availRaw = usdt?.availBal || usdt?.availEq || usdt?.cashBal || d.adjEq || "0";
   return {
-    totalEquity:      parseFloat(d.totalEq),
-    availableBalance: parseFloat(usdt?.availEq ?? d.adjEq),
+    totalEquity:      parseFloat(d.totalEq  || "0"),
+    availableBalance: parseFloat(availRaw),
     currency:         "USDT",
   };
 }

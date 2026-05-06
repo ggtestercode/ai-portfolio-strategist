@@ -1,0 +1,27 @@
+{
+  "DOGE-USDT": {
+    "entryPrice": 0.11194890576150068,
+    "size": 893.2646489019107,
+    "costBasis": 100
+  },
+  "BCH-USDT": {
+    "entryPrice": 459.2544151936348,
+    "size": 0.32661634823207025,
+    "costBasis": 150
+  },
+  "XRP-USDT": {
+    "entryPrice": 1.4131434171885502,
+    "size": 70.7642258978569,
+    "costBasis": 100
+  },
+  "SOL-USDT": {
+    "entryPrice": 89.65,
+    "size": 0.5577244841048522,
+    "costBasis": 50
+  },
+  "BTC-USDT": {
+    "entryPrice": 81630.5,
+    "size": 0.0006125161551135911,
+    "costBasis": 50
+  }
+}
