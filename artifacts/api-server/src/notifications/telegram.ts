@@ -627,23 +627,29 @@ export function startPolling(): void {
       const { closePositionPaper }      = await import("../brokers/okxPaper");
 
       for (const p of dustPos) {
+        const sym = escapeHtml(displaySymbol(p.symbol));
+        const val = (p.entryPrice * p.size + p.pnl).toFixed(4);
         try {
           if (okxPaperMode) await closePositionPaper(p.symbol);
           else              await okxClose(p.symbol);
-          const val = (p.entryPrice * p.size + p.pnl).toFixed(2);
-          await b.sendMessage(chatId,
-            `✅ Closed ${escapeHtml(displaySymbol(p.symbol))} ($${val})`,
-            { parse_mode: "HTML" });
+          await b.sendMessage(chatId, `✅ Closed ${sym} ($${val})`, { parse_mode: "HTML" });
         } catch (e) {
           const em = e instanceof Error ? e.message : String(e);
-          await b.sendMessage(chatId,
-            `❌ Failed to close ${escapeHtml(displaySymbol(p.symbol))}: ${escapeHtml(em)}`,
-            { parse_mode: "HTML" });
+          // Below minimum lot size — OKX cannot close it via API; it will expire worthless
+          if (em.includes("no valid quote currency")) {
+            await b.sendMessage(chatId,
+              `⚠️ ${sym} ($${val}) — below minimum lot size, cannot close via API. Will be ignored in dashboard.`,
+              { parse_mode: "HTML" });
+          } else {
+            await b.sendMessage(chatId,
+              `❌ Failed to close ${sym}: ${escapeHtml(em)}`,
+              { parse_mode: "HTML" });
+          }
         }
       }
 
       await syncAllHoldingsToDB().catch(() => {});
-      await b.sendMessage(chatId, `🧹 Done. Use /positions to verify.`);
+      await b.sendMessage(chatId, `🧹 Done. Use /positions to verify (sub-$1 positions are filtered from display).`);
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /closedust failed: ${escapeHtml(m)}`);
