@@ -1,10 +1,11 @@
-import { approvalGate }        from "./approvalGate";
-import { openPosition }         from "../brokers/etoro";
+import { approvalGate }           from "./approvalGate";
+import { openPosition }            from "../brokers/etoro";
 import { openPosition as bybitOpen } from "../brokers/bybit";
 import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
-import { openPositionPaper }    from "../brokers/okxPaper";
-import { sendApprovalRequest }  from "../notifications/telegram";
-import { checkAndRebalance }    from "./rebalancer";
+import { openPositionPaper }       from "../brokers/okxPaper";
+import { sendApprovalRequest }     from "../notifications/telegram";
+import { checkAndRebalance }       from "./rebalancer";
+import { syncAllHoldingsToDB }     from "./aiResponder";
 
 export let okxPaperMode = false;
 
@@ -41,6 +42,9 @@ export async function initBrokers(): Promise<void> {
   }
 
   approvalGate.registerNotifier(sendApprovalRequest);
+
+  // Sync live broker positions into holdingsTable so dashboard is populated
+  syncAllHoldingsToDB().catch(e => console.error("[startup] Holdings sync failed:", e));
 
   checkAndRebalance().catch(e => console.error("[startup] Initial rebalance check failed:", e));
 

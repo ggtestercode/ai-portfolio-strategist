@@ -3,7 +3,7 @@
  * Same generateAssistantReply signature. Now uses Claude via llmRouter.
  */
 
-import { llm, type TaskType } from "./llmRouter";
+import { llm, type TaskType }   from "./llmRouter";
 import { cache, TTL, CacheKey } from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { db, profileTable, holdingsTable } from "@workspace/db";
@@ -26,29 +26,68 @@ interface EtoroPos {
   positionId?: string | number;
   symbol?: string;
   investedAmount?: number;
+  amount?: number;
   profit?: number;
   isBuy?: boolean;
   assetClass?: string;
+  openRate?: number;
 }
-interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
+interface EtoroPortfolio {
+  positions?: EtoroPos[];
+  clientPortfolio?: { positions?: EtoroPos[]; [k: string]: unknown };
+  [k: string]: unknown;
+}
+
+function extractEtoroPositions(raw: unknown): EtoroPos[] {
+  const p = raw as EtoroPortfolio;
+  // Real API wraps in clientPortfolio; demo may return positions at top level
+  return p?.clientPortfolio?.positions ?? p?.positions ?? [];
+}
 
 export async function syncHoldingsFromEtoro(): Promise<void> {
-  const portfolio = (await getPortfolio()) as EtoroPortfolio;
-  const positions = portfolio?.positions ?? [];
+  const raw = await getPortfolio();
+  const positions = extractEtoroPositions(raw);
   await db.delete(holdingsTable);
   for (const p of positions) {
     if (!p.symbol) continue;
-    const value = p.investedAmount ?? 0;
+    const value = p.investedAmount ?? p.amount ?? 0;
+    if (value <= 0) continue;
     await db.insert(holdingsTable).values({
-      symbol:       p.symbol.toUpperCase(),
+      symbol:       p.symbol.toUpperCase().replace(/[-/]?(USDT|USDC|USD)$/i, ""),
       name:         p.symbol.toUpperCase(),
       assetClass:   p.assetClass ?? "Equity",
       quantity:     value,
       price:        1,
-      change24hPct: p.profit && p.investedAmount
-        ? (p.profit / p.investedAmount) * 100
-        : 0,
+      change24hPct: p.profit && value > 0 ? (p.profit / value) * 100 : 0,
     });
+  }
+  console.log(`[syncHoldings] eToro: ${positions.length} position(s) synced`);
+}
+
+export async function syncAllHoldingsToDB(): Promise<void> {
+  try {
+    // Sync eToro equity positions
+    await syncHoldingsFromEtoro();
+
+    // Append OKX crypto positions
+    const okxPositions = await okxGetPositions().catch(() => []);
+    for (const pos of okxPositions) {
+      const value = pos.entryPrice * pos.size + pos.pnl;
+      if (value <= 0) continue;
+      const sym = pos.symbol.split("-")[0] ?? pos.symbol;
+      await db.insert(holdingsTable).values({
+        symbol:       sym.toUpperCase(),
+        name:         pos.symbol,
+        assetClass:   "Crypto",
+        quantity:     pos.size,
+        price:        pos.entryPrice + (pos.pnl / (pos.size || 1)),
+        change24hPct: pos.pnlPct,
+      }).onConflictDoNothing();
+    }
+    console.log(`[syncHoldings] OKX: ${okxPositions.length} position(s) synced`);
+    cache.invalidate(CacheKey.portfolio());
+  } catch (err) {
+    console.error("[syncHoldings] Failed:", err);
   }
 }
 

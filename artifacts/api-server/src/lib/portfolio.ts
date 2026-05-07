@@ -41,8 +41,9 @@ export async function getPortfolioSnapshot(
   }, 0);
   const change24hPct = totalValue > 0 ? (change24h / (totalValue - change24h)) * 100 : 0;
 
-  const totalProfitLoss = totalValue - totalCapital;
-  const totalProfitLossPct = totalCapital > 0 ? (totalProfitLoss / totalCapital) * 100 : 0;
+  // Only show P/L when holdings exist; an empty portfolio is not a -100% loss
+  const totalProfitLoss = holdings.length > 0 ? totalValue - totalCapital : 0;
+  const totalProfitLossPct = holdings.length > 0 && totalCapital > 0 ? (totalProfitLoss / totalCapital) * 100 : 0;
 
   const byAssetClass: Record<string, number> = {};
   for (const h of holdings) {

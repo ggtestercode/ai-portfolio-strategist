@@ -10,6 +10,7 @@ import {
   getAllocationRows,
   loadHoldings,
 } from "../lib/portfolio";
+import { syncAllHoldingsToDB } from "../lib/aiResponder";
 
 const router: IRouter = Router();
 
@@ -44,6 +45,16 @@ router.get("/portfolio/holdings", async (_req, res): Promise<void> => {
     change24hPct: h.change24hPct,
   }));
   res.json(GetHoldingsResponse.parse(out));
+});
+
+router.post("/portfolio/sync", async (_req, res): Promise<void> => {
+  try {
+    await syncAllHoldingsToDB();
+    const holdings = await loadHoldings();
+    res.json({ synced: holdings.length, holdings: holdings.map(h => h.symbol) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
