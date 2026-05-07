@@ -332,6 +332,21 @@ export async function getOrders(): Promise<OKXOrder[]> {
   ];
 }
 
+export async function cancelOrder(instId: string, ordId: string): Promise<void> {
+  const raw = await requestRaw<Array<{ sCode: string; sMsg: string }>>(
+    "POST", "/trade/cancel-order", { instId, ordId }
+  );
+  const r = raw[0];
+  if (r && r.sCode !== "0") throw new Error(`OKX cancel ${ordId}: ${r.sMsg}`);
+}
+
+export async function cancelAllOrders(): Promise<number> {
+  const orders = await getOrders();
+  if (!orders.length) return 0;
+  await Promise.all(orders.map(o => cancelOrder(o.symbol, o.orderId).catch(() => {})));
+  return orders.length;
+}
+
 export async function searchInstrument(symbol: string): Promise<OKXInstrument> {
   const instId = toInstId(symbol);
   const data   = await request<Array<{

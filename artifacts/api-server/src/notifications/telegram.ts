@@ -6,6 +6,7 @@ import {
   syncHoldingsFromEtoro,
   syncAllHoldingsToDB,
   getPendingOrders,
+  removePendingOrder,
   type AssistantContext,
 } from "../lib/aiResponder";
 import { getPortfolioSnapshot }            from "../lib/portfolio";
@@ -16,6 +17,7 @@ import { getPortfolio, getOrders as etoroGetOrders, getPositionsWithSymbols as e
 import {
   getPositions as okxGetPositions,
   getOrders    as okxGetOrders,
+  cancelAllOrders as okxCancelAllOrders,
   getAccountBalance,
   testConnection as okxTestConnection,
 } from "../brokers/okx";
@@ -238,7 +240,8 @@ export function startPolling(): void {
     { command: "scan",       description: "Run live market scan (Claude)" },
     { command: "autoscan",   description: "Auto-scanner: on | off | now | status" },
     { command: "sync",       description: "Sync all brokers to local DB" },
-    { command: "closedust",  description: "Close all dust positions (value < $1)" },
+    { command: "closedust",    description: "Close all dust positions (value < $1)" },
+    { command: "cancelorders", description: "Cancel all open OKX orders and clear pending queue" },
     { command: "status",     description: "Full bot status overview" },
     { command: "history",    description: "Last 10 closed trades" },
     { command: "memory",     description: "Last 5 trade reflections (AI journal)" },
@@ -790,6 +793,30 @@ export function startPolling(): void {
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /orders failed: ${escapeHtml(m)}`);
+    }
+  });
+
+  // ── /cancelorders — cancel all open OKX orders + clear local pending queue ──
+  b.onText(/^\/cancelorders(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const [cancelledCount, localCount] = await Promise.all([
+        okxCancelAllOrders().catch(() => 0),
+        Promise.resolve(getPendingOrders().length),
+      ]);
+      // Clear in-memory pending queue
+      for (const o of getPendingOrders()) removePendingOrder(o.id);
+
+      const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
+      await b.sendMessage(chatId, [
+        `✅ <b>Orders cancelled</b>`,
+        `OKX ${okxMode}: <b>${cancelledCount}</b> open order(s) cancelled`,
+        `Local queue: <b>${localCount}</b> pending order(s) cleared`,
+        `<i>${utcNow()}</i>`,
+      ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ /cancelorders failed: ${escapeHtml(m)}`);
     }
   });
 
