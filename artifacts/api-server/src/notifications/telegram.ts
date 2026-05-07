@@ -664,10 +664,11 @@ export function startPolling(): void {
   b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [okxPos, bybitPos, etoroRawPos, localPending] = await Promise.all([
+      const [okxPos, bybitPos, etoroRawPos, etoroPendingOrders, localPending] = await Promise.all([
         okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
         bybitGetPositions().catch(() => []),
         etoroGetPositions().catch(() => []),
+        etoroGetOrders().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
 
@@ -675,7 +676,7 @@ export function startPolling(): void {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
 
-      if (!okxPos.length && !bybitPos.length && !etoroRawPos.length && !localPending.length) {
+      if (!okxPos.length && !bybitPos.length && !etoroRawPos.length && !etoroPendingOrders.length && !localPending.length) {
         await b.sendMessage(chatId,
           `📊 No open positions or pending orders.\n<i>Last synced: ${now}</i>`,
           { parse_mode: "HTML" });
@@ -732,6 +733,16 @@ export function startPolling(): void {
           out.push(`• <b>${escapeHtml(sym)}</b> — $${d.value.toFixed(2)} long${entry} · P/L ${sign}$${d.profit.toFixed(2)}`);
         }
         if (dustEtoroCount > 0) out.push(`<i>⚠️ ${dustEtoroCount} dust position(s) hidden (value &lt; $1) — use /closedust to clean up</i>`);
+        out.push(``);
+      }
+
+      if (etoroPendingOrders.length) {
+        out.push(`<b>eToro Pending Orders (${etoroPendingOrders.length}) — awaiting market open:</b>`);
+        for (const o of etoroPendingOrders) {
+          const t   = o.placedAt ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT" : "recently";
+          const sym = displaySymbol(o.symbol);
+          out.push(`• <b>${escapeHtml(sym)}</b> — ${o.side.toUpperCase()} $${o.amountUsd.toFixed(2)} · placed ${t}`);
+        }
         out.push(``);
       }
 

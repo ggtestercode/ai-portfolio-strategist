@@ -822,6 +822,9 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     const brokerLabel = isBybit
       ? `Bybit ${(process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet"}`
       : "eToro";
+    const etoroNote = !isBybit && !isMarketOpen(trade.assetClass)
+      ? `Note: US market closed — order queued, fills at 9:30 AM ET. Use /positions to track.`
+      : null;
     return [
       `✅ ${trade.side.toUpperCase()} ${trade.symbol} — Executed`,
       `Order ID: ${orderId}`,
@@ -830,6 +833,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
       `Units: ${qtyStr}`,
       `Broker: ${brokerLabel}`,
       `Time: ${new Date().toUTCString()}`,
+      ...(etoroNote ? [etoroNote] : []),
     ].join("\n");
   }
 
