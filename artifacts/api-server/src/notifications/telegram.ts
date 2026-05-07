@@ -242,7 +242,7 @@ export function startPolling(): void {
     { command: "autoscan",   description: "Auto-scanner: on | off | now | status" },
     { command: "sync",       description: "Sync all brokers to local DB" },
     { command: "closedust",    description: "Close all dust positions (value < $1)" },
-    { command: "cancelorders", description: "Cancel orders: list / BTC / buy BTC / all" },
+    { command: "cancelorders", description: "Cancel orders: list / 1 / all" },
     { command: "status",     description: "Full bot status overview" },
     { command: "history",    description: "Last 10 closed trades" },
     { command: "memory",     description: "Last 5 trade reflections (AI journal)" },
@@ -797,17 +797,23 @@ export function startPolling(): void {
     }
   });
 
-  // ── /cancelorders [symbol|buy BTC|all] ───────────────────────────────────
+  // ── /cancelorders [N|all] ────────────────────────────────────────────────
   b.onText(/^\/cancelorders(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
     const chatId  = String(msg.chat.id);
     const rawArg  = match?.[1]?.trim();
     const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
 
-    function fmtOrder(o: { symbol: string; side: string; price: number; size: number; placedAt: string }): string {
-      const t   = new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT";
-      const amt = o.price > 0 && o.size > 0 ? ` $${(o.price * o.size).toFixed(2)}` : "";
-      const px  = o.price > 0 ? ` @ $${o.price.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-      return `${escapeHtml(o.symbol)} ${o.side.toUpperCase()}${amt}${px} · ${t}`;
+    type OrderEntry = { kind: "okx"; orderId: string; symbol: string; side: string; price: number; size: number; placedAt: string }
+                    | { kind: "local"; id: string; symbol: string; side: string; amountUsd: number };
+
+    function fmtEntry(i: number, o: OrderEntry): string {
+      if (o.kind === "okx") {
+        const amt = o.price > 0 && o.size > 0 ? ` $${(o.price * o.size).toFixed(2)}` : "";
+        const px  = o.price > 0 ? ` @ $${o.price.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
+        const t   = new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT";
+        return `${i}. ${escapeHtml(o.symbol)} ${o.side.toUpperCase()}${amt}${px} [OKX ${okxMode}] · ${t}`;
+      }
+      return `${i}. ${escapeHtml(o.symbol)} ${o.side.toUpperCase()} $${o.amountUsd} [local]`;
     }
 
     try {
@@ -816,24 +822,27 @@ export function startPolling(): void {
         Promise.resolve(getPendingOrders()),
       ]);
 
-      // No arg — list orders
+      // Build unified numbered list
+      const entries: OrderEntry[] = [
+        ...okxOrders.map(o => ({ kind: "okx" as const, orderId: o.orderId, symbol: o.symbol, side: o.side, price: o.price, size: o.size, placedAt: o.placedAt })),
+        ...local.map(o    => ({ kind: "local" as const, id: o.id, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd })),
+      ];
+
+      // No arg — list with sequence numbers
       if (!rawArg) {
-        if (!okxOrders.length && !local.length) {
+        if (!entries.length) {
           await b.sendMessage(chatId, `📋 No open orders.\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
           return;
         }
-        const lines: string[] = [`📋 <b>Open orders</b> — use <code>/cancelorders BTC</code> or <code>/cancelorders all</code>`, ``];
-        for (const o of okxOrders) lines.push(`• ${fmtOrder(o)} [OKX ${okxMode}]`);
-        for (const o of local)     lines.push(`• ${escapeHtml(o.symbol)} ${o.side.toUpperCase()} $${o.amountUsd} [local] · queued`);
+        const lines = [`📋 <b>Open orders</b> — reply <code>/cancelorders 1</code> or <code>/cancelorders all</code>`, ``];
+        entries.forEach((o, i) => lines.push(fmtEntry(i + 1, o)));
         await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
         return;
       }
 
       // "all" — cancel everything
       if (rawArg.toLowerCase() === "all") {
-        const [cancelledCount] = await Promise.all([
-          okxCancelAllOrders().catch(() => 0),
-        ]);
+        const cancelledCount = await okxCancelAllOrders().catch(() => 0);
         const localCount = local.length;
         for (const o of local) removePendingOrder(o.id);
         await b.sendMessage(chatId, [
@@ -845,46 +854,27 @@ export function startPolling(): void {
         return;
       }
 
-      // Parse "buy BTC", "sell ETH", or just "BTC"
-      const parts  = rawArg.toUpperCase().split(/\s+/);
-      let side: string | null = null;
-      let sym: string;
-      if (parts[0] === "BUY" || parts[0] === "SELL") {
-        side = parts[0].toLowerCase();
-        sym  = (parts[1] ?? "").replace(/-USDT$/, "").replace(/-USDC$/, "");
-      } else {
-        sym = parts[0]!.replace(/-USDT$/, "").replace(/-USDC$/, "");
-      }
-
-      // Match OKX orders by base symbol (and optionally side)
-      const matches = okxOrders.filter(o => {
-        const base = o.symbol.split("-")[0]?.toUpperCase() ?? "";
-        return base === sym && (!side || o.side === side);
-      });
-      // Also match local pending
-      const localMatches = local.filter(o => {
-        const base = o.symbol.split("-")[0]?.toUpperCase().replace(/USDT$/, "") ?? "";
-        return (base === sym || o.symbol.toUpperCase() === sym) && (!side || o.side === side);
-      });
-
-      if (!matches.length && !localMatches.length) {
+      // Sequence number
+      const n = parseInt(rawArg, 10);
+      if (isNaN(n) || n < 1 || n > entries.length) {
         await b.sendMessage(chatId,
-          `❌ No open orders found for <b>${escapeHtml(sym)}</b>${side ? ` (${side})` : ""}.\nUse /cancelorders to list all.`,
-          { parse_mode: "HTML" });
+          `❌ Invalid number. Use /cancelorders to see the list (1–${entries.length}).`);
         return;
       }
-
-      // Cancel all matches
-      const results: string[] = [];
-      for (const o of matches) {
-        await cancelOrder(o.symbol, o.orderId).catch(() => {});
-        results.push(`✅ Cancelled ${fmtOrder(o)}`);
+      const target = entries[n - 1]!;
+      if (target.kind === "okx") {
+        await cancelOrder(target.symbol, target.orderId);
+        const amt = target.price > 0 && target.size > 0 ? ` $${(target.price * target.size).toFixed(2)}` : "";
+        const px  = target.price > 0 ? ` @ $${target.price.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
+        await b.sendMessage(chatId,
+          `✅ Cancelled — ${escapeHtml(target.symbol)} ${target.side.toUpperCase()}${amt}${px} [OKX ${okxMode}]`,
+          { parse_mode: "HTML" });
+      } else {
+        removePendingOrder(target.id);
+        await b.sendMessage(chatId,
+          `✅ Cancelled — ${escapeHtml(target.symbol)} ${target.side.toUpperCase()} $${target.amountUsd} [local]`,
+          { parse_mode: "HTML" });
       }
-      for (const o of localMatches) {
-        removePendingOrder(o.id);
-        results.push(`✅ Cancelled ${escapeHtml(o.symbol)} ${o.side.toUpperCase()} $${o.amountUsd} [local]`);
-      }
-      await b.sendMessage(chatId, results.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /cancelorders failed: ${escapeHtml(m)}`);
