@@ -39,10 +39,11 @@ const MAX_AUTO_TRADES = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
 const LOSS_LIMIT_PCT  = 0.30;
 
 function humanInterval(crontab: string): string {
-  if (crontab === "*/30 * * * *") return "every 30 minutes";
-  if (crontab === "*/15 * * * *") return "every 15 minutes";
-  if (crontab === "0 */4 * * *")  return "every 4 hours";
-  if (crontab === "0 */1 * * *")  return "every hour";
+  if (crontab === "disabled")      return "disabled (manual only)";
+  if (crontab === "*/30 * * * *")  return "every 30 minutes";
+  if (crontab === "*/15 * * * *")  return "every 15 minutes";
+  if (crontab === "0 */4 * * *")   return "every 4 hours";
+  if (crontab === "0 */1 * * *")   return "every hour";
   return crontab;
 }
 
@@ -472,6 +473,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 export function startCronScanner(): void {
+  if (SCAN_INTERVAL === "disabled") {
+    cronEnabled = false;
+    console.log("[cronScanner] Auto-scan DISABLED — manual trigger only (/autoscan now)");
+    return;
+  }
+
   const interval = cron.validate(SCAN_INTERVAL) ? SCAN_INTERVAL : "*/30 * * * *";
   if (!cron.validate(SCAN_INTERVAL)) console.warn(`[cronScanner] Invalid SCAN_INTERVAL, using every 30 min`);
 
