@@ -4,6 +4,7 @@ import {
   generateAssistantReply,
   getCachedContext,
   syncHoldingsFromEtoro,
+  syncAllHoldingsToDB,
   getPendingOrders,
   type AssistantContext,
 } from "../lib/aiResponder";
@@ -237,6 +238,7 @@ export function startPolling(): void {
     { command: "scan",       description: "Run live market scan (Claude)" },
     { command: "autoscan",   description: "Auto-scanner: on | off | now | status" },
     { command: "sync",       description: "Sync all brokers to local DB" },
+    { command: "closedust",  description: "Close all dust positions (value < $1)" },
     { command: "status",     description: "Full bot status overview" },
     { command: "history",    description: "Last 10 closed trades" },
     { command: "memory",     description: "Last 5 trade reflections (AI journal)" },
@@ -563,26 +565,88 @@ export function startPolling(): void {
   b.onText(/^\/sync(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [, bybitPos, okxPos] = await Promise.all([
-        syncHoldingsFromEtoro().catch(() => {}),
+      const [, bybitPos, okxPos, etoroPos] = await Promise.all([
+        syncAllHoldingsToDB().catch(() => {}),
         bybitGetPositions().catch(() => []),
         okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
+        etoroGetPositions().catch(() => []),
       ]);
-      const etoroHoldings = await db.select().from(holdingsTable);
+
+      // Detect dust (OKX only — eToro doesn't report current value directly)
+      const dustOkx = okxPos.filter(p => (p.entryPrice * p.size + p.pnl) < 1);
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
-      await b.sendMessage(chatId, [
-        `🔄 <b>Synced all brokers</b>`,
+
+      const etoroSymCount = new Set(etoroPos.map(p => p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase())).size;
+      const lines = [
+        `🔄 <b>Synced — ${okxPos.length + bybitPos.length + etoroSymCount} positions found</b>`,
         ``,
-        `Bybit: <b>${bybitPos.length} position(s)</b>`,
-        `OKX: <b>${okxPos.length} position(s)</b>`,
-        `eToro: <b>${etoroHoldings.length} position(s)</b>`,
+        `Bybit: <b>${bybitPos.length}</b>`,
+        `OKX: <b>${okxPos.length}</b>`,
+        `eToro: <b>${etoroSymCount}</b>`,
         `Time: ${now}`,
-      ].join("\n"), { parse_mode: "HTML" });
+      ];
+
+      if (dustOkx.length) {
+        const dustList = dustOkx.map(p => {
+          const val = (p.entryPrice * p.size + p.pnl).toFixed(2);
+          return `${displaySymbol(p.symbol)} $${val}`;
+        }).join(", ");
+        lines.push(``, `⚠️ <b>${dustOkx.length} dust position(s) (&lt;$1):</b>`);
+        lines.push(`<code>${escapeHtml(dustList)}</code>`);
+        lines.push(`Reply /closedust to close them`);
+      }
+
+      await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ Sync failed: ${escapeHtml(m)}`);
+    }
+  });
+
+  // ── /closedust — close all OKX positions with value < $1 ─────────────────
+  b.onText(/^\/closedust(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const okxPos = okxPaperMode
+        ? await getPositionsPaper().catch(() => [])
+        : await okxGetPositions().catch(() => []);
+
+      const dustPos = okxPos.filter(p => (p.entryPrice * p.size + p.pnl) < 1);
+      if (!dustPos.length) {
+        await b.sendMessage(chatId, `✅ No dust positions found (all positions ≥ $1).`);
+        return;
+      }
+
+      await b.sendMessage(chatId,
+        `🧹 Closing ${dustPos.length} dust position(s)...`,
+        { parse_mode: "HTML" });
+
+      const { closePosition: okxClose } = await import("../brokers/okx");
+      const { closePositionPaper }      = await import("../brokers/okxPaper");
+
+      for (const p of dustPos) {
+        try {
+          if (okxPaperMode) await closePositionPaper(p.symbol);
+          else              await okxClose(p.symbol);
+          const val = (p.entryPrice * p.size + p.pnl).toFixed(2);
+          await b.sendMessage(chatId,
+            `✅ Closed ${escapeHtml(displaySymbol(p.symbol))} ($${val})`,
+            { parse_mode: "HTML" });
+        } catch (e) {
+          const em = e instanceof Error ? e.message : String(e);
+          await b.sendMessage(chatId,
+            `❌ Failed to close ${escapeHtml(displaySymbol(p.symbol))}: ${escapeHtml(em)}`,
+            { parse_mode: "HTML" });
+        }
+      }
+
+      await syncAllHoldingsToDB().catch(() => {});
+      await b.sendMessage(chatId, `🧹 Done. Use /positions to verify.`);
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ /closedust failed: ${escapeHtml(m)}`);
     }
   });
 
@@ -590,26 +654,18 @@ export function startPolling(): void {
   b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      interface EtoroPos {
-        positionId?: string | number; symbol?: string;
-        investedAmount?: number; profit?: number;
-        isBuy?: boolean; openRate?: number;
-      }
-      interface EtoroPortfolio { positions?: EtoroPos[]; [k: string]: unknown; }
-
-      const [okxPos, bybitPos, etoroPortfolio, localPending] = await Promise.all([
+      const [okxPos, bybitPos, etoroRawPos, localPending] = await Promise.all([
         okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
         bybitGetPositions().catch(() => []),
-        getPortfolio().then(p => ((p as EtoroPortfolio)?.positions ?? []) as EtoroPos[]).catch(() => [] as EtoroPos[]),
+        etoroGetPositions().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
-      console.log("[telegram] /positions — Bybit:", JSON.stringify(bybitPos), "OKX:", JSON.stringify(okxPos));
 
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
 
-      if (!okxPos.length && !bybitPos.length && !etoroPortfolio.length && !localPending.length) {
+      if (!okxPos.length && !bybitPos.length && !etoroRawPos.length && !localPending.length) {
         await b.sendMessage(chatId,
           `📊 No open positions or pending orders.\n<i>Last synced: ${now}</i>`,
           { parse_mode: "HTML" });
@@ -633,8 +689,10 @@ export function startPolling(): void {
 
       if (okxPos.length) {
         const mode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
-        out.push(`<b>OKX ${mode} (${okxPos.length}):</b>`);
-        for (const p of okxPos) {
+        const significantOkx = okxPos.filter(p => (p.entryPrice * p.size + p.pnl) >= 1);
+        const dustOkxCount   = okxPos.length - significantOkx.length;
+        out.push(`<b>OKX ${mode} (${significantOkx.length}):</b>`);
+        for (const p of significantOkx) {
           const sign         = p.pnl >= 0 ? "+" : "";
           const base         = p.symbol.split("-")[0] ?? p.symbol;
           const sizeStr      = `${p.size.toFixed(6)} ${base}`;
@@ -643,19 +701,27 @@ export function startPolling(): void {
           const pnlStr       = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
           out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${sizeStr} · value ${valueStr} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${pnlStr}`);
         }
+        if (dustOkxCount > 0) out.push(`<i>⚠️ ${dustOkxCount} dust position(s) hidden (value &lt; $1) — use /closedust to clean up</i>`);
         out.push(``);
       }
 
-      if (etoroPortfolio.length) {
-        out.push(`<b>eToro Demo (${etoroPortfolio.length}):</b>`);
-        for (const p of etoroPortfolio) {
-          const invested = (p.investedAmount ?? 0).toFixed(2);
-          const profit   = p.profit ?? 0;
-          const sign     = profit >= 0 ? "+" : "";
-          const entry    = p.openRate ? ` · entry $${p.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-          const sym      = displaySymbol(p.symbol ?? "?");
-          out.push(`• <b>${escapeHtml(sym)}</b> — $${invested} long${entry} · P/L ${sign}$${profit.toFixed(2)}`);
+      if (etoroRawPos.length) {
+        // Aggregate by symbol, filter dust
+        const etoroAgg = new Map<string, { value: number; profit: number; openRate: number }>();
+        for (const p of etoroRawPos) {
+          const sym = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
+          const cur = etoroAgg.get(sym) ?? { value: 0, profit: 0, openRate: p.openRate };
+          etoroAgg.set(sym, { value: cur.value + p.amountUsd, profit: cur.profit + p.profit, openRate: cur.openRate });
         }
+        const significantEtoro = [...etoroAgg.entries()].filter(([, d]) => d.value >= 1);
+        const dustEtoroCount   = etoroAgg.size - significantEtoro.length;
+        out.push(`<b>eToro Demo (${significantEtoro.length}):</b>`);
+        for (const [sym, d] of significantEtoro) {
+          const sign  = d.profit >= 0 ? "+" : "";
+          const entry = d.openRate ? ` · entry $${d.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
+          out.push(`• <b>${escapeHtml(sym)}</b> — $${d.value.toFixed(2)} long${entry} · P/L ${sign}$${d.profit.toFixed(2)}`);
+        }
+        if (dustEtoroCount > 0) out.push(`<i>⚠️ ${dustEtoroCount} dust position(s) hidden (value &lt; $1) — use /closedust to clean up</i>`);
         out.push(``);
       }
 
@@ -895,23 +961,15 @@ export function startPolling(): void {
           Promise.resolve(getPendingOrders()),
         ]);
 
-      // Aggregate eToro positions by symbol for compact display
-      const etoroBySymbol = new Map<string, { value: number; profit: number }>();
-      for (const p of etoroPos) {
-        const sym = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
-        const cur = etoroBySymbol.get(sym) ?? { value: 0, profit: 0 };
-        etoroBySymbol.set(sym, { value: cur.value + p.amountUsd, profit: cur.profit + p.profit });
-      }
-      const etoroSummary = [...etoroBySymbol.entries()]
-        .map(([sym, d]) => {
-          const sign = d.profit >= 0 ? "+" : "";
-          return `${escapeHtml(sym)} $${d.value.toFixed(0)} (${sign}$${d.profit.toFixed(0)})`;
-        })
-        .join(", ");
+      // Count unique eToro symbols
+      const etoroSymbolCount = new Set(etoroPos.map(p => p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase())).size;
 
-      const openCount = okxPos.length + bybitPos.length + etoroBySymbol.size;
-      const pnlSign   = dailyPnl >= 0 ? "+" : "";
-      const lastScan  = cron.lastScan
+      const okxMode    = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
+      const bybitMode  = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet";
+      const openCount  = okxPos.length + bybitPos.length + etoroSymbolCount;
+      const pnlSign    = dailyPnl >= 0 ? "+" : "";
+      const dailyLimit = process.env["DAILY_LOSS_LIMIT_PCT"] ?? "30";
+      const lastScan   = cron.lastScan
         ? cron.lastScan.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
         : "Never";
 
@@ -921,17 +979,24 @@ export function startPolling(): void {
         ``,
         `Mode: <b>${config.mode}</b>`,
         `Trading: <b>${cron.paused ? "🛑 Paused" : "▶️ Active"}</b>`,
-        `Portfolio leverage: <b>${leverage}x</b>`,
-        `Daily P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b>`,
-        snap ? `Portfolio: <b>$${snap.totalValue.toFixed(2)}</b>` : "",
-        `Open positions: <b>${openCount}</b> (OKX: ${okxPos.length}, Bybit: ${bybitPos.length}, eToro: ${etoroBySymbol.size})`,
-        etoroBySymbol.size ? `eToro holdings: <code>${etoroSummary}</code>` : "",
-        `Pending orders: <b>${localPending.length}</b>`,
-        suspended.length ? `Suspended coins: <b>${suspended.map(escapeHtml).join(", ")}</b>` : "",
-        ``,
         `Auto-scanner: <b>${cron.enabled ? "✅ On" : "⏸ Off"}</b>`,
         `Schedule: <code>${escapeHtml(cron.interval)}</code>`,
         `Last scan: ${lastScan}`,
+        ``,
+        `💼 <b>Portfolio</b>`,
+        snap ? `Total: <b>$${snap.totalValue.toFixed(2)}</b>` : "",
+        `Daily P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b>`,
+        ``,
+        `📊 <b>Positions (${openCount} open)</b>`,
+        `OKX ${okxMode}: <b>${okxPos.length}</b>`,
+        `Bybit ${bybitMode}: <b>${bybitPos.length}</b>`,
+        `eToro Demo: <b>${etoroSymbolCount}</b>`,
+        `Pending approvals: <b>${localPending.length}</b>`,
+        suspended.length ? `Suspended: <b>${suspended.map(escapeHtml).join(", ")}</b>` : "",
+        ``,
+        `⚙️ <b>Settings</b>`,
+        `Portfolio leverage: <b>${leverage}x</b>`,
+        `Daily P/L limit: <b>-${dailyLimit}%</b>`,
       ].filter(Boolean).join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
