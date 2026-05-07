@@ -1,6 +1,5 @@
 import { llm }                      from "./llmRouter";
 import { cache, TTL, CacheKey }     from "./contextCache";
-import { approvalGate, buildProposal } from "./approvalGate";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
 import { getKlines }                         from "../brokers/bybit";
@@ -213,31 +212,6 @@ export async function runScan(): Promise<ScanResult> {
 
     const result = res.data;
     result.scanTimestamp = new Date().toISOString();
-
-    // Auto-propose top BUY / STRONG BUY opportunities
-    if (profile) {
-      const tradeAmount = Math.max(10, (profile.totalCapital ?? 200) * 0.10);
-      const autoPropose = result.opportunities.filter(
-        o => o.recommendation === "BUY" || o.recommendation === "STRONG BUY"
-      ).slice(0, 2);
-
-      for (const opp of autoPropose) {
-        const assetClass = classMap[opp.symbol] ?? opp.assetClass ?? "Equity";
-        const proposal   = buildProposal({
-          symbol:        opp.symbol,
-          side:          "buy",
-          amountUsd:     Math.round(tradeAmount),
-          assetClass,
-          rationale:     `[Scanner] ${opp.recommendation} score=${opp.score}. ${opp.reasoning}`,
-          score:         opp.score,
-          currentPrice:  opp.price,
-          dataTimestamp: opp.dataTimestamp,
-        });
-        approvalGate.submit(proposal).catch(e =>
-          console.error(`[scanner] Auto-propose ${opp.symbol} failed:`, e)
-        );
-      }
-    }
 
     return result;
   });
