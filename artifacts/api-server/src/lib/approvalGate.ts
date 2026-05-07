@@ -9,7 +9,8 @@ import { cache, TTL, CacheKey }   from "./contextCache";
 import { db }                     from "@workspace/db";
 import { tradeProposals,
          operationConfig,
-         profileTable }           from "@workspace/db/schema";
+         profileTable,
+         transactionsTable }      from "@workspace/db/schema";
 import { eq }                     from "drizzle-orm";
 
 export type OperationMode = "autonomous" | "approval";
@@ -241,6 +242,18 @@ class ApprovalGate {
         .set({ status:"executed", resolvedAt:new Date(), orderId:result.orderId ?? null })
         .where(eq(tradeProposals.id, proposal.id));
       cache.invalidate(CacheKey.portfolio());
+
+      // Log to transactions table for dashboard history
+      await db.insert(transactionsTable).values({
+        type:       proposal.side === "buy" ? "Buy" : "Sell",
+        asset:      proposal.symbol,
+        amount:     proposal.side === "buy" ? proposal.amountUsd : -proposal.amountUsd,
+        value:      proposal.amountUsd,
+        status:     "Completed",
+        note:       `${proposal.broker} · ${result.orderId ?? proposal.id}`,
+        occurredAt: new Date(),
+      }).catch(() => {});
+
       return { action:"executed", proposal, orderId:result.orderId,
                message:`Executed: ${proposal.side.toUpperCase()} ${proposal.symbol} $${proposal.amountUsd} [${proposal.broker}]` };
     } catch (err: any) {
