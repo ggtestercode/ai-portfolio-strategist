@@ -138,6 +138,19 @@ export interface PendingEtoroOrder {
   placedAt?: string;
 }
 
+export async function getLiveRates(instrumentIds: number[]): Promise<Map<number, number>> {
+  if (!instrumentIds.length) return new Map();
+  const data = await request<{
+    rates?: Array<{ instrumentID: number; lastExecution?: number; ask?: number; bid?: number }>;
+  }>("GET", `/market-data/instruments/rates?instrumentIds=${instrumentIds.join(",")}`);
+  return new Map(
+    (data.rates ?? []).map(r => [
+      r.instrumentID,
+      r.lastExecution ?? ((r.ask ?? 0) + (r.bid ?? 0)) / 2,
+    ]),
+  );
+}
+
 export async function getOrders(): Promise<PendingEtoroOrder[]> {
   try {
     const data = await request<{

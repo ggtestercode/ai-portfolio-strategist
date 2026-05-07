@@ -8,7 +8,7 @@ import { cache, TTL, CacheKey } from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { db, profileTable, holdingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { closePosition as etoroClose, getPortfolio, getPositionsWithSymbols as etoroGetPositions } from "../brokers/etoro";
+import { closePosition as etoroClose, getPortfolio, getPositionsWithSymbols as etoroGetPositions, getLiveRates as etoroGetLiveRates } from "../brokers/etoro";
 import { closePosition as okxClose, closeByUnits as okxCloseByUnits, getPositions as okxGetPositions, openLimitPosition as okxOpenLimit, openPosition as okxOpenSpot } from "../brokers/okx";
 import { closePositionPaper, getPositionsPaper } from "../brokers/okxPaper";
 import {
@@ -66,18 +66,28 @@ export async function syncAllHoldingsToDB(): Promise<void> {
 
     // ── eToro positions ───────────────────────────────────────────────────────
     const etoroPositions = await etoroGetPositions().catch(() => []);
+    const uniqueIds = [...new Set(etoroPositions.map(p => p.instrumentId).filter(Boolean))];
+    const liveRates = uniqueIds.length > 0
+      ? await etoroGetLiveRates(uniqueIds).catch(() => new Map<number, number>())
+      : new Map<number, number>();
+
     for (const p of etoroPositions) {
       if (!p.symbol) continue;
-      const sym  = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
-      const val  = p.amountUsd || 0;
-      const pnl  = p.amountUsd > 0 ? (p.profit / p.amountUsd) * 100 : 0;
-      const cur  = combined.get(sym);
+      const sym        = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
+      const livePrice  = liveRates.get(p.instrumentId) ?? 0;
+      const price      = livePrice > 0 ? livePrice : (p.openRate > 0 ? p.openRate : 1);
+      // Use actual units if available; fall back to amountUsd / price
+      const qty        = p.units > 0 ? p.units : (price > 0 ? p.amountUsd / price : 0);
+      const val        = qty * price;
+      const pnl        = val > 0 ? (p.profit / val) * 100 : 0;
+      const cur        = combined.get(sym);
       if (cur) {
-        cur.quantity    += val;
+        cur.quantity    += qty;
         cur.totalValue  += val;
+        cur.price        = price;
         cur.weightedPnl += pnl * val;
       } else {
-        combined.set(sym, { name: sym, assetClass: "Equity", quantity: val, price: 1, totalValue: val, weightedPnl: pnl * val });
+        combined.set(sym, { name: sym, assetClass: "Equity", quantity: qty, price, totalValue: val, weightedPnl: pnl * val });
       }
     }
 
