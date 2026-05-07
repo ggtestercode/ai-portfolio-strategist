@@ -312,6 +312,53 @@ async function evaluateAndExecuteSignal(
   }
 }
 
+// ── Auto take-profit / stop-loss monitor ─────────────────────────────────────
+const STOP_LOSS_PCT = 40; // close if down 40%
+
+async function checkAndAutoClose(): Promise<void> {
+  try {
+    const [{ totalCapital }] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1).catch(() => [{ totalCapital: 0 }]);
+    const [profile] = await db.select().from(profileTable).limit(1).catch(() => [null]);
+    const takeProfitPct = profile?.targetReturnPct ?? 20;
+
+    const positions = await okxGetPositions().catch(() => [] as OKXPosition[]);
+    if (!positions.length) return;
+
+    for (const pos of positions) {
+      const pnlPct = pos.pnlPct;
+      const shouldClose =
+        pnlPct >= takeProfitPct ||
+        pnlPct <= -STOP_LOSS_PCT;
+
+      if (!shouldClose) continue;
+
+      const reason = pnlPct >= takeProfitPct
+        ? `take-profit hit (+${pnlPct.toFixed(1)}% ≥ ${takeProfitPct}%)`
+        : `stop-loss hit (${pnlPct.toFixed(1)}% ≤ -${STOP_LOSS_PCT}%)`;
+
+      console.log(`[autoClose] Closing ${pos.symbol}: ${reason}`);
+
+      try {
+        const result = await okxClose(pos.symbol);
+        await closeOpenTrade(pos.symbol, pos.entryPrice, pos.pnl).catch(() => {});
+        const sign = pnlPct >= 0 ? "+" : "";
+        const msg  = [
+          pnlPct >= takeProfitPct ? `✅ Take-profit triggered` : `🛑 Stop-loss triggered`,
+          `${pos.symbol} closed · P/L ${sign}$${pos.pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%)`,
+          `Order: ${result.orderId}`,
+        ].join("\n");
+        await alertFn?.(msg).catch(() => {});
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        console.error(`[autoClose] Failed to close ${pos.symbol}:`, m);
+        await alertFn?.(`⚠️ Auto-close failed for ${pos.symbol}: ${m}`).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error("[autoClose] Monitor error:", err);
+  }
+}
+
 // ── Format scan summary for Telegram ─────────────────────────────────────────
 function formatScanSummary(outcomes: SignalOutcome[], total: number): string {
   const lines: string[] = [`🔍 Scan complete — ${total} signal${total !== 1 ? "s" : ""} found`];
@@ -411,6 +458,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         approvalGate.submit(proposal).catch(e => console.error(`[cronScanner] submit ${opp.symbol}:`, e));
       }
     }
+
+    // Auto take-profit / stop-loss check after every scan
+    await checkAndAutoClose().catch(e => console.error("[cronScanner] Auto-close check failed:", e));
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals`);
   } catch (err) {

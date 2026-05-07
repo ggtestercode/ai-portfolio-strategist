@@ -1,8 +1,8 @@
 import { Link, useLocation } from "wouter";
-import { 
-  LayoutDashboard, Target, PieChart, MessageSquare, 
-  Repeat, Activity, Receipt, ShieldAlert, LineChart, 
-  Settings, Moon, Sun, Sparkles 
+import {
+  LayoutDashboard, Target, PieChart, MessageSquare,
+  Repeat, Activity, Receipt, ShieldAlert, LineChart,
+  Settings, Moon, Sun, Sparkles, ScanSearch, CheckCircle2
 } from "lucide-react";
 import { useGetDashboardSummary } from "@workspace/api-client-react";
 import { useEffect, useState } from "react";
@@ -15,6 +15,8 @@ const MAIN_NAV = [
   { name: "Portfolio", path: "/portfolio", icon: PieChart },
   { name: "Trade Assistant", path: "/trade-assistant", icon: MessageSquare },
   { name: "Rebalancing", path: "/rebalancing", icon: Repeat },
+  { name: "Scanner", path: "/scanner", icon: ScanSearch },
+  { name: "Approvals", path: "/approvals", icon: CheckCircle2, showBadge: true },
   { name: "Performance", path: "/performance", icon: Activity },
   { name: "Transactions", path: "/transactions", icon: Receipt },
 ];
@@ -28,6 +30,7 @@ const TOOLS_NAV = [
 export default function Sidebar() {
   const [location] = useLocation();
   const { data: summary, isLoading } = useGetDashboardSummary();
+  const [pendingCount, setPendingCount] = useState(0);
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== "undefined") {
       return localStorage.getItem("theme") !== "light";
@@ -46,6 +49,18 @@ export default function Sidebar() {
     }
   }, [isDark]);
 
+  useEffect(() => {
+    const fetchPending = () => {
+      fetch("/api/trades/pending")
+        .then(r => r.json())
+        .then((d: { pending?: unknown[] }) => setPendingCount(d.pending?.length ?? 0))
+        .catch(() => {});
+    };
+    fetchPending();
+    const id = setInterval(fetchPending, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   return (
     <div className="w-64 border-r border-border bg-sidebar flex flex-col h-full flex-shrink-0">
       <div className="p-6 flex items-center gap-3">
@@ -61,10 +76,16 @@ export default function Sidebar() {
           <nav className="space-y-1">
             {MAIN_NAV.map((item) => {
               const isActive = location === item.path;
+              const count = item.showBadge ? pendingCount : 0;
               return (
                 <Link key={item.path} href={item.path} className={`flex items-center gap-3 px-2 py-2 rounded-md transition-colors ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium" : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50"}`}>
-                  <item.icon className="w-4 h-4" />
-                  {item.name}
+                  <item.icon className="w-4 h-4 flex-shrink-0" />
+                  <span className="flex-1">{item.name}</span>
+                  {count > 0 && (
+                    <span className="text-xs bg-primary text-primary-foreground rounded-full px-1.5 py-0.5 min-w-[1.25rem] text-center leading-none">
+                      {count}
+                    </span>
+                  )}
                 </Link>
               );
             })}

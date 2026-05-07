@@ -10,7 +10,8 @@ export let okxPaperMode = false;
 
 export async function initBrokers(): Promise<void> {
   approvalGate.registerExecutor("etoro", async (p) => {
-    const result = await openPosition(p.symbol, p.amountUsd, p.side === "buy");
+    const symbol = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
+    const result = await openPosition(symbol, p.amountUsd, p.side === "buy");
     return { orderId: result.positionId };
   });
 

@@ -70,6 +70,11 @@ function utcNow(): string {
   return new Date().toUTCString();
 }
 
+/** Strip exchange-specific suffixes for display (e.g. "QCOM-USDT" → "QCOM"). */
+function displaySymbol(symbol: string): string {
+  return symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
+}
+
 const REC_EMOJI: Record<Recommendation, string> = {
   "STRONG BUY": "🟢",
   "BUY":        "🟡",
@@ -120,6 +125,8 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
   const chatId = process.env["TELEGRAM_CHAT_ID"];
   if (!chatId) throw new Error("TELEGRAM_CHAT_ID env var is required");
 
+  const symDisplay = displaySymbol(proposal.symbol);
+
   let text: string;
   let approveLabel: string;
 
@@ -134,21 +141,21 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
     lines.push(
       `⚠️ <b>Trade exceeds 50% capital limit</b>`,
       ``,
-      `<b>${proposal.side.toUpperCase()} ${escapeHtml(proposal.symbol)}</b>`,
+      `<b>${proposal.side.toUpperCase()} ${escapeHtml(symDisplay)}</b>`,
       `Amount: <b>$${proposal.amountUsd.toLocaleString("en-US")}</b> (exceeds $${clw.capLimit.toFixed(0)} limit)`,
       ``,
       `This is <b>${xLabel}</b> your normal limit.`,
       `Do you want to proceed?`,
       ``,
       `ID: <code>${proposal.id}</code>`,
-      `<i>Expires in 5 min · ${utcNow()}</i>`,
+      `<i>Expires in 15 min · ${utcNow()}</i>`,
     );
     text         = lines.join("\n");
     approveLabel = "✅ Approve anyway";
   } else {
     text = [
       `🔔 <b>Trade Approval Required</b>`,
-      `<b>${proposal.side.toUpperCase()} ${escapeHtml(proposal.symbol)}</b> — $${proposal.amountUsd}`,
+      `<b>${proposal.side.toUpperCase()} ${escapeHtml(symDisplay)}</b> — $${proposal.amountUsd}`,
       `Broker: ${proposal.broker} | Asset: ${escapeHtml(proposal.assetClass)}`,
       ``,
       escapeHtml(summary),
@@ -170,7 +177,7 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
     },
   });
 
-  // Capital-limit approvals: auto-expire and edit message after 5 min with no response
+  // Capital-limit approvals: auto-expire and edit message after 15 min with no response
   if (clw && sentMsg?.message_id) {
     const msgId = sentMsg.message_id;
     setTimeout(async () => {
@@ -182,7 +189,7 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
           { chat_id: chatId, message_id: msgId, parse_mode: "HTML" },
         ).catch(() => {});
       }
-    }, 5 * 60 * 1000);
+    }, 15 * 60 * 1000);
   }
 };
 
@@ -646,7 +653,8 @@ export function startPolling(): void {
           const profit   = p.profit ?? 0;
           const sign     = profit >= 0 ? "+" : "";
           const entry    = p.openRate ? ` · entry $${p.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-          out.push(`• <b>${escapeHtml(p.symbol ?? "?")}</b> — $${invested} long${entry} · P/L ${sign}$${profit.toFixed(2)}`);
+          const sym      = displaySymbol(p.symbol ?? "?");
+          out.push(`• <b>${escapeHtml(sym)}</b> — $${invested} long${entry} · P/L ${sign}$${profit.toFixed(2)}`);
         }
         out.push(``);
       }

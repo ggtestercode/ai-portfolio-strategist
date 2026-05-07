@@ -56,7 +56,7 @@ const mockExecutor: BrokerExecutor = async (p) => {
 };
 
 const pendingMap  = new Map<string, PendingApproval>();
-const EXPIRY_MS   = 30 * 60 * 1000;
+const EXPIRY_MS   = 15 * 60 * 1000;
 const CRYPTO_SYMS = new Set(["BTC","ETH","SOL","BNB","AVAX","ARB","OP","MATIC","LINK","DOT","ATOM","INJ","TIA","SUI","SEI"]);
 
 class ApprovalGate {
@@ -108,7 +108,7 @@ class ApprovalGate {
     ]);
     const totalCapital = profileRow?.totalCapital ?? 200;
     const capLimit     = totalCapital * 0.50;
-    const CAP_TTL      = 5 * 60 * 1000;
+    const CAP_TTL      = 15 * 60 * 1000;
 
     if (proposal.amountUsd > capLimit) {
       // Queue for manual approval with capital-limit warning instead of auto-rejecting
@@ -254,11 +254,20 @@ class ApprovalGate {
 
 export const approvalGate = new ApprovalGate();
 
+const EQUITY_CLASSES = new Set(["Equity", "equity", "Stock", "stock", "ETF", "etf"]);
+
 export function buildProposal(
   p: Omit<TradeProposal, "id"|"broker"|"proposedAt"> & { broker?: TradeProposal["broker"] }
 ): TradeProposal {
-  const isOKXSymbol = p.symbol.includes("-");
-  const defaultBroker = (CRYPTO_SYMS.has(p.symbol.toUpperCase()) || isOKXSymbol) ? "okx" : "etoro";
+  const isOKXSymbol   = p.symbol.includes("-");
+  const isCryptoClass = p.assetClass === "Crypto" || p.assetClass === "crypto";
+  const isEquityClass = EQUITY_CLASSES.has(p.assetClass);
+  const isCryptoSym   = CRYPTO_SYMS.has(p.symbol.toUpperCase().replace(/USDT$|USDC$/, ""));
+  const defaultBroker = isEquityClass
+    ? "etoro"
+    : (isCryptoClass || isCryptoSym || isOKXSymbol)
+      ? "okx"
+      : "etoro";
   return {
     ...p,
     id:         randomUUID(),
