@@ -791,7 +791,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     }
 
     // Filled immediately
-    await syncHoldingsFromEtoro().catch(() => {});
+    await syncAllHoldingsToDB().catch(() => {});
 
     // Log open trade for /history and reflection
     if (isOKXSpot || isBybit) {
