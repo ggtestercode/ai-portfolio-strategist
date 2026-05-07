@@ -11,7 +11,7 @@ import { getPortfolioSnapshot }            from "../lib/portfolio";
 import { runScan, type Recommendation, type ScanResult } from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
-import { getPortfolio, getOrders as etoroGetOrders } from "../brokers/etoro";
+import { getPortfolio, getOrders as etoroGetOrders, getPositionsWithSymbols as etoroGetPositions } from "../brokers/etoro";
 import {
   getPositions as okxGetPositions,
   getOrders    as okxGetOrders,
@@ -881,7 +881,7 @@ export function startPolling(): void {
   b.onText(/^\/status(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [snap, config, cron, leverage, suspended, dailyPnl, okxPos, bybitPos, localPending] =
+      const [snap, config, cron, leverage, suspended, dailyPnl, okxPos, bybitPos, etoroPos, localPending] =
         await Promise.all([
           getPortfolioSnapshot(0).catch(() => null),
           approvalGate.getConfig(),
@@ -891,10 +891,25 @@ export function startPolling(): void {
           getDailyPnl().catch(() => 0),
           okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
           bybitGetPositions().catch(() => []),
+          etoroGetPositions().catch(() => []),
           Promise.resolve(getPendingOrders()),
         ]);
 
-      const openCount = okxPos.length + bybitPos.length;
+      // Aggregate eToro positions by symbol for compact display
+      const etoroBySymbol = new Map<string, { value: number; profit: number }>();
+      for (const p of etoroPos) {
+        const sym = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
+        const cur = etoroBySymbol.get(sym) ?? { value: 0, profit: 0 };
+        etoroBySymbol.set(sym, { value: cur.value + p.amountUsd, profit: cur.profit + p.profit });
+      }
+      const etoroSummary = [...etoroBySymbol.entries()]
+        .map(([sym, d]) => {
+          const sign = d.profit >= 0 ? "+" : "";
+          return `${escapeHtml(sym)} $${d.value.toFixed(0)} (${sign}$${d.profit.toFixed(0)})`;
+        })
+        .join(", ");
+
+      const openCount = okxPos.length + bybitPos.length + etoroBySymbol.size;
       const pnlSign   = dailyPnl >= 0 ? "+" : "";
       const lastScan  = cron.lastScan
         ? cron.lastScan.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
@@ -909,7 +924,8 @@ export function startPolling(): void {
         `Portfolio leverage: <b>${leverage}x</b>`,
         `Daily P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b>`,
         snap ? `Portfolio: <b>$${snap.totalValue.toFixed(2)}</b>` : "",
-        `Open positions: <b>${openCount}</b> (OKX: ${okxPos.length}, Bybit: ${bybitPos.length})`,
+        `Open positions: <b>${openCount}</b> (OKX: ${okxPos.length}, Bybit: ${bybitPos.length}, eToro: ${etoroBySymbol.size})`,
+        etoroBySymbol.size ? `eToro holdings: <code>${etoroSummary}</code>` : "",
         `Pending orders: <b>${localPending.length}</b>`,
         suspended.length ? `Suspended coins: <b>${suspended.map(escapeHtml).join(", ")}</b>` : "",
         ``,
