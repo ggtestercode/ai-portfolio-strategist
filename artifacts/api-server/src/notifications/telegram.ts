@@ -17,6 +17,7 @@ import { getPortfolio, getOrders as etoroGetOrders, getPositionsWithSymbols as e
 import {
   getPositions as okxGetPositions,
   getOrders    as okxGetOrders,
+  cancelOrder,
   cancelAllOrders as okxCancelAllOrders,
   getAccountBalance,
   testConnection as okxTestConnection,
@@ -241,7 +242,7 @@ export function startPolling(): void {
     { command: "autoscan",   description: "Auto-scanner: on | off | now | status" },
     { command: "sync",       description: "Sync all brokers to local DB" },
     { command: "closedust",    description: "Close all dust positions (value < $1)" },
-    { command: "cancelorders", description: "Cancel all open OKX orders and clear pending queue" },
+    { command: "cancelorders", description: "Cancel orders: list / <orderId> / all" },
     { command: "status",     description: "Full bot status overview" },
     { command: "history",    description: "Last 10 closed trades" },
     { command: "memory",     description: "Last 5 trade reflections (AI journal)" },
@@ -796,24 +797,72 @@ export function startPolling(): void {
     }
   });
 
-  // ── /cancelorders — cancel all open OKX orders + clear local pending queue ──
-  b.onText(/^\/cancelorders(?:@\w+)?$/, async (msg) => {
+  // ── /cancelorders [orderId|all] ───────────────────────────────────────────
+  b.onText(/^\/cancelorders(?:@\w+)?(?:\s+(\S+))?$/, async (msg, match) => {
     const chatId = String(msg.chat.id);
+    const arg    = match?.[1]?.trim();
+    const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
     try {
-      const [cancelledCount, localCount] = await Promise.all([
-        okxCancelAllOrders().catch(() => 0),
-        Promise.resolve(getPendingOrders().length),
-      ]);
-      // Clear in-memory pending queue
-      for (const o of getPendingOrders()) removePendingOrder(o.id);
+      const okxOrders = await okxGetOrders().catch(() => [] as Awaited<ReturnType<typeof okxGetOrders>>);
 
-      const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
-      await b.sendMessage(chatId, [
-        `✅ <b>Orders cancelled</b>`,
-        `OKX ${okxMode}: <b>${cancelledCount}</b> open order(s) cancelled`,
-        `Local queue: <b>${localCount}</b> pending order(s) cleared`,
-        `<i>${utcNow()}</i>`,
-      ].join("\n"), { parse_mode: "HTML" });
+      // No arg — list orders with IDs
+      if (!arg) {
+        const local = getPendingOrders();
+        if (!okxOrders.length && !local.length) {
+          await b.sendMessage(chatId, `📋 No open orders to cancel.\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
+          return;
+        }
+        const lines: string[] = [`📋 <b>Open orders — reply /cancelorders &lt;id&gt; or /cancelorders all</b>`, ``];
+        for (const o of okxOrders) {
+          const t   = new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT";
+          const amt = o.price > 0 && o.size > 0 ? ` $${(o.price * o.size).toFixed(2)}` : "";
+          lines.push(`• <code>${escapeHtml(o.orderId)}</code> — ${escapeHtml(o.symbol)} ${o.side.toUpperCase()}${amt} [OKX ${okxMode}] · ${t}`);
+        }
+        for (const o of local) {
+          const t = o.queuedAt.toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT";
+          lines.push(`• <code>${escapeHtml(o.id)}</code> — ${escapeHtml(o.symbol)} ${o.side.toUpperCase()} $${o.amountUsd} [local] · ${t}`);
+        }
+        await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
+        return;
+      }
+
+      // "all" — cancel everything
+      if (arg.toLowerCase() === "all") {
+        const [cancelledCount, localCount] = await Promise.all([
+          okxCancelAllOrders().catch(() => 0),
+          Promise.resolve(getPendingOrders().length),
+        ]);
+        for (const o of getPendingOrders()) removePendingOrder(o.id);
+        await b.sendMessage(chatId, [
+          `✅ <b>All orders cancelled</b>`,
+          `OKX ${okxMode}: <b>${cancelledCount}</b> cancelled`,
+          `Local queue: <b>${localCount}</b> cleared`,
+          `<i>${utcNow()}</i>`,
+        ].join("\n"), { parse_mode: "HTML" });
+        return;
+      }
+
+      // Specific order ID
+      const localOrder = getPendingOrders().find(o => o.id === arg);
+      if (localOrder) {
+        removePendingOrder(arg);
+        await b.sendMessage(chatId,
+          `✅ Cancelled local order <code>${escapeHtml(arg)}</code> — ${escapeHtml(localOrder.symbol)} ${localOrder.side.toUpperCase()} $${localOrder.amountUsd}`,
+          { parse_mode: "HTML" });
+        return;
+      }
+
+      const okxOrder = okxOrders.find(o => o.orderId === arg);
+      if (!okxOrder) {
+        await b.sendMessage(chatId, `❌ Order <code>${escapeHtml(arg)}</code> not found.\nUse /cancelorders to list open orders.`, { parse_mode: "HTML" });
+        return;
+      }
+
+      await cancelOrder(okxOrder.symbol, arg);
+      const amt = okxOrder.price > 0 && okxOrder.size > 0 ? ` $${(okxOrder.price * okxOrder.size).toFixed(2)}` : "";
+      await b.sendMessage(chatId,
+        `✅ Cancelled <code>${escapeHtml(arg)}</code> — ${escapeHtml(okxOrder.symbol)} ${okxOrder.side.toUpperCase()}${amt} [OKX ${okxMode}]`,
+        { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /cancelorders failed: ${escapeHtml(m)}`);
