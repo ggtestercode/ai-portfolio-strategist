@@ -42,7 +42,7 @@ export async function syncHoldingsFromEtoro(): Promise<void> {
     await db.insert(holdingsTable).values({
       symbol:       sym,
       name:         sym,
-      assetClass:   "Equity",
+      assetClass:   "US Equity",
       quantity:     agg.amountUsd || 1,
       price:        1,
       change24hPct: agg.amountUsd > 0 ? (agg.profit / agg.amountUsd) * 100 : 0,
@@ -87,7 +87,7 @@ export async function syncAllHoldingsToDB(): Promise<void> {
         cur.price        = price;
         cur.weightedPnl += pnl * val;
       } else {
-        combined.set(sym, { name: sym, assetClass: "Equity", quantity: qty, price, totalValue: val, weightedPnl: pnl * val });
+        combined.set(sym, { name: sym, assetClass: "US Equity", quantity: qty, price, totalValue: val, weightedPnl: pnl * val });
       }
     }
 
@@ -317,7 +317,7 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
   const broker = explicitBybit ? "bybit" : ((d.broker as ParsedTrade["broker"]) ?? "okx");
 
   // Bare crypto symbols → OKX dash format
-  if (broker === "okx" && !symbol.includes("-") && !["Equity","ETF"].includes(d.assetClass ?? "")) {
+  if (broker === "okx" && !symbol.includes("-") && !["Equity","US Equity","ETF"].includes(d.assetClass ?? "")) {
     const quote = symbol.endsWith("USDC") ? "USDC" : "USDT";
     const base  = symbol.replace(/USDT$/, "").replace(/USDC$/, "");
     symbol = `${base}-${quote}`;
@@ -650,7 +650,7 @@ async function executeLimitOrder(trade: ParsedTrade): Promise<string> {
   const leverage  = isOKXSpot ? 1 : isBybit ? 10 : 1;
   const exposure  = (amountUsd * leverage).toFixed(0);
   const base      = symbol.includes("-") ? (symbol.split("-")[0] ?? symbol) : symbol;
-  const units     = `~${(amountUsd / limitPrice).toFixed(4)} ${assetClass === "Equity" ? "shares" : base}`;
+  const units     = `~${(amountUsd / limitPrice).toFixed(4)} ${(assetClass === "Equity" || assetClass === "US Equity") ? "shares" : base}`;
 
   // Validate limit price direction for Bybit (GTC buy must be ≤ mark; sell must be ≥ mark)
   if (isBybit) {
@@ -745,7 +745,7 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     : await fetchSymbolPrice(trade.symbol);
   const priceStr = price ? `$${price.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "N/A";
   const base     = trade.symbol.includes("-") ? (trade.symbol.split("-")[0] ?? trade.symbol) : trade.symbol;
-  const qtyUnit  = trade.assetClass === "Equity" ? "shares" : base;
+  const qtyUnit  = (trade.assetClass === "Equity" || trade.assetClass === "US Equity") ? "shares" : base;
   // Units = notional exposure / price (contract size for futures, direct qty for spot)
   const notional = trade.amountUsd * leverage;
   const units    = price ? (notional / price) : null;

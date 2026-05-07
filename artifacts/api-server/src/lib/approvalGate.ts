@@ -267,7 +267,7 @@ class ApprovalGate {
 
 export const approvalGate = new ApprovalGate();
 
-const EQUITY_CLASSES = new Set(["Equity", "equity", "Stock", "stock", "ETF", "etf"]);
+const EQUITY_CLASSES = new Set(["Equity", "equity", "US Equity", "us equity", "Stock", "stock", "ETF", "etf"]);
 
 export function buildProposal(
   p: Omit<TradeProposal, "id"|"broker"|"proposedAt"> & { broker?: TradeProposal["broker"] }
