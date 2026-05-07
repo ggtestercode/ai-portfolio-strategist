@@ -24,44 +24,96 @@ import { logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
 
 export async function syncHoldingsFromEtoro(): Promise<void> {
   const positions = await etoroGetPositions();
-  await db.delete(holdingsTable);
-  let inserted = 0;
+
+  // Aggregate multiple positions for the same symbol into one row
+  const bySymbol = new Map<string, { amountUsd: number; profit: number }>();
   for (const p of positions) {
     if (!p.symbol) continue;
-    await db.insert(holdingsTable).values({
-      symbol:       p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, ""),
-      name:         p.symbol,
-      assetClass:   "Equity",
-      quantity:     p.amountUsd || 1,
-      price:        1,
-      change24hPct: p.amountUsd > 0 ? (p.profit / p.amountUsd) * 100 : 0,
+    const sym = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
+    const cur = bySymbol.get(sym) ?? { amountUsd: 0, profit: 0 };
+    bySymbol.set(sym, {
+      amountUsd: cur.amountUsd + (p.amountUsd || 0),
+      profit:    cur.profit    + (p.profit    || 0),
     });
-    inserted++;
   }
-  console.log(`[syncHoldings] eToro: ${inserted}/${positions.length} position(s) inserted`);
+
+  await db.delete(holdingsTable);
+  for (const [sym, agg] of bySymbol.entries()) {
+    await db.insert(holdingsTable).values({
+      symbol:       sym,
+      name:         sym,
+      assetClass:   "Equity",
+      quantity:     agg.amountUsd || 1,
+      price:        1,
+      change24hPct: agg.amountUsd > 0 ? (agg.profit / agg.amountUsd) * 100 : 0,
+    });
+  }
+  console.log(`[syncHoldings] eToro: ${bySymbol.size} unique symbol(s) from ${positions.length} position(s)`);
+}
+
+interface HoldingAgg {
+  name:         string;
+  assetClass:   string;
+  quantity:     number;
+  price:        number;
+  totalValue:   number;
+  weightedPnl:  number; // weighted sum for change24hPct
 }
 
 export async function syncAllHoldingsToDB(): Promise<void> {
   try {
-    // Sync eToro equity positions
-    await syncHoldingsFromEtoro();
+    const combined = new Map<string, HoldingAgg>();
 
-    // Append OKX crypto positions
+    // ── eToro positions ───────────────────────────────────────────────────────
+    const etoroPositions = await etoroGetPositions().catch(() => []);
+    for (const p of etoroPositions) {
+      if (!p.symbol) continue;
+      const sym  = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
+      const val  = p.amountUsd || 0;
+      const pnl  = p.amountUsd > 0 ? (p.profit / p.amountUsd) * 100 : 0;
+      const cur  = combined.get(sym);
+      if (cur) {
+        cur.quantity    += val;
+        cur.totalValue  += val;
+        cur.weightedPnl += pnl * val;
+      } else {
+        combined.set(sym, { name: sym, assetClass: "Equity", quantity: val, price: 1, totalValue: val, weightedPnl: pnl * val });
+      }
+    }
+
+    // ── OKX positions ─────────────────────────────────────────────────────────
     const okxPositions = await okxGetPositions().catch(() => []);
     for (const pos of okxPositions) {
-      const value = pos.entryPrice * pos.size + pos.pnl;
-      if (value <= 0) continue;
-      const sym = pos.symbol.split("-")[0] ?? pos.symbol;
-      await db.insert(holdingsTable).values({
-        symbol:       sym.toUpperCase(),
-        name:         pos.symbol,
-        assetClass:   "Crypto",
-        quantity:     pos.size,
-        price:        pos.entryPrice + (pos.pnl / (pos.size || 1)),
-        change24hPct: pos.pnlPct,
-      }).onConflictDoNothing();
+      const currentPrice = pos.entryPrice + (pos.pnl / (pos.size || 1));
+      const val          = pos.size * currentPrice;
+      if (val <= 0) continue;
+      const sym = (pos.symbol.split("-")[0] ?? pos.symbol).toUpperCase();
+      const cur = combined.get(sym);
+      if (cur) {
+        cur.quantity    += pos.size;
+        cur.totalValue  += val;
+        cur.weightedPnl += pos.pnlPct * val;
+        cur.assetClass   = "Crypto";
+      } else {
+        combined.set(sym, { name: pos.symbol, assetClass: "Crypto", quantity: pos.size, price: currentPrice, totalValue: val, weightedPnl: pos.pnlPct * val });
+      }
     }
-    console.log(`[syncHoldings] OKX: ${okxPositions.length} position(s) synced`);
+
+    // ── Write to DB ───────────────────────────────────────────────────────────
+    await db.delete(holdingsTable);
+    for (const [sym, agg] of combined.entries()) {
+      const change24h = agg.totalValue > 0 ? agg.weightedPnl / agg.totalValue : 0;
+      await db.insert(holdingsTable).values({
+        symbol:       sym,
+        name:         agg.name,
+        assetClass:   agg.assetClass,
+        quantity:     agg.quantity,
+        price:        agg.price,
+        change24hPct: change24h,
+      });
+    }
+
+    console.log(`[syncHoldings] ${combined.size} unique symbols (eToro: ${etoroPositions.length} pos, OKX: ${okxPositions.length} pos)`);
     cache.invalidate(CacheKey.portfolio());
   } catch (err) {
     console.error("[syncHoldings] Failed:", err);
