@@ -30,17 +30,77 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return res.json() as Promise<T>;
 }
 
+// Forward cache: symbol → instrumentId
 const instrumentCache = new Map<string, number>();
+// Reverse cache: instrumentId → symbol
+const reverseCache    = new Map<number, string>();
+
 async function resolveInstrumentId(symbol: string): Promise<number> {
   const key = symbol.toUpperCase();
   if (instrumentCache.has(key)) return instrumentCache.get(key)!;
-  const data = await request<{ items?: Array<{ instrumentId: number; internalSymbolFull: string }> }>(
+  const data = await request<{ items?: Array<{ instrumentId?: number; internalInstrumentId?: number; internalSymbolFull: string }> }>(
     "GET", `/market-data/search?internalSymbolFull=${encodeURIComponent(key)}&pageSize=1`
   );
   const match = data.items?.[0];
   if (!match) throw new Error(`eToro: instrument not found for symbol "${symbol}"`);
-  instrumentCache.set(key, match.instrumentId);
-  return match.instrumentId;
+  const id = match.instrumentId ?? match.internalInstrumentId ?? 0;
+  instrumentCache.set(key, id);
+  reverseCache.set(id, match.internalSymbolFull.toUpperCase());
+  return id;
+}
+
+async function resolveSymbolFromId(instrumentId: number): Promise<string> {
+  if (reverseCache.has(instrumentId)) return reverseCache.get(instrumentId)!;
+  try {
+    const data = await request<{ items?: Array<{ internalSymbolFull?: string; internalInstrumentId?: number }> }>(
+      "GET", `/market-data/search?instrumentId=${instrumentId}&pageSize=1`
+    );
+    const sym = data.items?.[0]?.internalSymbolFull?.toUpperCase() ?? String(instrumentId);
+    reverseCache.set(instrumentId, sym);
+    if (sym !== String(instrumentId)) instrumentCache.set(sym, instrumentId);
+    return sym;
+  } catch {
+    return String(instrumentId);
+  }
+}
+
+export interface EtoroPosition {
+  positionId: string;
+  instrumentId: number;
+  symbol:     string;
+  amountUsd:  number;
+  profit:     number;
+  units:      number;
+  openRate:   number;
+  isBuy:      boolean;
+}
+
+export async function getPositionsWithSymbols(): Promise<EtoroPosition[]> {
+  const raw = (await getPortfolio()) as {
+    clientPortfolio?: { positions?: Array<Record<string, unknown>> };
+    positions?:       Array<Record<string, unknown>>;
+  };
+  const positions = raw?.clientPortfolio?.positions ?? raw?.positions ?? [];
+  if (!positions.length) return [];
+
+  // Batch-resolve unique instrumentIDs in parallel
+  const uniqueIds = [...new Set(positions.map(p => Number(p["instrumentID"] ?? p["instrumentId"] ?? 0)).filter(Boolean))];
+  await Promise.all(uniqueIds.map(id => resolveSymbolFromId(id).catch(() => {})));
+
+  return positions.map(p => {
+    const instId = Number(p["instrumentID"] ?? p["instrumentId"] ?? 0);
+    const sym    = reverseCache.get(instId) ?? String(instId);
+    return {
+      positionId:   String(p["positionID"] ?? p["positionId"] ?? ""),
+      instrumentId: instId,
+      symbol:       sym,
+      amountUsd:    Number(p["amount"]          ?? p["Amount"]          ?? 0),
+      profit:       Number(p["profit"]          ?? p["Profit"]          ?? p["totalProfit"] ?? 0),
+      units:        Number(p["units"]           ?? p["Units"]           ?? 0),
+      openRate:     Number(p["openRate"]        ?? p["OpenRate"]        ?? 0),
+      isBuy:        (p["isBuy"] ?? true) !== false,
+    };
+  });
 }
 
 export async function openPosition(

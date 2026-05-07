@@ -8,7 +8,7 @@ import { cache, TTL, CacheKey } from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { db, profileTable, holdingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { closePosition as etoroClose, getPortfolio } from "../brokers/etoro";
+import { closePosition as etoroClose, getPortfolio, getPositionsWithSymbols as etoroGetPositions } from "../brokers/etoro";
 import { closePosition as okxClose, closeByUnits as okxCloseByUnits, getPositions as okxGetPositions, openLimitPosition as okxOpenLimit, openPosition as okxOpenSpot } from "../brokers/okx";
 import { closePositionPaper, getPositionsPaper } from "../brokers/okxPaper";
 import {
@@ -22,52 +22,19 @@ import {
 import { okxPaperMode } from "./startup";
 import { logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
 
-// eToro API returns PascalCase or camelCase depending on endpoint
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type EtoroPos = Record<string, any>;
-
-interface EtoroPortfolio {
-  positions?: EtoroPos[];
-  clientPortfolio?: { positions?: EtoroPos[]; credit?: number; [k: string]: unknown };
-  [k: string]: unknown;
-}
-
-function extractEtoroPositions(raw: unknown): EtoroPos[] {
-  const p = raw as EtoroPortfolio;
-  return p?.clientPortfolio?.positions ?? p?.positions ?? [];
-}
-
-function etoroField<T>(pos: EtoroPos, ...keys: string[]): T | undefined {
-  for (const k of keys) {
-    if (pos[k] != null) return pos[k] as T;
-  }
-  return undefined;
-}
-
 export async function syncHoldingsFromEtoro(): Promise<void> {
-  const raw = await getPortfolio();
-  const positions = extractEtoroPositions(raw);
-
-  if (positions.length > 0) {
-    console.log(`[syncHoldings] eToro position sample keys: ${Object.keys(positions[0]).join(", ")}`);
-  }
-
+  const positions = await etoroGetPositions();
   await db.delete(holdingsTable);
   let inserted = 0;
   for (const p of positions) {
-    const sym = etoroField<string>(p, "symbol", "Symbol", "InstrumentSymbol") ?? "";
-    if (!sym) continue;
-    const value  = etoroField<number>(p, "investedAmount", "InvestedAmount", "amount", "Amount", "netInvestment") ?? 0;
-    const profit = etoroField<number>(p, "profit", "Profit", "netProfit", "totalProfit") ?? 0;
-    const rate   = etoroField<number>(p, "openRate", "OpenRate", "avgOpenRate") ?? 0;
-    const cls    = etoroField<string>(p, "assetClass", "AssetClass", "instrumentTypeId") ?? "Equity";
+    if (!p.symbol) continue;
     await db.insert(holdingsTable).values({
-      symbol:       sym.toUpperCase().replace(/[-/]?(USDT|USDC|USD)$/i, ""),
-      name:         sym.toUpperCase(),
-      assetClass:   cls,
-      quantity:     value || 1,
-      price:        rate || 1,
-      change24hPct: value > 0 ? (profit / value) * 100 : 0,
+      symbol:       p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, ""),
+      name:         p.symbol,
+      assetClass:   "Equity",
+      quantity:     p.amountUsd || 1,
+      price:        1,
+      change24hPct: p.amountUsd > 0 ? (p.profit / p.amountUsd) * 100 : 0,
     });
     inserted++;
   }
