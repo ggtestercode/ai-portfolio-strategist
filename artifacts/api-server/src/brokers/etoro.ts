@@ -153,22 +153,36 @@ export async function getLiveRates(instrumentIds: number[]): Promise<Map<number,
 
 export async function getOrders(): Promise<PendingEtoroOrder[]> {
   try {
-    const data = await request<{
-      orders?: Array<{
-        orderId?: number;
-        symbol?:  string;
-        isBuy?:   boolean;
-        amount?:  number;
-        createdDate?: string;
-      }>;
-    }>("GET", `/trading/info/${ENV}/orders`);
-    return (data.orders ?? []).map(o => ({
-      orderId:   String(o.orderId ?? ""),
-      symbol:    (o.symbol ?? "").toUpperCase(),
-      side:      o.isBuy !== false ? "buy" : "sell",
-      amountUsd: o.amount ?? 0,
-      placedAt:  o.createdDate,
-    }));
+    const raw = await request<{
+      clientPortfolio?: {
+        ordersForOpen?: Array<{
+          orderID?:     number;
+          instrumentID?: number;
+          amount?:      number;
+          isBuy?:       boolean;
+          openDateTime?: string;
+        }>;
+      };
+    }>("GET", `/trading/info/${ENV}/portfolio`);
+
+    const items = raw?.clientPortfolio?.ordersForOpen ?? [];
+    if (!items.length) return [];
+
+    // Resolve all unique instrumentIDs to symbols in parallel
+    const uniqueIds = [...new Set(items.map(o => o.instrumentID ?? 0).filter(Boolean))];
+    await Promise.all(uniqueIds.map(id => resolveSymbolFromId(id).catch(() => {})));
+
+    return items.map(o => {
+      const instId = o.instrumentID ?? 0;
+      const sym    = reverseCache.get(instId) ?? String(instId);
+      return {
+        orderId:   String(o.orderID ?? ""),
+        symbol:    sym,
+        side:      o.isBuy !== false ? "buy" : "sell",
+        amountUsd: o.amount ?? 0,
+        placedAt:  o.openDateTime,
+      };
+    });
   } catch {
     return [];
   }
