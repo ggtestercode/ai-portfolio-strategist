@@ -22,46 +22,56 @@ import {
 import { okxPaperMode } from "./startup";
 import { logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
 
-interface EtoroPos {
-  positionId?: string | number;
-  symbol?: string;
-  investedAmount?: number;
-  amount?: number;
-  profit?: number;
-  isBuy?: boolean;
-  assetClass?: string;
-  openRate?: number;
-}
+// eToro API returns PascalCase or camelCase depending on endpoint
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type EtoroPos = Record<string, any>;
+
 interface EtoroPortfolio {
   positions?: EtoroPos[];
-  clientPortfolio?: { positions?: EtoroPos[]; [k: string]: unknown };
+  clientPortfolio?: { positions?: EtoroPos[]; credit?: number; [k: string]: unknown };
   [k: string]: unknown;
 }
 
 function extractEtoroPositions(raw: unknown): EtoroPos[] {
   const p = raw as EtoroPortfolio;
-  // Real API wraps in clientPortfolio; demo may return positions at top level
   return p?.clientPortfolio?.positions ?? p?.positions ?? [];
+}
+
+function etoroField<T>(pos: EtoroPos, ...keys: string[]): T | undefined {
+  for (const k of keys) {
+    if (pos[k] != null) return pos[k] as T;
+  }
+  return undefined;
 }
 
 export async function syncHoldingsFromEtoro(): Promise<void> {
   const raw = await getPortfolio();
   const positions = extractEtoroPositions(raw);
-  await db.delete(holdingsTable);
-  for (const p of positions) {
-    if (!p.symbol) continue;
-    const value = p.investedAmount ?? p.amount ?? 0;
-    if (value <= 0) continue;
-    await db.insert(holdingsTable).values({
-      symbol:       p.symbol.toUpperCase().replace(/[-/]?(USDT|USDC|USD)$/i, ""),
-      name:         p.symbol.toUpperCase(),
-      assetClass:   p.assetClass ?? "Equity",
-      quantity:     value,
-      price:        1,
-      change24hPct: p.profit && value > 0 ? (p.profit / value) * 100 : 0,
-    });
+
+  if (positions.length > 0) {
+    console.log(`[syncHoldings] eToro position sample keys: ${Object.keys(positions[0]).join(", ")}`);
   }
-  console.log(`[syncHoldings] eToro: ${positions.length} position(s) synced`);
+
+  await db.delete(holdingsTable);
+  let inserted = 0;
+  for (const p of positions) {
+    const sym = etoroField<string>(p, "symbol", "Symbol", "InstrumentSymbol") ?? "";
+    if (!sym) continue;
+    const value  = etoroField<number>(p, "investedAmount", "InvestedAmount", "amount", "Amount", "netInvestment") ?? 0;
+    const profit = etoroField<number>(p, "profit", "Profit", "netProfit", "totalProfit") ?? 0;
+    const rate   = etoroField<number>(p, "openRate", "OpenRate", "avgOpenRate") ?? 0;
+    const cls    = etoroField<string>(p, "assetClass", "AssetClass", "instrumentTypeId") ?? "Equity";
+    await db.insert(holdingsTable).values({
+      symbol:       sym.toUpperCase().replace(/[-/]?(USDT|USDC|USD)$/i, ""),
+      name:         sym.toUpperCase(),
+      assetClass:   cls,
+      quantity:     value || 1,
+      price:        rate || 1,
+      change24hPct: value > 0 ? (profit / value) * 100 : 0,
+    });
+    inserted++;
+  }
+  console.log(`[syncHoldings] eToro: ${inserted}/${positions.length} position(s) inserted`);
 }
 
 export async function syncAllHoldingsToDB(): Promise<void> {
