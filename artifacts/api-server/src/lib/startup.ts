@@ -17,7 +17,9 @@ export async function initBrokers(): Promise<void> {
   });
 
   approvalGate.registerExecutor("bybit", async (p) => {
-    const result = await bybitOpen(p.symbol, p.side === "buy" ? "Buy" : "Sell", p.amountUsd, 1);
+    const leverage = 10;
+    // p.amountUsd = margin (capital at risk); notional = margin × leverage
+    const result = await bybitOpen(p.symbol, p.side === "buy" ? "Buy" : "Sell", p.amountUsd * leverage, leverage);
     return { orderId: result.orderId };
   });
 

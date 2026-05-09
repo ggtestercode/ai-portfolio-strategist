@@ -36,7 +36,7 @@ export function registerAlertNotifier(fn: AlertNotifier): void { alertFn  = fn; 
 
 const SCAN_INTERVAL   = process.env["SCAN_INTERVAL"] ?? "*/30 * * * *";
 const MAX_AUTO_TRADES = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
-const MAX_TRADE_USD   = parseInt(process.env["MAX_AUTO_TRADE_USD"] ?? "50");
+const MAX_TRADE_USD   = parseInt(process.env["MAX_AUTO_TRADE_USD"] ?? "5");
 const LOSS_LIMIT_PCT  = 0.30;
 const EQUITY_CLASSES  = new Set(["Equity", "US Equity", "equity", "Stock", "stock", "ETF", "etf"]);
 
