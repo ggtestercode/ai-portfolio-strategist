@@ -36,7 +36,9 @@ export function registerAlertNotifier(fn: AlertNotifier): void { alertFn  = fn; 
 
 const SCAN_INTERVAL   = process.env["SCAN_INTERVAL"] ?? "*/30 * * * *";
 const MAX_AUTO_TRADES = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
+const MAX_TRADE_USD   = parseInt(process.env["MAX_AUTO_TRADE_USD"] ?? "50");
 const LOSS_LIMIT_PCT  = 0.30;
+const EQUITY_CLASSES  = new Set(["Equity", "US Equity", "equity", "Stock", "stock", "ETF", "etf"]);
 
 function humanInterval(crontab: string): string {
   if (crontab === "disabled")      return "disabled (manual only)";
@@ -418,29 +420,43 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     const config = await approvalGate.getConfig();
     const outcomes: SignalOutcome[] = [];
 
-    if (config.mode === "autonomous") {
-      // Fetch live OKX positions once for all signals
-      const livePositions = await okxGetPositions().catch(() => [] as OKXPosition[]);
+    // Crypto-only signals for Bybit (equities handled separately via eToro)
+    const cryptoOpps = result.opportunities.filter(o => !EQUITY_CLASSES.has(o.assetClass ?? ""));
 
-      const strong = result.opportunities
+    if (config.mode === "autonomous") {
+      const strong = cryptoOpps
         .filter(o => o.conviction === "strong_buy" || o.conviction === "strong_sell")
         .slice(0, MAX_AUTO_TRADES);
 
       for (const sig of strong) {
-        const outcome = await evaluateAndExecuteSignal(sig, totalCapital, livePositions);
-        outcomes.push(outcome);
+        if (await isCoinSuspended(sig.symbol)) continue;
+        const proposal = buildProposal({
+          symbol:       sig.symbol,
+          side:         sig.direction === "short" ? "sell" : "buy",
+          amountUsd:    Math.max(5, Math.min(sig.positionSizeUsd || MAX_TRADE_USD, totalCapital * 0.5, MAX_TRADE_USD)),
+          assetClass:   sig.assetClass,
+          broker:       "bybit",
+          rationale:    `[Cron/Auto] ${sig.recommendation} score=${sig.score}. ${sig.reasoning}`,
+          score:        sig.score,
+          currentPrice: sig.price,
+          dataTimestamp: sig.dataTimestamp,
+        });
+        const gateResult = await approvalGate.submit(proposal).catch(e => {
+          console.error(`[cronScanner] submit ${sig.symbol}:`, e);
+          return { action: "failed" as const, proposal, message: String(e), orderId: undefined };
+        });
+        outcomes.push({ symbol: sig.symbol, action: gateResult.action === "executed" ? "NEW" : "HOLD", reason: gateResult.message });
       }
 
-      // Push scan summary to Telegram
       if (outcomes.length > 0) {
         const summary = formatScanSummary(outcomes, result.opportunities.length);
         await alertFn?.(summary).catch(() => {});
       } else {
-        await alertFn?.(`🔍 Scan complete — ${result.opportunities.length} signal${result.opportunities.length !== 1 ? "s" : ""} found\n⏭️ No strong conviction signals to act on`).catch(() => {});
+        await alertFn?.(`🔍 Scan complete — ${result.opportunities.length} signal${result.opportunities.length !== 1 ? "s" : ""} found\n⏭️ No strong conviction crypto signals to act on`).catch(() => {});
       }
     } else {
-      // Approval mode: queue high-conviction signals
-      const actionable = result.opportunities.filter(o =>
+      // Approval mode: queue high-conviction crypto signals → Bybit
+      const actionable = cryptoOpps.filter(o =>
         o.conviction === "high" || o.conviction === "strong_buy" || o.conviction === "strong_sell"
       ).slice(0, MAX_AUTO_TRADES);
 
@@ -449,8 +465,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         const proposal = buildProposal({
           symbol:       opp.symbol,
           side:         opp.direction === "short" ? "sell" : "buy",
-          amountUsd:    Math.max(10, Math.min(opp.positionSizeUsd || 50, totalCapital * 0.5, 50)),
+          amountUsd:    Math.max(5, Math.min(opp.positionSizeUsd || MAX_TRADE_USD, totalCapital * 0.5, MAX_TRADE_USD)),
           assetClass:   opp.assetClass,
+          broker:       "bybit",
           rationale:    `[Cron] ${opp.recommendation} score=${opp.score}. ${opp.reasoning}`,
           score:        opp.score,
           currentPrice: opp.price,

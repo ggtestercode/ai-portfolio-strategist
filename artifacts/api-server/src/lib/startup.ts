@@ -5,6 +5,7 @@ import { openPosition as okxOpen, testConnection, setPositionMode } from "../bro
 import { openPositionPaper }       from "../brokers/okxPaper";
 import { sendApprovalRequest }     from "../notifications/telegram";
 import { syncAllHoldingsToDB }     from "./aiResponder";
+import { syncTotalCapitalToDB }    from "./brokerBalance";
 
 export let okxPaperMode = false;
 
@@ -16,7 +17,7 @@ export async function initBrokers(): Promise<void> {
   });
 
   approvalGate.registerExecutor("bybit", async (p) => {
-    const result = await bybitOpen(p.symbol, p.side === "buy" ? "Buy" : "Sell", p.amountUsd, 10);
+    const result = await bybitOpen(p.symbol, p.side === "buy" ? "Buy" : "Sell", p.amountUsd, 1);
     return { orderId: result.orderId };
   });
 
@@ -42,8 +43,9 @@ export async function initBrokers(): Promise<void> {
 
   approvalGate.registerNotifier(sendApprovalRequest);
 
-  // Sync live broker positions into holdingsTable so dashboard is populated
+  // Sync live broker positions and capital balance into DB
   syncAllHoldingsToDB().catch(e => console.error("[startup] Holdings sync failed:", e));
+  syncTotalCapitalToDB().catch(e => console.error("[startup] Capital sync failed:", e));
 
   console.log("[startup] Broker executors registered: etoro, bybit, okx");
   console.log("[startup] Telegram notifier registered");
