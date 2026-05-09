@@ -146,6 +146,7 @@ export async function generateStrategyOptions(
 
   const systemContext = [
     "You are a portfolio strategist. Generate exactly 3 investment strategy options.",
+    "Return only valid JSON. No markdown fences, no backticks, no explanation outside the JSON object.",
     "Use real tickers only. weightPct per option must sum to 100.",
     "Each pick needs: symbol, name (full company/fund name), assetClass, weightPct (number), rationale (1 sentence).",
     "expectedReturnPct must be a number (e.g. 12.5 not '12.5%').",
@@ -159,6 +160,7 @@ export async function generateStrategyOptions(
     params.monthlyBudgetUsd  ? `Monthly budget: $${params.monthlyBudgetUsd}.` : "",
     params.currentHoldings?.length ? `Current holdings: ${params.currentHoldings.join(", ")}.` : "",
     `recommendedIndex: ${riskToIdx[params.riskTolerance]}.`,
+    `Return only valid JSON. No markdown fences, no backticks, no explanation outside the JSON object.`,
   ].filter(Boolean).join(" ");
 
   const res = await llm.json<Pick<StrategyResult,"options"|"recommendedIndex">>({

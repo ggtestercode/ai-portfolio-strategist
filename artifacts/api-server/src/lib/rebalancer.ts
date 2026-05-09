@@ -70,7 +70,8 @@ async function buildRebalanceResult(): Promise<RebalanceResult> {
   ).join("; ");
 
   const systemContext = [
-    "You are a portfolio rebalancing specialist. Respond with ONLY valid JSON — no markdown.",
+    "You are a portfolio rebalancing specialist.",
+    "Return only valid JSON. No markdown fences, no backticks, no explanation outside the JSON object.",
     `Schema: {"trades":[{"symbol":"","assetClass":"","side":"buy|sell","amountUsd":0,"rationale":""}],"summary":"","timestamp":""}`,
     "Only propose trades where drift exceeds 2%. Prefer selling over-allocated assets to fund under-allocated ones.",
     "Keep each trade ≤5% of total portfolio. Provide clear rationale for each trade.",
@@ -82,6 +83,7 @@ async function buildRebalanceResult(): Promise<RebalanceResult> {
     `Allocation drift: ${allocLines}`,
     `Today UTC: ${new Date().toISOString()}`,
     `Propose the minimum trades needed to bring allocations back to targets.`,
+    `Return only valid JSON. No markdown fences, no backticks, no explanation outside the JSON object.`,
   ].join("\n");
 
   const res = await llm.json<RebalanceResult>({
