@@ -27,11 +27,25 @@ export async function initBrokers(): Promise<void> {
 
   approvalGate.registerExecutor("bybit", async (p) => {
     const leverage = 10;
-    // p.amountUsd = margin (capital at risk); notional = margin × leverage
-    const result = await bybitOpen(p.symbol, p.side === "buy" ? "Buy" : "Sell", p.amountUsd * leverage, leverage, {
+    const bSide    = p.side === "buy" ? "Buy" : "Sell";
+    const isShort  = bSide === "Sell";
+
+    const result = await bybitOpen(p.symbol, bSide, p.amountUsd * leverage, leverage, {
       stopLoss:   p.stopLossPrice,
       takeProfit: p.takeProfitPrice,
     });
+
+    // Apply default SL/TP when the caller (e.g. assistant) didn't provide them
+    if (!p.stopLossPrice || !p.takeProfitPrice) {
+      const e      = result.entryPrice;
+      const posIdx = result.positionIdx;
+      const sl     = isShort ? +(e * 1.08).toFixed(4) : +(e * 0.92).toFixed(4);
+      const tp     = isShort ? +(e * 0.85).toFixed(4) : +(e * 1.15).toFixed(4);
+      if (!p.stopLossPrice)   await bybitSetStopLoss(p.symbol,   sl, posIdx).catch(e2 => console.warn(`[startup] default SL ${p.symbol}:`, e2.message));
+      if (!p.takeProfitPrice) await bybitSetTakeProfit(p.symbol, tp, posIdx).catch(e2 => console.warn(`[startup] default TP ${p.symbol}:`, e2.message));
+      console.log(`[startup] Applied default SL/TP for ${p.symbol} ${isShort ? "short" : "long"}: SL=$${sl} TP=$${tp} posIdx=${posIdx}`);
+    }
+
     return { orderId: result.orderId };
   });
 

@@ -218,7 +218,7 @@ export async function openPosition(
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", orderBody);
   console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} → orderId=${r.orderId}`);
-  return { orderId: r.orderId, entryPrice: markPrice };
+  return { orderId: r.orderId, entryPrice: markPrice, positionIdx };
 }
 
 export async function closePosition(symbol: string): Promise<{ orderId: string; entryPrice: number; size: number; side: "Buy" | "Sell" }> {
