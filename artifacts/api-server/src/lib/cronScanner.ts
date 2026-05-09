@@ -112,15 +112,7 @@ async function wasAlreadyScaled(symbol: string): Promise<boolean> {
   return !!row;
 }
 
-// ── Combined scan + position review ──────────────────────────────────────────
-
-interface SignalDecision {
-  symbol:      string;
-  action:      "NEW" | "SKIP";
-  reason:      string;
-  stopLoss?:   number;
-  takeProfit?: number;
-}
+// ── Position review (HOLD / ADD / CUT existing positions) ────────────────────
 
 interface PositionDecision {
   symbol: string;
@@ -128,76 +120,44 @@ interface PositionDecision {
   reason: string;
 }
 
-interface CombinedReview {
-  signals:   SignalDecision[];
-  positions: PositionDecision[];
-}
-
 function bybitSym(sym: string): string {
   const s = sym.toUpperCase().replace(/[-/]/g, "").replace(/[^A-Z0-9]/g, "");
   return s.endsWith("USDT") || s.endsWith("USDC") ? s : `${s}USDT`;
 }
 
-async function makeCombinedReview(
+async function makePositionReview(
   opps:          ScanResult["opportunities"],
   livePositions: BybitPosition[],
-  totalCapital:  number,
-): Promise<CombinedReview> {
-  if (!opps.length && !livePositions.length) return { signals: [], positions: [] };
+): Promise<{ positions: PositionDecision[] }> {
+  if (!livePositions.length) return { positions: [] };
 
-  const signalLines = opps.slice(0, 5).map((sig, i) => {
-    const dir = sig.direction?.toUpperCase() ?? "LONG";
-    const sl  = sig.stopLoss   ? ` SL=$${sig.stopLoss.toFixed(4)}`   : "";
-    const tp  = sig.takeProfit ? ` TP=$${sig.takeProfit.toFixed(4)}`  : "";
-    const rr  = sig.riskRewardRatio ? ` RR=${sig.riskRewardRatio.toFixed(1)}` : "";
-    return `${i+1}. ${sig.symbol} ${dir} ${sig.recommendation} score=${sig.score}${sl}${tp}${rr} conviction=${sig.conviction ?? "?"} — ${(sig.reasoning ?? "").slice(0, 120)}`;
+  const signalContext = opps.slice(0, 5)
+    .map(s => `${s.symbol} ${s.recommendation} score=${s.score}`)
+    .join(", ");
+
+  const positionLines = livePositions.map(p => {
+    const pnlStr = `${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)} (${p.pnlPct.toFixed(2)}%)`;
+    const slStr  = p.stopLoss   ? ` SL=$${p.stopLoss}`   : "";
+    const tpStr  = p.takeProfit ? ` TP=$${p.takeProfit}`  : "";
+    return `- ${p.symbol} ${p.side} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`;
   }).join("\n");
 
-  const positionLines = livePositions.length
-    ? livePositions.map(p => {
-        const pnlStr = `${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)} (${p.pnlPct.toFixed(2)}%)`;
-        const slStr  = p.stopLoss  ? ` SL=$${p.stopLoss}`  : "";
-        const tpStr  = p.takeProfit ? ` TP=$${p.takeProfit}` : "";
-        return `- ${p.symbol} ${p.side} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`;
-      }).join("\n")
-    : "None";
-
   const prompt = [
-    `SCAN SIGNALS (${opps.length} crypto signals):`,
-    signalLines || "None",
+    `Market context: ${signalContext}`,
     ``,
-    `EXISTING BYBIT POSITIONS (${livePositions.length}):`,
+    `EXISTING POSITIONS (${livePositions.length}):`,
     positionLines,
     ``,
-    `Capital: $${totalCapital} | Margin per trade: $${MAX_TRADE_USD} | 10x leverage → $${MAX_TRADE_USD * 10} notional`,
-    `Max new entries this scan: ${MAX_AUTO_TRADES}`,
-    ``,
-    `RULES:`,
-    `Signals: NEW only if conviction=strong_buy or strong_sell. Max ${MAX_AUTO_TRADES} NEW. SKIP all others.`,
-    `Positions: ADD only if P/L > +3% and not already scaled. CUT if P/L < -8% or trend reversed. HOLD otherwise.`,
-    `Include stopLoss and takeProfit absolute prices for each NEW signal.`,
+    `RULES: ADD if P/L > +3% and not already scaled. CUT if P/L < -8% or trend reversed. HOLD otherwise.`,
   ].join("\n");
 
-  const res = await llm.json<CombinedReview>({
+  const res = await llm.json<{ positions: PositionDecision[] }>({
     taskType:      "position_review",
-    systemContext: "You are a disciplined quant managing a Bybit live account. Respond JSON only. Be decisive.",
+    systemContext: "You are a disciplined quant managing a Bybit live account. Respond JSON only.",
     prompt,
     schema: {
-      type: "object", required: ["signals", "positions"],
+      type: "object", required: ["positions"],
       properties: {
-        signals:   {
-          type: "array",
-          items: {
-            type: "object", required: ["symbol", "action", "reason"],
-            properties: {
-              symbol:     { type: "string" },
-              action:     { type: "string", enum: ["NEW", "SKIP"] },
-              reason:     { type: "string" },
-              stopLoss:   { type: "number" },
-              takeProfit: { type: "number" },
-            },
-          },
-        },
         positions: {
           type: "array",
           items: {
@@ -211,7 +171,7 @@ async function makeCombinedReview(
         },
       },
     },
-    fallback: { signals: [], positions: [] },
+    fallback: { positions: [] },
   });
 
   return res.data;
@@ -343,41 +303,47 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     // Crypto-only signals for Bybit (equities handled separately via eToro)
     const cryptoOpps = result.opportunities.filter(o => !EQUITY_CLASSES.has(o.assetClass ?? ""));
 
-    // ── Combined scan + position review (single LLM call) ────────────────────
     const livePositions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
-    const review = await makeCombinedReview(cryptoOpps, livePositions, totalCapital);
 
-    // Handle position actions (CUT is always immediate; ADD routes through gate)
-    for (const posDecision of review.positions) {
+    // ── Position review (haiku decides HOLD/ADD/CUT for existing positions) ────
+    const posReview = await makePositionReview(cryptoOpps, livePositions);
+    for (const posDecision of posReview.positions) {
       await handlePositionDecision(posDecision, livePositions, outcomes).catch(e =>
         console.error(`[cronScanner] posDecision ${posDecision.symbol}:`, e)
       );
     }
 
-    // Handle new signal entries (approvalGate handles autonomous vs approval mode)
-    const newSignals = review.signals.filter(s => s.action === "NEW").slice(0, MAX_AUTO_TRADES);
-    for (const sig of newSignals) {
-      if (await isCoinSuspended(sig.symbol)) continue;
-      const matchedOpp = cryptoOpps.find(o => o.symbol === sig.symbol || bybitSym(o.symbol) === bybitSym(sig.symbol));
-      if (!matchedOpp) continue;
+    // ── New entries — act directly on scan conviction, no second LLM gate ──────
+    // The sonnet scan already decided conviction=strong_buy/strong_sell. Trust it.
+    const existingSyms = new Set(livePositions.map(p => bybitSym(p.symbol)));
+    const actionableOpps = cryptoOpps
+      .filter(o =>
+        (o.conviction === "strong_buy" || o.conviction === "strong_sell") &&
+        !existingSyms.has(bybitSym(o.symbol))
+      )
+      .slice(0, MAX_AUTO_TRADES);
+
+    for (const opp of actionableOpps) {
+      if (await isCoinSuspended(opp.symbol)) continue;
+      const sym = bybitSym(opp.symbol);
       const proposal = buildProposal({
-        symbol:          sig.symbol,
-        side:            matchedOpp.direction === "short" ? "sell" : "buy",
-        amountUsd:       Math.max(5, Math.min(matchedOpp.positionSizeUsd || MAX_TRADE_USD, totalCapital * 0.5, MAX_TRADE_USD)),
-        assetClass:      matchedOpp.assetClass,
+        symbol:          sym,
+        side:            opp.direction === "short" ? "sell" : "buy",
+        amountUsd:       Math.max(5, Math.min(opp.positionSizeUsd || MAX_TRADE_USD, totalCapital * 0.5, MAX_TRADE_USD)),
+        assetClass:      opp.assetClass,
         broker:          "bybit",
-        rationale:       `[Cron] ${matchedOpp.recommendation} score=${matchedOpp.score}. ${sig.reason}`,
-        score:           matchedOpp.score,
-        currentPrice:    matchedOpp.price,
-        dataTimestamp:   matchedOpp.dataTimestamp,
-        stopLossPrice:   sig.stopLoss,
-        takeProfitPrice: sig.takeProfit,
+        rationale:       `[Cron] ${opp.recommendation} score=${opp.score}. ${opp.reasoning ?? ""}`,
+        score:           opp.score,
+        currentPrice:    opp.price,
+        dataTimestamp:   opp.dataTimestamp,
+        stopLossPrice:   opp.stopLoss,
+        takeProfitPrice: opp.takeProfit,
       });
       const gateResult = await approvalGate.submit(proposal).catch(e => {
-        console.error(`[cronScanner] submit ${sig.symbol}:`, e);
+        console.error(`[cronScanner] submit ${sym}:`, e);
         return { action: "failed" as const, proposal, message: String(e), orderId: undefined };
       });
-      outcomes.push({ symbol: sig.symbol, action: gateResult.action === "executed" ? "NEW" : "HOLD", reason: gateResult.message });
+      outcomes.push({ symbol: sym, action: gateResult.action === "executed" ? "NEW" : "HOLD", reason: gateResult.message });
     }
 
     if (outcomes.length > 0) {
