@@ -146,7 +146,9 @@ export async function getBalance(): Promise<BybitBalance> {
   );
   const d = r.list[0];
   if (!d) throw new Error("Bybit: no balance data");
-  return { totalEquity: parseFloat(d.totalEquity), availableBalance: parseFloat(d.totalAvailableBalance), currency: "USDT" };
+  const equity    = parseFloat(d.totalEquity)    || 0;
+  const available = parseFloat(d.totalAvailableBalance) || equity;
+  return { totalEquity: equity, availableBalance: available, currency: "USDT" };
 }
 
 // ── Trading ───────────────────────────────────────────────────────────────────
