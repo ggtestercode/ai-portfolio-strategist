@@ -19,6 +19,9 @@ interface RebalanceResult {
 
 const FALLBACK: RebalanceResult = { trades: [], summary: "Rebalance unavailable", timestamp: new Date().toISOString() };
 
+// Only Crypto trades are executable on Bybit — equity/ETF/stock cannot be traded
+const CRYPTO_CLASSES = new Set(["Crypto", "crypto"]);
+
 async function buildRebalanceResult(): Promise<RebalanceResult> {
   const [holdings, targets, profile] = await Promise.all([
     db.select().from(holdingsTable),
@@ -70,11 +73,11 @@ async function buildRebalanceResult(): Promise<RebalanceResult> {
   ).join("; ");
 
   const systemContext = [
-    "You are a portfolio rebalancing specialist.",
+    "You are a portfolio rebalancing specialist for a Bybit crypto futures account.",
     "Return only valid JSON. No markdown fences, no backticks, no explanation outside the JSON object.",
     `Schema: {"trades":[{"symbol":"","assetClass":"","side":"buy|sell","amountUsd":0,"rationale":""}],"summary":"","timestamp":""}`,
-    "Only propose trades where drift exceeds 2%. Prefer selling over-allocated assets to fund under-allocated ones.",
-    "Keep each trade ≤5% of total portfolio. Provide clear rationale for each trade.",
+    "IMPORTANT: Only propose trades for Crypto assets. Equity, ETF, Stock, REIT, and Commodity trades are NOT executable — exclude them entirely.",
+    "Only propose trades where drift exceeds 2%. Keep each trade ≤5% of total portfolio. Provide clear rationale for each trade.",
   ].join("\n");
 
   const prompt = [
@@ -112,13 +115,18 @@ export async function checkAndRebalance(): Promise<RebalanceResult> {
   try {
     const result = await buildRebalanceResult();
 
-    // Submit all proposed trades through the approval gate
-    for (const t of result.trades) {
+    // Submit only Crypto trades — equity/ETF/stock cannot be executed on Bybit
+    const cryptoTrades = result.trades.filter(t => CRYPTO_CLASSES.has(t.assetClass));
+    if (result.trades.length !== cryptoTrades.length) {
+      console.log(`[rebalancer] Filtered ${result.trades.length - cryptoTrades.length} non-crypto trade(s) from rebalance plan`);
+    }
+    for (const t of cryptoTrades) {
       const proposal = buildProposal({
         symbol:    t.symbol,
         side:      t.side,
         amountUsd: t.amountUsd,
         assetClass: t.assetClass,
+        broker:    "bybit",
         rationale: `[Rebalance] ${t.rationale}`,
       });
       approvalGate.submit(proposal).catch(e =>
