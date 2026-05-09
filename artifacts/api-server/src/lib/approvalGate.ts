@@ -16,17 +16,19 @@ import { eq }                     from "drizzle-orm";
 export type OperationMode = "autonomous" | "approval";
 
 export interface TradeProposal {
-  id:             string;
-  symbol:         string;
-  side:           "buy" | "sell";
-  amountUsd:      number;
-  assetClass:     string;
-  broker:         "etoro" | "bybit" | "okx" | "mock";
-  rationale:      string;
-  score?:         number;
-  currentPrice?:  number;
-  dataTimestamp?: string;
-  proposedAt:     string;
+  id:              string;
+  symbol:          string;
+  side:            "buy" | "sell";
+  amountUsd:       number;
+  assetClass:      string;
+  broker:          "etoro" | "bybit" | "okx" | "mock";
+  rationale:       string;
+  score?:          number;
+  currentPrice?:   number;
+  dataTimestamp?:  string;
+  proposedAt:      string;
+  stopLossPrice?:  number;
+  takeProfitPrice?: number;
 }
 
 export interface PendingApproval {

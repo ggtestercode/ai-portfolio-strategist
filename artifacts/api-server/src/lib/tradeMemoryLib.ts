@@ -120,7 +120,15 @@ export async function getDailyPnl(): Promise<number> {
 export async function logOpenTrade(params: {
   symbol: string; broker: string; direction: "long" | "short";
   entryPrice: number; leverage: number; amountUsd: number; reasoning?: string;
+  stopLoss?: number; takeProfit?: number; stopLossMethod?: string;
 }): Promise<void> {
+  const enriched = [
+    params.reasoning,
+    params.stopLoss      ? `SL=$${params.stopLoss}`              : null,
+    params.takeProfit    ? `TP=$${params.takeProfit}`             : null,
+    params.stopLossMethod ? `method=${params.stopLossMethod}`     : null,
+  ].filter(Boolean).join(" | ");
+
   try {
     await db.insert(tradeLogTable).values({
       symbol:     params.symbol,
@@ -129,7 +137,7 @@ export async function logOpenTrade(params: {
       entryPrice: String(params.entryPrice),
       amountUsd:  String(params.amountUsd),
       leverage:   params.leverage,
-      reasoning:  params.reasoning ?? null,
+      reasoning:  enriched || null,
       entryAt:    new Date(),
     });
   } catch (e) {

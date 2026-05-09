@@ -685,7 +685,9 @@ export function startPolling(): void {
       for (const p of bybitPos) {
         const sign   = p.pnl >= 0 ? "+" : "";
         const pnlStr = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
-        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}${pnlStr}`);
+        const slStr  = p.stopLoss  ? `\n  SL $${p.stopLoss.toLocaleString("en-US",  { maximumFractionDigits: 4 })}`  : "";
+        const tpStr  = p.takeProfit ? ` · TP $${p.takeProfit.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
+        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}${pnlStr}${slStr}${tpStr}`);
       }
 
       if (localPending.length) {

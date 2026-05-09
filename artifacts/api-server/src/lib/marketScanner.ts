@@ -2,7 +2,7 @@ import { llm }                      from "./llmRouter";
 import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
-import { getKlines }                         from "../brokers/bybit";
+import { getKlines, getFundingRate, getOpenInterest } from "../brokers/bybit";
 import { getRecentMemory }                   from "./tradeMemoryLib";
 import { db, profileTable, holdingsTable }   from "@workspace/db";
 
@@ -26,10 +26,18 @@ export interface ScanOpportunity {
   leverage?:           number;
   positionSizeUsd?:    number;
   timeframeAlignment?: string;
-  orderType?:      "market" | "limit";
-  limitPrice?:     number;
-  timeInForce?:    "IOC" | "GTC";
-  orderReasoning?: string;
+  orderType?:          "market" | "limit";
+  limitPrice?:         number;
+  timeInForce?:        "IOC" | "GTC";
+  orderReasoning?:     string;
+  // Sprint 7A — risk/SL/TP metadata
+  riskRewardRatio?:     number;
+  stopLossMethod?:      "swing_low" | "ATR" | "percent" | "support";
+  stopLossReasoning?:   string;
+  takeProfitReasoning?: string;
+  rrReasoning?:         string;
+  fundingRateContext?:  string;
+  openInterestContext?: string;
 }
 
 // ── Technical indicators ──────────────────────────────────────────────────────
@@ -123,13 +131,20 @@ export async function runScan(): Promise<ScanResult> {
     const assetData = await fetchAllData(watchlist);
     if (assetData.length < 3) { console.warn("[scanner] Insufficient data"); return FALLBACK_RESULT; }
 
-    // Multi-timeframe data for top crypto symbols (limit to 5 to avoid timeout)
+    // Multi-timeframe data + funding rates + open interest for top crypto symbols
     const cryptoSyms = watchlist.filter(e => e.assetClass === "Crypto").slice(0, 5).map(e => e.symbol);
-    const mtfLines: string[] = [];
+    const mtfLines:     string[] = [];
+    const fundingLines: string[] = [];
     for (const sym of cryptoSyms) {
       try {
-        const mtf = await fetchMTFData(sym);
+        const [mtf, fr, oi] = await Promise.all([
+          fetchMTFData(sym),
+          getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 })),
+          getOpenInterest(sym).catch(() => 0),
+        ]);
         mtfLines.push(`${sym} MTF: ${mtf}`);
+        const rSign = fr.rate >= 0 ? "+" : "";
+        fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
       } catch { /* skip */ }
     }
 
@@ -152,13 +167,17 @@ export async function runScan(): Promise<ScanResult> {
 
     const systemContext = [
       "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":""}],"scanTimestamp":"","summary":""}`,
+      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":"","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","stopLossReasoning":"","takeProfitReasoning":"","rrReasoning":"","fundingRateContext":"","openInterestContext":""}],"scanTimestamp":"","summary":""}`,
       "Rules: rank exactly 5 opportunities. 80-100=STRONG BUY(strong_buy), 60-79=BUY(high), 40-59=WATCH(medium), <40=AVOID.",
       "Multi-timeframe alignment: confirm trend across 1h, 4h, 1D before signalling. Higher conviction = more TF alignment.",
       "RSI <30 oversold (bullish), RSI >70 overbought (bearish). EMA20>EMA50 = uptrend.",
       `User profile: Strategy=${strategyName}, Risk=${risk}, Target=${targetReturn}%/period, Capital=$${capital}. Only suggest signals matching this profile.`,
       riskDirective,
       "Leverage: up to 50x crypto, 20x stocks. stopLoss must be realistic (5-15% from entry for futures).",
+      "stopLossMethod: 'swing_low' if using recent swing low/high, 'ATR' if volatility-based, 'percent' if fixed %, 'support' if key level.",
+      "riskRewardRatio = (takeProfit - entry) / (entry - stopLoss) for longs. Must be ≥ 1.5.",
+      "fundingRateContext: interpret the funding rate (positive=longs pay shorts=crowded long, negative=shorts pay=crowded short).",
+      "openInterestContext: interpret OI trend (rising OI = new money entering, falling OI = positions closing).",
       "Order type: use 'market'(IOC) for strong momentum/STRONG_BUY/STRONG_SELL. Use 'limit'(GTC) for support/resistance entries. Set limitPrice only for limit orders.",
       `Max position: $${maxPosition.toFixed(0)} (50% of capital).`,
     ].join("\n");
@@ -169,6 +188,7 @@ export async function runScan(): Promise<ScanResult> {
       `UTC: ${new Date().toISOString()}`,
       ``,
       mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
+      fundingLines.length ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n` : "",
       `Market snapshot (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
       tableRows.join("\n"),
       ``,
@@ -197,6 +217,10 @@ export async function runScan(): Promise<ScanResult> {
                 positionSizeUsd: { type: "number" }, timeframeAlignment: { type: "string" },
                 orderType: { type: "string" }, limitPrice: { type: "number" },
                 timeInForce: { type: "string" }, orderReasoning: { type: "string" },
+                riskRewardRatio: { type: "number" }, stopLossMethod: { type: "string" },
+                stopLossReasoning: { type: "string" }, takeProfitReasoning: { type: "string" },
+                rrReasoning: { type: "string" }, fundingRateContext: { type: "string" },
+                openInterestContext: { type: "string" },
               },
             },
           },
