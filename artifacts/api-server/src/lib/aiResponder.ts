@@ -22,6 +22,17 @@ import {
 import { okxPaperMode } from "./startup";
 import { logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
 
+interface EtoroPos {
+  symbol?:        string;
+  positionId?:    number | string;
+  profit?:        number;
+  investedAmount?: number;
+}
+interface EtoroPortfolio {
+  positions?:            EtoroPos[];
+  clientPortfolio?: { positions?: EtoroPos[] };
+}
+
 export async function syncHoldingsFromEtoro(): Promise<void> {
   const positions = await etoroGetPositions();
 
