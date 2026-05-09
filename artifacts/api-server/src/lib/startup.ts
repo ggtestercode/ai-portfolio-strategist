@@ -6,15 +6,119 @@ import {
   getPositions    as bybitGetPositions,
   setStopLoss     as bybitSetStopLoss,
   setTakeProfit   as bybitSetTakeProfit,
+  getKlines,
+  getFundingRate,
+  getOpenInterest,
 } from "../brokers/bybit";
 import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
 import { openPositionPaper }       from "../brokers/okxPaper";
-import { sendApprovalRequest }     from "../notifications/telegram";
+import { sendApprovalRequest, sendAlert } from "../notifications/telegram";
 import { syncAllHoldingsToDB }     from "./aiResponder";
 import { syncTotalCapitalToDB }    from "./brokerBalance";
 import { llm }                     from "./llmRouter";
 
 export let okxPaperMode = false;
+
+// ── Inline technical helpers (no dep on marketScanner) ────────────────────────
+function calcRSI(closes: number[], period = 14): number {
+  if (closes.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = (closes[i] ?? 0) - (closes[i - 1] ?? 0);
+    if (diff > 0) gains += diff; else losses -= diff;
+  }
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + (gains / period) / avgLoss);
+}
+
+function calcEMA(closes: number[], period: number): number {
+  if (closes.length < period) return closes[closes.length - 1] ?? 0;
+  const k = 2 / (period + 1);
+  let ema = closes.slice(0, period).reduce((s, v) => s + v, 0) / period;
+  for (let i = period; i < closes.length; i++) ema = (closes[i]! * k) + (ema * (1 - k));
+  return ema;
+}
+
+// ── Claude-decided SL/TP for manual trades ───────────────────────────────────
+async function applyClaudeSlTp(
+  symbol:      string,
+  direction:   "long" | "short",
+  entryPrice:  number,
+  positionIdx: number,
+): Promise<void> {
+  // Gather market data in parallel
+  const [klines1h, klines4h, fr, oi] = await Promise.allSettled([
+    getKlines(symbol, "60",  50),
+    getKlines(symbol, "240", 50),
+    getFundingRate(symbol),
+    getOpenInterest(symbol),
+  ]);
+
+  function summarise(label: string, klines: typeof klines1h): string {
+    if (klines.status !== "fulfilled") return `${label}: unavailable`;
+    const closes = klines.value.map(k => k.close);
+    const last   = closes[closes.length - 1]?.toFixed(4) ?? "?";
+    const rsi    = calcRSI(closes).toFixed(1);
+    const ema20  = calcEMA(closes, 20).toFixed(4);
+    const ema50  = calcEMA(closes, 50).toFixed(4);
+    return `${label}: price=$${last} RSI=${rsi} EMA20=$${ema20} EMA50=$${ema50}`;
+  }
+
+  const frVal  = fr.status === "fulfilled" ? fr.value : { rate: 0, nextFundingTime: 0 };
+  const oiVal  = oi.status === "fulfilled" ? oi.value : 0;
+  const frSign = frVal.rate >= 0 ? "+" : "";
+  const oiStr  = oiVal > 1e9 ? `${(oiVal / 1e9).toFixed(2)}B` : oiVal > 1e6 ? `${(oiVal / 1e6).toFixed(1)}M` : oiVal.toFixed(0);
+
+  const prompt = [
+    `Position just opened:`,
+    `Symbol: ${symbol}`,
+    `Direction: ${direction}`,
+    `Entry: $${entryPrice.toFixed(4)}`,
+    ``,
+    `Market data:`,
+    summarise("1h", klines1h),
+    summarise("4h", klines4h),
+    `Funding rate: ${frSign}${(frVal.rate * 100).toFixed(4)}%`,
+    `Open interest: ${oiStr}`,
+    ``,
+    `Decide stop loss and take profit.`,
+    `Hard limit: SL cannot exceed 40% from entry (max SL for ${direction}: $${direction === "short" ? (entryPrice * 1.40).toFixed(4) : (entryPrice * 0.60).toFixed(4)}).`,
+    `No other restrictions — use your best judgment based on the market structure.`,
+    `Return JSON: {"stopLoss": <price>, "takeProfit": <price>, "method": "<string>", "reasoning": "<1 sentence>"}`,
+  ].join("\n");
+
+  const res = await llm.json<{ stopLoss: number; takeProfit: number; method: string; reasoning: string }>({
+    taskType:      "trade_decision",
+    systemContext: "You are a trading risk manager. Set precise stop-loss and take-profit prices for a live futures position. Respond JSON only.",
+    prompt,
+    schema: {
+      type: "object", required: ["stopLoss", "takeProfit", "method", "reasoning"],
+      properties: {
+        stopLoss:  { type: "number" },
+        takeProfit: { type: "number" },
+        method:    { type: "string" },
+        reasoning: { type: "string" },
+      },
+    },
+    fallback: { stopLoss: 0, takeProfit: 0, method: "failed", reasoning: "Claude call failed" },
+  }).catch(() => ({ data: { stopLoss: 0, takeProfit: 0, method: "error", reasoning: "error" }, parseSuccess: false }));
+
+  const { stopLoss: sl, takeProfit: tp, method, reasoning } = res.data;
+
+  if (sl > 0) await bybitSetStopLoss(symbol,   sl, positionIdx).catch(e => console.warn(`[startup] SL ${symbol}:`, e.message));
+  if (tp > 0) await bybitSetTakeProfit(symbol, tp, positionIdx).catch(e => console.warn(`[startup] TP ${symbol}:`, e.message));
+
+  console.log(`[startup] Claude SL/TP for ${symbol} ${direction}: SL=$${sl} TP=$${tp} (${method})`);
+
+  await sendAlert([
+    `🛡️ <b>SL/TP set for ${symbol} ${direction}</b>`,
+    `SL: $${sl > 0 ? sl.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "—"}`,
+    `TP: $${tp > 0 ? tp.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "—"}`,
+    `Method: ${method}`,
+    `<i>${reasoning}</i>`,
+  ].join("\n")).catch(() => {});
+}
 
 export async function initBrokers(): Promise<void> {
   approvalGate.registerExecutor("etoro", async (p) => {
@@ -35,15 +139,10 @@ export async function initBrokers(): Promise<void> {
       takeProfit: p.takeProfitPrice,
     });
 
-    // Apply default SL/TP when the caller (e.g. assistant) didn't provide them
+    // Ask Claude to decide SL/TP from live market data when caller didn't provide them
     if (!p.stopLossPrice || !p.takeProfitPrice) {
-      const e      = result.entryPrice;
-      const posIdx = result.positionIdx;
-      const sl     = isShort ? +(e * 1.08).toFixed(4) : +(e * 0.92).toFixed(4);
-      const tp     = isShort ? +(e * 0.85).toFixed(4) : +(e * 1.15).toFixed(4);
-      if (!p.stopLossPrice)   await bybitSetStopLoss(p.symbol,   sl, posIdx).catch(e2 => console.warn(`[startup] default SL ${p.symbol}:`, e2.message));
-      if (!p.takeProfitPrice) await bybitSetTakeProfit(p.symbol, tp, posIdx).catch(e2 => console.warn(`[startup] default TP ${p.symbol}:`, e2.message));
-      console.log(`[startup] Applied default SL/TP for ${p.symbol} ${isShort ? "short" : "long"}: SL=$${sl} TP=$${tp} posIdx=${posIdx}`);
+      applyClaudeSlTp(p.symbol, isShort ? "short" : "long", result.entryPrice, result.positionIdx)
+        .catch(e2 => console.warn(`[startup] applyClaudeSlTp ${p.symbol}:`, e2.message));
     }
 
     return { orderId: result.orderId };
