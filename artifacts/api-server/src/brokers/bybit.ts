@@ -155,7 +155,7 @@ export async function getBalance(): Promise<BybitBalance> {
 
 // ── Trading ───────────────────────────────────────────────────────────────────
 export async function setOneWayMode(): Promise<void> {
-  await bpost("/v5/position/switch-mode", { category: "linear", mode: 0 })
+  await bpost("/v5/position/switch-mode", { category: "linear", coin: "USDT", mode: 0 })
     .catch(e => {
       // 110025 = already in one-way mode
       if (!e.message.includes("110025")) throw e;
