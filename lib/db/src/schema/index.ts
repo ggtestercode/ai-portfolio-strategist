@@ -10,3 +10,6 @@ export * from "./operation";
 export * from "./approvals";
 export * from "./watchlist";
 export * from "./scanSignals";
+export * from "./botState";
+export * from "./tradeLog";
+export * from "./tradeMemory";

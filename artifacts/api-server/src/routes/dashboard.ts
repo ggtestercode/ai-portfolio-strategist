@@ -10,6 +10,11 @@ import {
 
 const router: IRouter = Router();
 
+function titleCase(s: string | null | undefined): string {
+  if (!s) return "Medium";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
 router.get("/dashboard/summary", async (_req, res): Promise<void> => {
   const profile = await getProfile();
   const snap = await getPortfolioSnapshot(profile.totalCapital);
@@ -76,14 +81,14 @@ router.get("/dashboard/summary", async (_req, res): Promise<void> => {
         totalCapital: profile.totalCapital,
         targetReturnPct: profile.targetReturnPct,
         timeHorizonMonths: profile.timeHorizonMonths,
-        riskTolerance: profile.riskTolerance,
+        riskTolerance: titleCase(profile.riskTolerance),
         goalProgressPct: Number(goalProgressPct.toFixed(1)),
         goalProgressNote,
       },
       strategy: {
         strategyType: profile.strategyType,
         lastGenerated: profile.strategyLastGenerated.toISOString(),
-        riskLevel: profile.strategyRiskLevel,
+        riskLevel: titleCase(profile.strategyRiskLevel),
         allocation: targets
           .map((t) => ({ assetClass: t.assetClass, percentage: t.targetPct }))
           .sort((a, b) => b.percentage - a.percentage),

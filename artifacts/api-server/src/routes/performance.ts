@@ -33,8 +33,9 @@ router.get("/performance/series", async (req, res): Promise<void> => {
     | "ALL";
   const profile = await getProfile();
   const snap = await getPortfolioSnapshot(profile.totalCapital);
-  const startValue = snap.totalValue * (RANGE_START_FACTOR[range] ?? 0.9);
-  const series = buildPerformanceSeries(range, startValue, snap.totalValue);
+  const endValue   = snap.totalValue > 0 ? snap.totalValue : profile.totalCapital || 1000;
+  const startValue = endValue * (RANGE_START_FACTOR[range] ?? 0.9);
+  const series = buildPerformanceSeries(range, startValue, endValue);
   res.json(GetPerformanceSeriesResponse.parse(series));
 });
 

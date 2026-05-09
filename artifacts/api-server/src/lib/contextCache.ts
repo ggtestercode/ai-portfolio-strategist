@@ -50,7 +50,7 @@ export const TTL = {
   PORTFOLIO:        60_000,
   MARKET_PRICES:    5  * 60_000,
   STRATEGY_OPTIONS: 4  * 60 * 60_000,
-  MARKET_SCAN:      15 * 60_000,
+  MARKET_SCAN:      60 * 60_000,
   INSTRUMENT_IDS:   24 * 60 * 60_000,
   OPERATION_CONFIG: 5  * 60_000,
 } as const;

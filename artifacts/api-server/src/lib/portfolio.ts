@@ -41,8 +41,13 @@ export async function getPortfolioSnapshot(
   }, 0);
   const change24hPct = totalValue > 0 ? (change24h / (totalValue - change24h)) * 100 : 0;
 
-  const totalProfitLoss = totalValue - totalCapital;
-  const totalProfitLossPct = totalCapital > 0 ? (totalProfitLoss / totalCapital) * 100 : 0;
+  // P/L = sum of 24h gains on each position (unrealized, not vs total capital)
+  const totalProfitLoss = holdings.reduce((sum, h) => {
+    const value    = h.quantity * h.price;
+    const costBase = value / (1 + h.change24hPct / 100);
+    return sum + (value - costBase);
+  }, 0);
+  const totalProfitLossPct = totalValue > 0 ? (totalProfitLoss / totalValue) * 100 : 0;
 
   const byAssetClass: Record<string, number> = {};
   for (const h of holdings) {

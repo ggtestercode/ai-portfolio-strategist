@@ -15,8 +15,14 @@ import {
 } from "@workspace/api-zod";
 import { getProfile } from "../lib/profile";
 import { generateStrategyOptions } from "../lib/strategyGenerator";
+import { buildPortfolioFromTargets } from "../lib/strategyExecutor";
 
 const router: IRouter = Router();
+
+function titleCase(s: string | null | undefined): string {
+  if (!s) return "Medium";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
 
 async function buildStrategy() {
   const profile = await getProfile();
@@ -24,7 +30,7 @@ async function buildStrategy() {
   return {
     strategyType: profile.strategyType,
     lastGenerated: profile.strategyLastGenerated.toISOString(),
-    riskLevel: profile.strategyRiskLevel,
+    riskLevel: titleCase(profile.strategyRiskLevel),
     allocation: targets
       .map((t) => ({ assetClass: t.assetClass, percentage: t.targetPct }))
       .sort((a, b) => b.percentage - a.percentage),
@@ -38,7 +44,7 @@ function serializeOption(o: typeof strategyOptionsTable.$inferSelect) {
     optionIndex: o.optionIndex,
     name: o.name,
     summary: o.summary,
-    riskLevel: o.riskLevel,
+    riskLevel: titleCase(o.riskLevel),
     expectedReturnPct: o.expectedReturnPct,
     picks: o.picks,
     generatedAt: o.generatedAt.toISOString(),
@@ -200,6 +206,16 @@ router.post("/strategy/options/apply", async (req, res): Promise<void> => {
   }
 
   res.json(ApplyStrategyOptionsResponse.parse(await buildStrategy()));
+});
+
+router.post("/strategy/execute", async (_req, res): Promise<void> => {
+  try {
+    const result = await buildPortfolioFromTargets();
+    res.json(result);
+  } catch (err: any) {
+    console.error("[strategy/execute]", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;

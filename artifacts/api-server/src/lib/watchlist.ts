@@ -26,7 +26,14 @@ export async function getWatchlist(): Promise<WatchlistEntry[]> {
     } catch { /* fall through */ }
   }
 
-  // Build default: top-20 crypto + top-50 S&P 500
+  // Build default: OKX spot crypto + top-20 crypto + top-50 S&P 500
+  const okxSpot: WatchlistEntry[] = [
+    { symbol: "BTC-USDT", assetClass: "Crypto" },
+    { symbol: "ETH-USDT", assetClass: "Crypto" },
+    { symbol: "SOL-USDT", assetClass: "Crypto" },
+    { symbol: "BNB-USDT", assetClass: "Crypto" },
+  ];
+
   const crypto: WatchlistEntry[] = [];
   try {
     const top = await getTopCryptoByMarketCap(20);
@@ -40,7 +47,7 @@ export async function getWatchlist(): Promise<WatchlistEntry[]> {
     .slice(0, 50)
     .map(s => ({ symbol: s, assetClass: "Equity" }));
 
-  _cache = [...crypto, ...stocks];
+  _cache = [...okxSpot, ...crypto, ...stocks];
   persist(_cache);
   return _cache;
 }

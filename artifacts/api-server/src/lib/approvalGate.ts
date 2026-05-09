@@ -9,23 +9,26 @@ import { cache, TTL, CacheKey }   from "./contextCache";
 import { db }                     from "@workspace/db";
 import { tradeProposals,
          operationConfig,
-         profileTable }           from "@workspace/db/schema";
+         profileTable,
+         transactionsTable }      from "@workspace/db/schema";
 import { eq }                     from "drizzle-orm";
 
 export type OperationMode = "autonomous" | "approval";
 
 export interface TradeProposal {
-  id:             string;
-  symbol:         string;
-  side:           "buy" | "sell";
-  amountUsd:      number;
-  assetClass:     string;
-  broker:         "etoro" | "bybit" | "mock";
-  rationale:      string;
-  score?:         number;
-  currentPrice?:  number;
-  dataTimestamp?: string;
-  proposedAt:     string;
+  id:              string;
+  symbol:          string;
+  side:            "buy" | "sell";
+  amountUsd:       number;
+  assetClass:      string;
+  broker:          "etoro" | "bybit" | "okx" | "mock";
+  rationale:       string;
+  score?:          number;
+  currentPrice?:   number;
+  dataTimestamp?:  string;
+  proposedAt:      string;
+  stopLossPrice?:  number;
+  takeProfitPrice?: number;
 }
 
 export interface PendingApproval {
@@ -33,6 +36,11 @@ export interface PendingApproval {
   summary:   string;
   expiresAt: string;
   status:    "pending";
+  capitalLimitWarning?: {
+    capLimit:         number;
+    multiple:         number;
+    autoModeOverride: boolean;
+  };
 }
 
 export interface GateResult {
@@ -51,13 +59,14 @@ const mockExecutor: BrokerExecutor = async (p) => {
 };
 
 const pendingMap  = new Map<string, PendingApproval>();
-const EXPIRY_MS   = 30 * 60 * 1000;
+const EXPIRY_MS   = 15 * 60 * 1000;
 const CRYPTO_SYMS = new Set(["BTC","ETH","SOL","BNB","AVAX","ARB","OP","MATIC","LINK","DOT","ATOM","INJ","TIA","SUI","SEI"]);
 
 class ApprovalGate {
-  private executors: Record<"etoro"|"bybit"|"mock", BrokerExecutor> = {
+  private executors: Record<"etoro"|"bybit"|"okx"|"mock", BrokerExecutor> = {
     etoro: mockExecutor,
     bybit: mockExecutor,
+    okx:   mockExecutor,
     mock:  mockExecutor,
   };
   private notifyFn: ((a: PendingApproval) => Promise<void>) | null = null;
@@ -86,7 +95,7 @@ class ApprovalGate {
     cache.invalidate(CacheKey.operationConfig());
   }
 
-  registerExecutor(broker: "etoro" | "bybit", fn: BrokerExecutor): void {
+  registerExecutor(broker: "etoro" | "bybit" | "okx", fn: BrokerExecutor): void {
     this.executors[broker] = fn;
     console.log(`[ApprovalGate] Registered executor: ${broker}`);
   }
@@ -100,9 +109,16 @@ class ApprovalGate {
       this.getConfig(),
       db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1).then(r => r[0]),
     ]);
-    const totalCapital = profileRow?.totalCapital ?? 10000;
+    const totalCapital = profileRow?.totalCapital ?? 200;
     const capLimit     = totalCapital * 0.50;
+    const CAP_TTL      = 15 * 60 * 1000;
+
     if (proposal.amountUsd > capLimit) {
+      // Queue for manual approval with capital-limit warning instead of auto-rejecting
+      const multiple     = proposal.amountUsd / capLimit;
+      const autoOverride = mode === "autonomous";
+      const expiresAt    = new Date(Date.now() + CAP_TTL).toISOString();
+
       await db.insert(tradeProposals).values({
         id: proposal.id, symbol: proposal.symbol, side: proposal.side,
         amountUsd: String(proposal.amountUsd), assetClass: proposal.assetClass,
@@ -110,23 +126,27 @@ class ApprovalGate {
         score:        proposal.score        != null ? String(proposal.score)        : null,
         currentPrice: proposal.currentPrice != null ? String(proposal.currentPrice) : null,
         dataTimestamp: proposal.dataTimestamp ?? null,
-        status: "rejected",
-        resolvedAt: new Date(),
-        executionError: `Exceeds 50% single-trade capital limit ($${capLimit.toFixed(0)})`,
-        expiresAt: new Date(Date.now() + EXPIRY_MS),
+        status: "pending",
+        expiresAt: new Date(Date.now() + CAP_TTL),
       }).onConflictDoNothing();
-      const reason = `Exceeds 50% single-trade capital limit ($${capLimit.toFixed(0)} max, got $${proposal.amountUsd})`;
+
+      const approval: PendingApproval = {
+        proposal,
+        summary: "",
+        expiresAt,
+        status: "pending",
+        capitalLimitWarning: { capLimit, multiple, autoModeOverride: autoOverride },
+      };
+      pendingMap.set(proposal.id, approval);
+
       if (this.notifyFn) {
-        await this.notifyFn({
-          proposal,
-          summary: `AUTO-REJECTED: ${proposal.side.toUpperCase()} ${proposal.symbol} $${proposal.amountUsd} — ${reason}`,
-          expiresAt: new Date().toISOString(),
-          status: "pending",
-        }).catch(() => {});
+        await this.notifyFn(approval).catch(e => console.error("[Gate] Capital limit notify failed:", e));
       }
-      console.warn(`[ApprovalGate] Auto-rejected ${proposal.id}: ${reason}`);
-      return { action: "rejected", proposal, message: reason };
+
+      console.log(`[ApprovalGate] Capital-limit approval queued ${proposal.id}: $${proposal.amountUsd} vs $${capLimit} limit (${multiple.toFixed(1)}x)`);
+      return { action: "queued", proposal, message: `Capital limit approval required (${multiple.toFixed(1)}x limit)` };
     }
+
     await db.insert(tradeProposals).values({
       id: proposal.id, symbol: proposal.symbol, side: proposal.side,
       amountUsd: String(proposal.amountUsd), assetClass: proposal.assetClass,
@@ -224,6 +244,18 @@ class ApprovalGate {
         .set({ status:"executed", resolvedAt:new Date(), orderId:result.orderId ?? null })
         .where(eq(tradeProposals.id, proposal.id));
       cache.invalidate(CacheKey.portfolio());
+
+      // Log to transactions table for dashboard history
+      await db.insert(transactionsTable).values({
+        type:       proposal.side === "buy" ? "Buy" : "Sell",
+        asset:      proposal.symbol,
+        amount:     proposal.side === "buy" ? proposal.amountUsd : -proposal.amountUsd,
+        value:      proposal.amountUsd,
+        status:     "Completed",
+        note:       `${proposal.broker} · ${result.orderId ?? proposal.id}`,
+        occurredAt: new Date(),
+      }).catch(() => {});
+
       return { action:"executed", proposal, orderId:result.orderId,
                message:`Executed: ${proposal.side.toUpperCase()} ${proposal.symbol} $${proposal.amountUsd} [${proposal.broker}]` };
     } catch (err: any) {
@@ -237,13 +269,24 @@ class ApprovalGate {
 
 export const approvalGate = new ApprovalGate();
 
+const EQUITY_CLASSES = new Set(["Equity", "equity", "US Equity", "us equity", "Stock", "stock", "ETF", "etf"]);
+
 export function buildProposal(
-  p: Omit<TradeProposal, "id"|"broker"|"proposedAt">
+  p: Omit<TradeProposal, "id"|"broker"|"proposedAt"> & { broker?: TradeProposal["broker"] }
 ): TradeProposal {
+  const isOKXSymbol   = p.symbol.includes("-");
+  const isCryptoClass = p.assetClass === "Crypto" || p.assetClass === "crypto";
+  const isEquityClass = EQUITY_CLASSES.has(p.assetClass);
+  const isCryptoSym   = CRYPTO_SYMS.has(p.symbol.toUpperCase().replace(/USDT$|USDC$/, ""));
+  const defaultBroker = isEquityClass
+    ? "etoro"
+    : (isCryptoClass || isCryptoSym || isOKXSymbol)
+      ? "okx"
+      : "etoro";
   return {
     ...p,
     id:         randomUUID(),
-    broker:     CRYPTO_SYMS.has(p.symbol.toUpperCase()) ? "bybit" : "etoro",
+    broker:     p.broker ?? defaultBroker,
     proposedAt: new Date().toISOString(),
   };
 }

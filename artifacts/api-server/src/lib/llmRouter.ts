@@ -17,18 +17,19 @@ const MODELS = {
 type ModelTier = keyof typeof MODELS;
 
 const TASK_CONFIG = {
-  assistant_reply:      { model: "haiku"  as ModelTier, maxTokens: 600,  cache: true  },
-  approval_summary:     { model: "haiku"  as ModelTier, maxTokens: 200,  cache: false },
-  risk_alert:           { model: "haiku"  as ModelTier, maxTokens: 350,  cache: true  },
-  portfolio_summary:    { model: "haiku"  as ModelTier, maxTokens: 500,  cache: true  },
-  command_parse:        { model: "haiku"  as ModelTier, maxTokens: 200,  cache: false },
-  rebalance_check:      { model: "haiku"  as ModelTier, maxTokens: 350,  cache: true  },
-  strategy_generation:  { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },
-  trade_decision:       { model: "sonnet" as ModelTier, maxTokens: 900,  cache: true  },
-  rebalance_plan:       { model: "sonnet" as ModelTier, maxTokens: 1400, cache: true  },
-  market_scan:          { model: "sonnet" as ModelTier, maxTokens: 1400, cache: true  },
-  performance_analysis: { model: "sonnet" as ModelTier, maxTokens: 900,  cache: true  },
-  deep_research:        { model: "opus"   as ModelTier, maxTokens: 3000, cache: true  },
+  assistant_reply:      { model: "haiku"  as ModelTier, maxTokens: 1024, cache: true  },
+  approval_summary:     { model: "haiku"  as ModelTier, maxTokens: 150,  cache: false },
+  risk_alert:           { model: "haiku"  as ModelTier, maxTokens: 250,  cache: true  },
+  portfolio_summary:    { model: "haiku"  as ModelTier, maxTokens: 400,  cache: true  },
+  command_parse:        { model: "haiku"  as ModelTier, maxTokens: 150,  cache: false },
+  rebalance_check:      { model: "haiku"  as ModelTier, maxTokens: 250,  cache: true  },
+  position_review:      { model: "haiku"  as ModelTier, maxTokens: 500,  cache: false },
+  strategy_generation:  { model: "sonnet" as ModelTier, maxTokens: 1500, cache: true  },
+  trade_decision:       { model: "sonnet" as ModelTier, maxTokens: 200,  cache: true  },
+  rebalance_plan:       { model: "sonnet" as ModelTier, maxTokens: 1000, cache: true  },
+  market_scan:          { model: "sonnet" as ModelTier, maxTokens: 3000, cache: true  },
+  performance_analysis: { model: "sonnet" as ModelTier, maxTokens: 600,  cache: true  },
+  deep_research:        { model: "opus"   as ModelTier, maxTokens: 2000, cache: true  },
 } as const;
 
 export type TaskType = keyof typeof TASK_CONFIG;
@@ -122,6 +123,8 @@ class LlmRouter {
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map(b => b.text).join("");
 
+    console.log(`[LLM] ${req.taskType} (${tier}) — tokens: ${inputTokens} in / ${outputTokens} out — cost: $${costUsd.toFixed(5)} — ${latencyMs}ms`);
+
     this.logToDb({
       taskType: req.taskType, model: modelId, success: true,
       input: inputTokens, output: outputTokens, cached: cachedTokens,
@@ -144,11 +147,15 @@ class LlmRouter {
     let data = req.fallback;
     let parseSuccess = false;
     try {
-      const cleaned = base.text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-      data = JSON.parse(cleaned) as T;
+      // Strip markdown fences, then extract the outermost JSON object/array
+      const stripped = base.text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/m, "").trim();
+      const start    = stripped.indexOf("{") !== -1 ? stripped.indexOf("{") : stripped.indexOf("[");
+      const end      = stripped.lastIndexOf("}") !== -1 ? stripped.lastIndexOf("}") : stripped.lastIndexOf("]");
+      const jsonStr  = start !== -1 && end > start ? stripped.slice(start, end + 1) : stripped;
+      data = JSON.parse(jsonStr) as T;
       parseSuccess = true;
     } catch {
-      console.warn(`[LlmRouter] JSON parse failed for ${req.taskType} — using fallback`);
+      console.warn(`[LlmRouter] JSON parse failed for ${req.taskType} — raw response snippet: ${base.text.slice(0, 200)}`);
     }
     return { ...base, data, parseSuccess };
   }

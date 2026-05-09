@@ -11,6 +11,11 @@ import { getPortfolioSnapshot } from "../lib/portfolio";
 
 const router: IRouter = Router();
 
+function titleCase(s: string | null | undefined): string {
+  if (!s) return "Medium";
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+}
+
 async function buildGoals(profile: { totalCapital: number; targetReturnPct: number; timeHorizonMonths: number; riskTolerance: string }) {
   const snapshot = await getPortfolioSnapshot(profile.totalCapital);
   const targetValue = profile.totalCapital * (1 + profile.targetReturnPct / 100);
@@ -30,7 +35,7 @@ async function buildGoals(profile: { totalCapital: number; targetReturnPct: numb
     totalCapital: profile.totalCapital,
     targetReturnPct: profile.targetReturnPct,
     timeHorizonMonths: profile.timeHorizonMonths,
-    riskTolerance: profile.riskTolerance,
+    riskTolerance: titleCase(profile.riskTolerance),
     goalProgressPct: Number(goalProgressPct.toFixed(1)),
     goalProgressNote,
   };

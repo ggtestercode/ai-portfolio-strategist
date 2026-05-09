@@ -1,0 +1,17 @@
+{
+  "positions": {
+    "ETH-USDT-SWAP": {
+      "id": "bf0fe71a-965f-4c5b-a402-b3c62e09ea55",
+      "instId": "ETH-USDT-SWAP",
+      "side": "long",
+      "sz": 4,
+      "contractSize": 0.1,
+      "entryPrice": 2302.25,
+      "leverage": 10,
+      "notionalUsd": 1000,
+      "marginUsd": 100,
+      "openedAt": "2026-05-03T04:37:34.383Z"
+    }
+  },
+  "equity": 9999.946
+}

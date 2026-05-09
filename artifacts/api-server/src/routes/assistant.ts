@@ -57,12 +57,14 @@ async function buildContext(): Promise<AssistantContext> {
 // POST /api/assistant/messages
 router.post("/assistant/messages", async (req, res): Promise<void> => {
   try {
-    const { message, history = [] } = req.body as {
-      message: string;
+    const { message: rawMsg, content, history = [] } = req.body as {
+      message?: string;
+      content?: string;
       history?: Array<{ role: "user" | "assistant"; content: string }>;
     };
+    const message = (content ?? rawMsg ?? "").trim();
 
-    if (!message?.trim()) {
+    if (!message) {
       res.status(400).json({ error: "message is required" });
       return;
     }
@@ -70,7 +72,6 @@ router.post("/assistant/messages", async (req, res): Promise<void> => {
     const ctx   = await buildContext();
     const reply = await generateAssistantReply(message, ctx, history);
 
-    // Persist both messages (non-fatal if it fails)
     await db.insert(assistantMessagesTable).values({ role: "user",      content: message       }).catch(() => {});
     await db.insert(assistantMessagesTable).values({ role: "assistant", content: reply.message }).catch(() => {});
 
@@ -84,13 +85,14 @@ router.post("/assistant/messages", async (req, res): Promise<void> => {
 // POST /api/command
 router.post("/command", async (req, res): Promise<void> => {
   try {
-    const { command } = req.body as { command: string };
-    if (!command?.trim()) {
-      res.status(400).json({ error: "command is required" });
+    const { prompt, command } = req.body as { prompt?: string; command?: string };
+    const text = (prompt ?? command ?? "").trim();
+    if (!text) {
+      res.status(400).json({ error: "prompt is required" });
       return;
     }
     const ctx   = await buildContext();
-    const reply = await generateAssistantReply(command, ctx);
+    const reply = await generateAssistantReply(text, ctx);
     res.json({ reply: reply.message, meta: reply._meta });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
