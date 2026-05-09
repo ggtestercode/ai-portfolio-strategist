@@ -1,9 +1,7 @@
 import { db, profileTable } from "@workspace/db";
 import { eq }               from "drizzle-orm";
 import { getProfile }       from "./profile";
-import * as okx             from "../brokers/okx";
 import * as bybit           from "../brokers/bybit";
-import { getPortfolio }     from "../brokers/etoro";
 
 export interface BrokerBalances {
   okx:   number;
@@ -12,36 +10,14 @@ export interface BrokerBalances {
   total: number;
 }
 
-interface EtoroShape {
-  clientPortfolio?: { credit?: number; positions?: Array<{ amount?: number }> };
-}
-
-async function fetchOKX(): Promise<number> {
-  try { return (await okx.getAccountBalance()).availableBalance; } catch { return 0; }
-}
 async function fetchBybit(): Promise<number> {
-  try { return (await bybit.getBalance()).availableBalance; } catch { return 0; }
-}
-async function fetchEtoro(): Promise<number> {
-  try {
-    const p = (await getPortfolio()) as EtoroShape;
-    return p?.clientPortfolio?.credit ?? 0;
-  } catch { return 0; }
+  try { return (await bybit.getBalance()).totalEquity; } catch { return 0; }
 }
 
 export async function getAllBrokerBalances(): Promise<BrokerBalances> {
-  const [okxBal, bybitBal, etoroBal] = await Promise.all([
-    fetchOKX(), fetchBybit(), fetchEtoro(),
-  ]);
-  const total = okxBal + bybitBal + etoroBal;
-  console.log(
-    "Broker balances —",
-    "OKX:", okxBal,
-    "Bybit:", bybitBal,
-    "eToro:", etoroBal,
-    "Total:", total,
-  );
-  return { okx: okxBal, bybit: bybitBal, etoro: etoroBal, total };
+  const bybitBal = await fetchBybit();
+  console.log("Broker balances — Bybit:", bybitBal);
+  return { okx: 0, bybit: bybitBal, etoro: 0, total: bybitBal };
 }
 
 // Fetches live broker balances and syncs profileTable.totalCapital so that

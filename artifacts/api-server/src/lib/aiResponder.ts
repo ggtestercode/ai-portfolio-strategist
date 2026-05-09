@@ -286,13 +286,13 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
     taskType:      "command_parse",
     systemContext: [
       "Extract trade parameters. Reply JSON only.",
-      "Default broker is OKX for all crypto. Only use 'bybit' if user explicitly says 'on Bybit'. Stocks/ETFs → broker=etoro.",
-      "Symbol: crypto with dash 'BTC-USDT' → broker=okx. Bare 'BTC','ETH','SOL' → 'BTC-USDT','ETH-USDT','SOL-USDT' broker=okx. Stocks/ETFs → broker=etoro.",
+      "Default broker is Bybit for all crypto. Only use 'okx' if user explicitly says 'on OKX'. Stocks/ETFs → broker=etoro.",
+      "Symbol: bare 'BTC','ETH','SOL' → broker=bybit. Stocks/ETFs → broker=etoro.",
       "amountUsd: null if not specified by user.",
       "orderType: 'limit' if user says 'at $X','above $X','below $X','limit $X'. Otherwise 'market'.",
       "limitPrice: the price value for limit orders, null for market orders.",
     ].join(" "),
-    prompt: `Message: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER or null","side":"buy|sell","amountUsd":number or null,"broker":"okx|etoro|bybit","assetClass":"Equity|Crypto|ETF|Commodity","orderType":"market|limit","limitPrice":number or null}`,
+    prompt: `Message: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER or null","side":"buy|sell","amountUsd":number or null,"broker":"bybit|etoro|okx","assetClass":"Equity|Crypto|ETF|Commodity","orderType":"market|limit","limitPrice":number or null}`,
     schema: {
       type: "object",
       properties: {
@@ -305,23 +305,18 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
         limitPrice: { type: ["number","null"] },
       },
     },
-    fallback: { symbol: null, side: "buy", amountUsd: null, broker: "okx", assetClass: "Crypto", orderType: "market", limitPrice: null },
+    fallback: { symbol: null, side: "buy", amountUsd: null, broker: "bybit", assetClass: "Crypto", orderType: "market", limitPrice: null },
   });
 
   const d = res.data;
   if (!d.symbol || !d.side) return null;
 
-  // Normalise symbol to OKX spot format for crypto unless explicitly Bybit
-  let symbol = d.symbol.toUpperCase().replace("/", "-").replace("-SWAP", "");
+  // Default all crypto to Bybit; only OKX if user says "on OKX" explicitly
+  let symbol = d.symbol.toUpperCase().replace("/", "-").replace("-SWAP", "").replace(/[-/]?(USDT|USDC)$/i, "");
+  const explicitOKX   = message.toLowerCase().includes("okx");
   const explicitBybit = message.toLowerCase().includes("bybit");
-  const broker = explicitBybit ? "bybit" : ((d.broker as ParsedTrade["broker"]) ?? "okx");
-
-  // Bare crypto symbols → OKX dash format
-  if (broker === "okx" && !symbol.includes("-") && !["Equity","US Equity","ETF"].includes(d.assetClass ?? "")) {
-    const quote = symbol.endsWith("USDC") ? "USDC" : "USDT";
-    const base  = symbol.replace(/USDT$/, "").replace(/USDC$/, "");
-    symbol = `${base}-${quote}`;
-  }
+  const parsedBroker  = (d.broker as ParsedTrade["broker"]) ?? "bybit";
+  const broker = explicitOKX ? "okx" : explicitBybit ? "bybit" : parsedBroker;
 
   const amountUsd     = d.amountUsd && d.amountUsd > 0 ? d.amountUsd : 0;
   const amountMissing = !d.amountUsd || d.amountUsd <= 0;

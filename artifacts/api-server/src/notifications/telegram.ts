@@ -660,15 +660,12 @@ export function startPolling(): void {
     }
   });
 
-  // ── /positions — OKX + eToro combined ────────────────────────────────────
+  // ── /positions — Bybit live only ─────────────────────────────────────────
   b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [okxPos, bybitPos, etoroRawPos, etoroPendingOrders, localPending] = await Promise.all([
-        okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
+      const [bybitPos, localPending] = await Promise.all([
         bybitGetPositions().catch(() => []),
-        etoroGetPositions().catch(() => []),
-        etoroGetOrders().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
 
@@ -676,86 +673,29 @@ export function startPolling(): void {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
       }) + " SGT";
 
-      if (!okxPos.length && !bybitPos.length && !etoroRawPos.length && !etoroPendingOrders.length && !localPending.length) {
+      if (!bybitPos.length && !localPending.length) {
         await b.sendMessage(chatId,
           `📊 No open positions or pending orders.\n<i>Last synced: ${now}</i>`,
           { parse_mode: "HTML" });
         return;
       }
 
-      const out: string[] = [`📊 <b>Positions</b>`, ``];
+      const out: string[] = [`📊 <b>Positions — Bybit Live (${bybitPos.length})</b>`, ``];
 
-      if (bybitPos.length) {
-        const isTestnet = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") !== "live";
-        const mode = isTestnet ? "Testnet" : "Live";
-        out.push(`<b>Bybit ${mode} (${bybitPos.length}):</b>`);
-        for (const p of bybitPos) {
-          const sign        = p.pnl >= 0 ? "+" : "";
-          const pnlStr      = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
-          const testnetNote = isTestnet ? " ⚠️ testnet price" : "";
-          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${testnetNote}${pnlStr}`);
-        }
-        out.push(``);
-      }
-
-      if (okxPos.length) {
-        const mode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
-        const significantOkx = okxPos.filter(p => (p.entryPrice * p.size + p.pnl) >= 1);
-        const dustOkxCount   = okxPos.length - significantOkx.length;
-        out.push(`<b>OKX ${mode} (${significantOkx.length}):</b>`);
-        for (const p of significantOkx) {
-          const sign         = p.pnl >= 0 ? "+" : "";
-          const base         = p.symbol.split("-")[0] ?? p.symbol;
-          const sizeStr      = `${p.size.toFixed(6)} ${base}`;
-          const currentValue = p.entryPrice * p.size + p.pnl;
-          const valueStr     = `$${currentValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-          const pnlStr       = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
-          out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${sizeStr} · value ${valueStr} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}${pnlStr}`);
-        }
-        if (dustOkxCount > 0) out.push(`<i>⚠️ ${dustOkxCount} dust position(s) hidden (value &lt; $1) — use /closedust to clean up</i>`);
-        out.push(``);
-      }
-
-      if (etoroRawPos.length) {
-        // Aggregate by symbol, filter dust
-        const etoroAgg = new Map<string, { value: number; profit: number; openRate: number }>();
-        for (const p of etoroRawPos) {
-          const sym = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase();
-          const cur = etoroAgg.get(sym) ?? { value: 0, profit: 0, openRate: p.openRate };
-          etoroAgg.set(sym, { value: cur.value + p.amountUsd, profit: cur.profit + p.profit, openRate: cur.openRate });
-        }
-        const significantEtoro = [...etoroAgg.entries()].filter(([, d]) => d.value >= 1);
-        const dustEtoroCount   = etoroAgg.size - significantEtoro.length;
-        out.push(`<b>eToro Demo (${significantEtoro.length}):</b>`);
-        for (const [sym, d] of significantEtoro) {
-          const sign  = d.profit >= 0 ? "+" : "";
-          const entry = d.openRate ? ` · entry $${d.openRate.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "";
-          out.push(`• <b>${escapeHtml(sym)}</b> — $${d.value.toFixed(2)} long${entry} · P/L ${sign}$${d.profit.toFixed(2)}`);
-        }
-        if (dustEtoroCount > 0) out.push(`<i>⚠️ ${dustEtoroCount} dust position(s) hidden (value &lt; $1) — use /closedust to clean up</i>`);
-        out.push(``);
-      }
-
-      if (etoroPendingOrders.length) {
-        out.push(`<b>eToro Pending Orders (${etoroPendingOrders.length}) — awaiting market open:</b>`);
-        for (const o of etoroPendingOrders) {
-          const t   = o.placedAt ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT" : "recently";
-          const sym = displaySymbol(o.symbol);
-          out.push(`• <b>${escapeHtml(sym)}</b> — ${o.side.toUpperCase()} $${o.amountUsd.toFixed(2)} · placed ${t}`);
-        }
-        out.push(``);
+      for (const p of bybitPos) {
+        const sign   = p.pnl >= 0 ? "+" : "";
+        const pnlStr = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
+        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}${pnlStr}`);
       }
 
       if (localPending.length) {
-        out.push(`<b>Pending (${localPending.length}):</b>`);
+        out.push(``, `<b>Pending approvals (${localPending.length}):</b>`);
         for (const o of localPending) {
-          const t = o.queuedAt.toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT";
-          out.push(`• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} [${o.broker}] · placed ${t} · waiting for market open`);
+          out.push(`• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()} $${o.amountUsd} [${o.broker}]`);
         }
-        out.push(``);
       }
 
-      out.push(`<i>Last synced: ${now}</i>`);
+      out.push(``, `<i>Last synced: ${now}</i>`);
       await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
@@ -892,73 +832,23 @@ export function startPolling(): void {
     }
   });
 
-  // ── /balance — Bybit + OKX + eToro account balances ─────────────────────────
+  // ── /balance — Bybit live balance ────────────────────────────────────────
   b.onText(/^\/balance(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [bybitBal, okxBal, etoroPortfolio] = await Promise.all([
-        bybitGetBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
-        okxPaperMode
-          ? getBalancePaper().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }))
-          : getAccountBalance().catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) })),
-        getPortfolio().catch(() => null),
-      ]);
+      const bal = await bybitGetBalance();
+      const positions = await bybitGetPositions().catch(() => []);
+      const inPositions = positions.reduce((s, p) => s + p.size * p.entryPrice, 0);
 
-      interface EtoroPortfolio {
-        clientPortfolio?: {
-          credit?:    number;
-          positions?: Array<{ amount?: number }>;
-          [k: string]: unknown;
-        };
-        [k: string]: unknown;
-      }
-      const cp           = (etoroPortfolio as EtoroPortfolio | null)?.clientPortfolio;
-      const etoroCash    = cp?.credit ?? 0;
-      const etoroInvested = (cp?.positions ?? []).reduce((s, p) => s + (p.amount ?? 0), 0);
-      const etoroTotal   = etoroCash + etoroInvested;
-
-      const out: string[] = [`💰 <b>Account Balance</b>`, ``];
-
-      const bybitMode = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet";
-      if ("error" in bybitBal) {
-        out.push(`<b>Bybit ${bybitMode}:</b> ❌ ${escapeHtml(bybitBal.error)}`, ``);
-      } else {
-        out.push(
-          `<b>Bybit ${bybitMode}:</b>`,
-          `Total equity: <b>$${bybitBal.totalEquity.toFixed(2)}</b>`,
-          `Available: <b>$${bybitBal.availableBalance.toFixed(2)}</b>`,
-          ``
-        );
-      }
-
-      const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
-      if ("error" in okxBal) {
-        out.push(`<b>OKX ${okxMode}:</b> ❌ ${escapeHtml(okxBal.error)}`, ``);
-      } else {
-        out.push(
-          `<b>OKX ${okxMode}:</b>`,
-          `Total equity: <b>$${okxBal.totalEquity.toFixed(2)}</b>`,
-          `Available: <b>$${okxBal.availableBalance.toFixed(2)}</b>`,
-          ``
-        );
-      }
-
-      out.push(
-        `<b>eToro Demo:</b>`,
-        `Cash: <b>$${etoroCash.toFixed(2)}</b>`,
-        `Invested: <b>$${etoroInvested.toFixed(2)}</b>`,
-        `Total: <b>$${etoroTotal.toFixed(2)}</b>`,
-        ``
-      );
-
-      const bybitTotal = "error" in bybitBal ? 0 : bybitBal.totalEquity;
-      const okxTotal   = "error" in okxBal   ? 0 : okxBal.totalEquity;
-      out.push(
-        `Combined: <b>$${(bybitTotal + okxTotal + etoroTotal).toFixed(2)}</b>`,
+      await b.sendMessage(chatId, [
+        `💰 <b>Bybit Live</b>`,
+        ``,
+        `Total equity: <b>$${bal.totalEquity.toFixed(2)}</b>`,
+        `Available: <b>$${bal.availableBalance.toFixed(2)}</b>`,
+        `In positions: <b>$${inPositions.toFixed(2)}</b> (${positions.length} open)`,
+        ``,
         `<i>${utcNow()}</i>`,
-      );
-
-      await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
+      ].join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /balance failed: ${escapeHtml(m)}`);
@@ -1048,60 +938,48 @@ export function startPolling(): void {
     }
   });
 
-  // ── /status — full bot status ─────────────────────────────────────────────
+  // ── /status — Bybit live status ──────────────────────────────────────────
   b.onText(/^\/status(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [snap, config, cron, leverage, suspended, dailyPnl, okxPos, bybitPos, etoroPos, localPending] =
+      const [config, cron, dailyPnl, bybitBal, bybitPos, localPending] =
         await Promise.all([
-          getPortfolioSnapshot(0).catch(() => null),
           approvalGate.getConfig(),
           Promise.resolve(getCronStatus()),
-          getPortfolioLeverage().catch(() => 10),
-          getSuspendedCoins().catch(() => [] as string[]),
           getDailyPnl().catch(() => 0),
-          okxPaperMode ? getPositionsPaper().catch(() => []) : okxGetPositions().catch(() => []),
+          bybitGetBalance().catch(() => null),
           bybitGetPositions().catch(() => []),
-          etoroGetPositions().catch(() => []),
           Promise.resolve(getPendingOrders()),
         ]);
 
-      // Count unique eToro symbols
-      const etoroSymbolCount = new Set(etoroPos.map(p => p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "").toUpperCase())).size;
-
-      const okxMode    = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
-      const bybitMode  = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet";
-      const openCount  = okxPos.length + bybitPos.length + etoroSymbolCount;
       const pnlSign    = dailyPnl >= 0 ? "+" : "";
       const dailyLimit = process.env["DAILY_LOSS_LIMIT_PCT"] ?? "30";
+      const maxTrade   = process.env["MAX_AUTO_TRADE_USD"] ?? "5";
       const lastScan   = cron.lastScan
         ? cron.lastScan.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
         : "Never";
+      const nextScanNote = cron.enabled && cron.interval !== "disabled"
+        ? `Schedule: <code>${escapeHtml(cron.interval)}</code>`
+        : `Auto-scanner: ⏸ Off`;
 
       await b.sendMessage(chatId, [
         `🤖 <b>Bot Status</b>`,
-        `<i>${utcNow()}</i>`,
         ``,
         `Mode: <b>${config.mode}</b>`,
         `Trading: <b>${cron.paused ? "🛑 Paused" : "▶️ Active"}</b>`,
-        `Auto-scanner: <b>${cron.enabled ? "✅ On" : "⏸ Off"}</b>`,
-        `Schedule: <code>${escapeHtml(cron.interval)}</code>`,
-        `Last scan: ${lastScan}`,
         ``,
-        `💼 <b>Portfolio</b>`,
-        snap ? `Total: <b>$${snap.totalValue.toFixed(2)}</b>` : "",
+        `💼 <b>Bybit Live</b>`,
+        bybitBal ? `Balance: <b>$${bybitBal.totalEquity.toFixed(2)}</b>` : `Balance: ❌ unavailable`,
+        `Open positions: <b>${bybitPos.length}</b>`,
         `Daily P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b>`,
-        ``,
-        `📊 <b>Positions (${openCount} open)</b>`,
-        `OKX ${okxMode}: <b>${okxPos.length}</b>`,
-        `Bybit ${bybitMode}: <b>${bybitPos.length}</b>`,
-        `eToro Demo: <b>${etoroSymbolCount}</b>`,
-        `Pending approvals: <b>${localPending.length}</b>`,
-        suspended.length ? `Suspended: <b>${suspended.map(escapeHtml).join(", ")}</b>` : "",
+        localPending.length ? `Pending approvals: <b>${localPending.length}</b>` : "",
         ``,
         `⚙️ <b>Settings</b>`,
-        `Portfolio leverage: <b>${leverage}x</b>`,
-        `Daily P/L limit: <b>-${dailyLimit}%</b>`,
+        `Leverage: <b>10x</b>`,
+        `Per trade: <b>$${maxTrade} margin ($${parseInt(maxTrade) * 10} notional)</b>`,
+        `Daily loss limit: <b>-${dailyLimit}%</b>`,
+        nextScanNote,
+        `Last scan: ${lastScan}`,
       ].filter(Boolean).join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);

@@ -319,6 +319,8 @@ async function evaluateAndExecuteSignal(
 const STOP_LOSS_PCT = 40; // close if down 40%
 
 async function checkAndAutoClose(): Promise<void> {
+  // OKX auto-close skipped — Bybit-only mode. Bybit positions managed manually.
+  return;
   try {
     const [{ totalCapital }] = await db.select({ totalCapital: profileTable.totalCapital }).from(profileTable).limit(1).catch(() => [{ totalCapital: 0 }]);
     const [profile] = await db.select().from(profileTable).limit(1).catch(() => [null]);
