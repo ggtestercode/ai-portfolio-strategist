@@ -1,6 +1,6 @@
 import { approvalGate }           from "./approvalGate";
 import { openPosition }            from "../brokers/etoro";
-import { openPosition as bybitOpen } from "../brokers/bybit";
+import { openPosition as bybitOpen, setOneWayMode as bybitSetOneWayMode } from "../brokers/bybit";
 import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
 import { openPositionPaper }       from "../brokers/okxPaper";
 import { sendApprovalRequest }     from "../notifications/telegram";
@@ -15,6 +15,8 @@ export async function initBrokers(): Promise<void> {
     const result = await openPosition(symbol, p.amountUsd, p.side === "buy");
     return { orderId: result.positionId };
   });
+
+  await bybitSetOneWayMode().catch(e => console.warn("[startup] Bybit set-one-way-mode failed:", e.message));
 
   approvalGate.registerExecutor("bybit", async (p) => {
     const leverage = 10;

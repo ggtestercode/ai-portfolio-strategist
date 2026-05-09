@@ -152,6 +152,14 @@ export async function getBalance(): Promise<BybitBalance> {
 }
 
 // ── Trading ───────────────────────────────────────────────────────────────────
+export async function setOneWayMode(): Promise<void> {
+  await bpost("/v5/position/switch-mode", { category: "linear", mode: 0 })
+    .catch(e => {
+      // 110025 = already in one-way mode
+      if (!e.message.includes("110025")) throw e;
+    });
+}
+
 export async function setLeverage(symbol: string, leverage: number): Promise<void> {
   const sym = normalise(symbol);
   await bpost("/v5/position/set-leverage", { category: "linear", symbol: sym, buyLeverage: String(leverage), sellLeverage: String(leverage) })
@@ -177,7 +185,7 @@ export async function openPosition(symbol: string, side: "Buy" | "Sell", amountU
   const r = await bpost<{ orderId: string }>("/v5/order/create", {
     category: "linear", symbol: sym, side,
     orderType: "Market", qty: qtyStr,
-    timeInForce: "IOC", reduceOnly: false,
+    timeInForce: "IOC", reduceOnly: false, positionIdx: 0,
   });
   console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x → orderId=${r.orderId}`);
   return { orderId: r.orderId, entryPrice: markPrice };
@@ -189,7 +197,7 @@ export async function closePosition(symbol: string): Promise<{ orderId: string; 
   const pos       = positions.find(p => p.symbol === sym);
   if (!pos || pos.size <= 0) throw new Error(`Bybit: no open position for ${sym}`);
   const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
-  const r = await bpost<{ orderId: string }>("/v5/order/create", { category: "linear", symbol: sym, side: closeSide, orderType: "Market", qty: String(pos.size), reduceOnly: true });
+  const r = await bpost<{ orderId: string }>("/v5/order/create", { category: "linear", symbol: sym, side: closeSide, orderType: "Market", qty: String(pos.size), reduceOnly: true, positionIdx: 0 });
   console.log(`[Bybit] Close ${sym} qty=${pos.size} orderId=${r.orderId}`);
   return { orderId: r.orderId, entryPrice: pos.entryPrice, size: pos.size, side: pos.side };
 }
