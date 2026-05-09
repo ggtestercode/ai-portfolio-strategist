@@ -100,11 +100,11 @@ async function setSlTpForExistingPositions(): Promise<void> {
     }).catch(() => ({ data: { stopLoss: 0, takeProfit: 0, method: "percent" }, parseSuccess: false }));
 
     if (!hasSl && res.data.stopLoss > 0) {
-      await bybitSetStopLoss(pos.symbol, res.data.stopLoss)
+      await bybitSetStopLoss(pos.symbol, res.data.stopLoss, pos.positionIdx)
         .catch(e => console.warn(`[startup] SL ${pos.symbol}: ${e.message}`));
     }
     if (!hasTp && res.data.takeProfit > 0) {
-      await bybitSetTakeProfit(pos.symbol, res.data.takeProfit)
+      await bybitSetTakeProfit(pos.symbol, res.data.takeProfit, pos.positionIdx)
         .catch(e => console.warn(`[startup] TP ${pos.symbol}: ${e.message}`));
     }
     console.log(`[startup] SL/TP set for ${pos.symbol}: SL=$${res.data.stopLoss} TP=$${res.data.takeProfit} (${res.data.method})`);

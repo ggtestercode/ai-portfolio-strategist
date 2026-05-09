@@ -66,7 +66,7 @@ function normalise(symbol: string): string {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface BybitTicker  { symbol: string; lastPrice: number; bid: number; ask: number; change24h: number }
-export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; leverage: number; pnl: number; pnlPct: number; stopLoss?: number; takeProfit?: number }
+export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; leverage: number; pnl: number; pnlPct: number; stopLoss?: number; takeProfit?: number; positionIdx: number }
 export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string }
 export interface BybitBalance { totalEquity: number; availableBalance: number; currency: string }
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
@@ -112,7 +112,7 @@ export async function getAllSymbols(): Promise<string[]> {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 export async function getPositions(): Promise<BybitPosition[]> {
-  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string };
+  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; positionIdx: number };
   const r = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear", settleCoin: "USDT" });
   console.log("[Bybit] Raw positions (settleCoin=USDT):", JSON.stringify(r.list));
 
@@ -131,7 +131,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
     const cost      = parseFloat(p.size) * entry;
     const sl        = parseFloat(p.stopLoss)   || undefined;
     const tp        = parseFloat(p.takeProfit) || undefined;
-    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size: parseFloat(p.size), entryPrice: entry, leverage: parseFloat(p.leverage), pnl, pnlPct: cost > 0 ? (pnl / cost) * 100 : 0, stopLoss: sl, takeProfit: tp };
+    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size: parseFloat(p.size), entryPrice: entry, leverage: parseFloat(p.leverage), pnl, pnlPct: cost > 0 ? (pnl / cost) * 100 : 0, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0 };
   });
 }
 
@@ -154,13 +154,24 @@ export async function getBalance(): Promise<BybitBalance> {
 }
 
 // ── Trading ───────────────────────────────────────────────────────────────────
-export async function setOneWayMode(): Promise<void> {
-  await bpost("/v5/position/switch-mode", { category: "linear", coin: "USDT", mode: 0 })
-    .catch(e => {
-      // 110025 = already in one-way mode
-      if (!e.message.includes("110025")) throw e;
-    });
+
+// Try to switch a single symbol to hedge mode (mode=3, positionIdx 1=long / 2=short).
+// Silently ignores failure — symbol may already be in hedge mode or have open positions
+// that prevent switching (those stay on positionIdx=0 one-way).
+async function setHedgeModeForSymbol(symbol: string): Promise<boolean> {
+  try {
+    await bpost("/v5/position/switch-mode", { category: "linear", symbol, mode: 3 });
+    return true;
+  } catch (e: any) {
+    // 110025 = already in the requested mode
+    if (e.message?.includes("110025")) return true;
+    // anything else (e.g. open position exists) → fall back to one-way
+    return false;
+  }
 }
+
+// Kept for backward-compat import in startup.ts — now a no-op (hedge mode is set per-symbol)
+export async function setOneWayMode(): Promise<void> { return; }
 
 export async function setLeverage(symbol: string, leverage: number): Promise<void> {
   const sym = normalise(symbol);
@@ -179,6 +190,12 @@ export async function openPosition(
   const sym = normalise(symbol);
   await setLeverage(sym, leverage);
 
+  // Try to switch this symbol to hedge mode so longs and shorts can coexist.
+  // positionIdx 1 = hedge-long (Buy), positionIdx 2 = hedge-short (Sell).
+  // Falls back to positionIdx 0 (one-way) if the symbol already has an open position.
+  const hedged     = await setHedgeModeForSymbol(sym);
+  const positionIdx = hedged ? (side === "Buy" ? 1 : 2) : 0;
+
   const [ticker, filters] = await Promise.all([getTicker(sym), getInstrumentFilters(sym)]);
   const markPrice = ticker.lastPrice;
   const tickDp    = String(filters.tickSize).split(".")[1]?.length ?? 2;
@@ -189,18 +206,18 @@ export async function openPosition(
   const qtyStr  = qty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
 
   const orderValue = qty * markPrice;
-  console.log(`[Bybit] Order: ${sym} price=$${markPrice} amountUsd=$${amountUsd} rawQty=${rawQty.toFixed(6)} finalQty=${qtyStr} minQty=${filters.minQty} qtyStep=${filters.qtyStep} orderValue=$${orderValue.toFixed(2)} orderType=Market`);
+  console.log(`[Bybit] Order:`, { symbol: sym, side, positionIdx, direction: side === "Buy" ? "long" : "short", qty: qtyStr, SL: opts?.stopLoss ?? "none", TP: opts?.takeProfit ?? "none", orderValue: orderValue.toFixed(2) });
 
   const orderBody: Record<string, unknown> = {
     category: "linear", symbol: sym, side,
     orderType: "Market", qty: qtyStr,
-    timeInForce: "IOC", reduceOnly: false, positionIdx: 0,
+    timeInForce: "IOC", reduceOnly: false, positionIdx,
   };
   if (opts?.stopLoss)   orderBody["stopLoss"]   = (Math.round(opts.stopLoss   / filters.tickSize) * filters.tickSize).toFixed(tickDp);
   if (opts?.takeProfit) orderBody["takeProfit"] = (Math.round(opts.takeProfit / filters.tickSize) * filters.tickSize).toFixed(tickDp);
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", orderBody);
-  console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} → orderId=${r.orderId}`);
+  console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} → orderId=${r.orderId}`);
   return { orderId: r.orderId, entryPrice: markPrice };
 }
 
@@ -210,30 +227,33 @@ export async function closePosition(symbol: string): Promise<{ orderId: string; 
   const pos       = positions.find(p => p.symbol === sym);
   if (!pos || pos.size <= 0) throw new Error(`Bybit: no open position for ${sym}`);
   const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
-  const r = await bpost<{ orderId: string }>("/v5/order/create", { category: "linear", symbol: sym, side: closeSide, orderType: "Market", qty: String(pos.size), reduceOnly: true, positionIdx: 0 });
-  console.log(`[Bybit] Close ${sym} qty=${pos.size} orderId=${r.orderId}`);
+  const r = await bpost<{ orderId: string }>("/v5/order/create", { category: "linear", symbol: sym, side: closeSide, orderType: "Market", qty: String(pos.size), reduceOnly: true, positionIdx: pos.positionIdx });
+  console.log(`[Bybit] Close ${sym} qty=${pos.size} posIdx=${pos.positionIdx} orderId=${r.orderId}`);
   return { orderId: r.orderId, entryPrice: pos.entryPrice, size: pos.size, side: pos.side as "Buy" | "Sell" };
 }
 
 export async function setTrailingStop(symbol: string, trailingPct = 0.40): Promise<void> {
-  const sym    = normalise(symbol);
-  const ticker = await getTicker(sym).catch(() => null);
+  const sym       = normalise(symbol);
+  const positions = await getPositions().catch(() => [] as BybitPosition[]);
+  const pos       = positions.find(p => p.symbol === sym);
+  const posIdx    = pos?.positionIdx ?? 0;
+  const ticker    = await getTicker(sym).catch(() => null);
   if (!ticker) return;
   const trail  = (ticker.lastPrice * trailingPct).toFixed(2);
-  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, trailingStop: trail, positionIdx: 0 })
+  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, trailingStop: trail, positionIdx: posIdx })
     .catch(e => console.warn(`[Bybit] setTrailingStop ${sym}: ${e.message}`));
-  console.log(`[Bybit] Trailing stop ${trailingPct * 100}% on ${sym} ≈ $${trail}`);
+  console.log(`[Bybit] Trailing stop ${trailingPct * 100}% on ${sym} posIdx=${posIdx} ≈ $${trail}`);
 }
 
-export async function setStopLoss(symbol: string, stopLossPrice: number): Promise<void> {
+export async function setStopLoss(symbol: string, stopLossPrice: number, positionIdx = 0): Promise<void> {
   const sym = normalise(symbol);
-  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, stopLoss: String(stopLossPrice), positionIdx: 0 })
+  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, stopLoss: String(stopLossPrice), positionIdx })
     .catch(e => console.warn(`[Bybit] setStopLoss ${sym}: ${e.message}`));
 }
 
-export async function setTakeProfit(symbol: string, takeProfitPrice: number): Promise<void> {
+export async function setTakeProfit(symbol: string, takeProfitPrice: number, positionIdx = 0): Promise<void> {
   const sym = normalise(symbol);
-  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, takeProfit: String(takeProfitPrice), positionIdx: 0 })
+  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, takeProfit: String(takeProfitPrice), positionIdx })
     .catch(e => console.warn(`[Bybit] setTakeProfit ${sym}: ${e.message}`));
 }
 
@@ -299,9 +319,9 @@ export async function closePartialByAmount(symbol: string, amountUsd: number): P
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", {
     category: "linear", symbol: sym, side: closeSide,
-    orderType: "Market", qty: qtyStr, reduceOnly: true,
+    orderType: "Market", qty: qtyStr, reduceOnly: true, positionIdx: pos.positionIdx,
   });
-  console.log(`[Bybit] Partial close ${sym} ~$${amountUsd} qty=${qtyStr} orderId=${r.orderId}`);
+  console.log(`[Bybit] Partial close ${sym} ~$${amountUsd} qty=${qtyStr} posIdx=${pos.positionIdx} orderId=${r.orderId}`);
   return { orderId: r.orderId };
 }
 
@@ -320,9 +340,9 @@ export async function closePercentPosition(symbol: string, pct: number): Promise
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", {
     category: "linear", symbol: sym, side: closeSide,
-    orderType: "Market", qty: qtyStr, reduceOnly: true,
+    orderType: "Market", qty: qtyStr, reduceOnly: true, positionIdx: pos.positionIdx,
   });
-  console.log(`[Bybit] Close ${pct}% of ${sym} qty=${qtyStr} orderId=${r.orderId}`);
+  console.log(`[Bybit] Close ${pct}% of ${sym} qty=${qtyStr} posIdx=${pos.positionIdx} orderId=${r.orderId}`);
   return { orderId: r.orderId };
 }
 
