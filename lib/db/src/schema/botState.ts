@@ -6,14 +6,29 @@ export interface CoinPenalty {
   suspended:       boolean;
 }
 
+export interface PositionMeta {
+  originalQty: number;
+  entryPrice:  number;
+  atr:         number;
+  tp1:         number;
+  tp2:         number;
+  openedAt:    number; // epoch ms
+}
+
 export const botStateTable = pgTable("bot_state", {
-  id:                integer("id").primaryKey().default(1),
-  portfolioLeverage: integer("portfolio_leverage").notNull().default(10),
-  coinPenalties:     jsonb("coin_penalties").$type<Record<string, CoinPenalty>>().notNull().default({}),
-  dailyPnl:          real("daily_pnl").notNull().default(0),
-  tradingPaused:     boolean("trading_paused").notNull().default(false),
-  pausedReason:      text("paused_reason"),
-  lastUpdated:       timestamp("last_updated", { withTimezone: true }).notNull().defaultNow(),
+  id:                   integer("id").primaryKey().default(1),
+  portfolioLeverage:    integer("portfolio_leverage").notNull().default(10),
+  coinPenalties:        jsonb("coin_penalties").$type<Record<string, CoinPenalty>>().notNull().default({}),
+  dailyPnl:             real("daily_pnl").notNull().default(0),
+  tradingPaused:        boolean("trading_paused").notNull().default(false),
+  pausedReason:         text("paused_reason"),
+  lastUpdated:          timestamp("last_updated", { withTimezone: true }).notNull().defaultNow(),
+  // 5-layer architecture additions
+  peakEquity:           real("peak_equity"),
+  currentRegime:        text("current_regime"),
+  regimeChangedAt:      timestamp("regime_changed_at", { withTimezone: true }),
+  dailyLossStartEquity: real("daily_loss_start_equity"),
+  positionMetadata:     jsonb("position_metadata").$type<Record<string, PositionMeta>>().notNull().default({}),
 });
 
 export type BotState       = typeof botStateTable.$inferSelect;

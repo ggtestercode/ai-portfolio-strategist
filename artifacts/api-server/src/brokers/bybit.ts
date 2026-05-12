@@ -66,7 +66,7 @@ function normalise(symbol: string): string {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface BybitTicker  { symbol: string; lastPrice: number; bid: number; ask: number; change24h: number }
-export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; leverage: number; pnl: number; pnlPct: number; stopLoss?: number; takeProfit?: number; positionIdx: number }
+export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; leverage: number; pnl: number; pnlPct: number; stopLoss?: number; takeProfit?: number; positionIdx: number; openTime: number }
 export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string }
 export interface BybitBalance { totalEquity: number; availableBalance: number; currency: string }
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
@@ -131,7 +131,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
     const cost      = parseFloat(p.size) * entry;
     const sl        = parseFloat(p.stopLoss)   || undefined;
     const tp        = parseFloat(p.takeProfit) || undefined;
-    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size: parseFloat(p.size), entryPrice: entry, leverage: parseFloat(p.leverage), pnl, pnlPct: cost > 0 ? (pnl / cost) * 100 : 0, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0 };
+    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size: parseFloat(p.size), entryPrice: entry, leverage: parseFloat(p.leverage), pnl, pnlPct: cost > 0 ? (pnl / cost) * 100 : 0, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0, openTime: parseInt((p as any).openTime ?? "0") };
   });
 }
 
@@ -140,6 +140,12 @@ export async function getOrders(): Promise<BybitOrder[]> {
     "/v5/order/realtime", { category: "linear" }
   ).catch(() => ({ list: [] as Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string }> }));
   return r.list.map(o => ({ orderId: o.orderId, symbol: o.symbol, side: o.side, qty: parseFloat(o.qty), price: parseFloat(o.price), placedAt: new Date(parseInt(o.createdTime)).toISOString() }));
+}
+
+export async function cancelOrder(symbol: string, orderId: string): Promise<void> {
+  const sym = normalise(symbol);
+  await bpost("/v5/order/cancel", { category: "linear", symbol: sym, orderId });
+  console.log(`[Bybit] Cancelled order ${orderId} for ${sym}`);
 }
 
 export async function getBalance(): Promise<BybitBalance> {
@@ -185,7 +191,7 @@ export async function openPosition(
   amountUsd: number,
   leverage = 10,
   opts?: { stopLoss?: number; takeProfit?: number },
-): Promise<{ orderId: string; entryPrice: number; positionIdx: number }> {
+): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number }> {
   if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
   const sym = normalise(symbol);
   await setLeverage(sym, leverage);
@@ -218,7 +224,7 @@ export async function openPosition(
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", orderBody);
   console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} → orderId=${r.orderId}`);
-  return { orderId: r.orderId, entryPrice: markPrice, positionIdx };
+  return { orderId: r.orderId, entryPrice: markPrice, positionIdx, qty };
 }
 
 export async function closePosition(symbol: string): Promise<{ orderId: string; entryPrice: number; size: number; side: "Buy" | "Sell" }> {
