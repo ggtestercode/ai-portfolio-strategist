@@ -181,7 +181,10 @@ export async function runScan(): Promise<ScanResult> {
       "riskRewardRatio: for longs = (takeProfit-entry)/(entry-stopLoss); for shorts = (entry-takeProfit)/(stopLoss-entry). Must be ≥ 1.5.",
       "fundingRateContext: interpret the funding rate (positive=longs pay shorts=crowded long, negative=shorts pay=crowded short).",
       "openInterestContext: interpret OI trend (rising OI = new money entering, falling OI = positions closing).",
-      "Order type: use 'market'(IOC) for strong momentum/STRONG_BUY/STRONG_SELL. Use 'limit'(GTC) for support/resistance entries. Set limitPrice only for limit orders.",
+      "Order type decision:",
+      "  Use MARKET order (IOC) only when: price breaking out with strong momentum, strong_buy/strong_sell with volume confirmation, missing the move is worse than bad entry.",
+      "  Use LIMIT order (GTC) when: price is mid-range (not at support/resistance), better entry available on pullback — set limitPrice at nearest support (long) or resistance (short).",
+      "  NEVER enter mid-range with a market order when a pullback entry is available. Default to limit unless breakout is confirmed.",
       `Max position: $${maxPosition.toFixed(0)} (50% of capital).`,
     ].join("\n");
 
