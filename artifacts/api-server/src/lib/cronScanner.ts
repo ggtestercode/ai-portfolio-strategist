@@ -9,8 +9,18 @@ import { llm }                         from "./llmRouter";
 import {
   getPositions as bybitGetPositions,
   closePosition as bybitClose,
+  getFundingRate,
+  getKlines,
   type BybitPosition,
 } from "../brokers/bybit";
+
+function calcEMA(closes: number[], period: number): number {
+  if (closes.length < period) return closes[closes.length - 1] ?? 0;
+  const k = 2 / (period + 1);
+  let ema = closes.slice(0, period).reduce((s, v) => s + v, 0) / period;
+  for (let i = period; i < closes.length; i++) ema = (closes[i]! * k) + (ema * (1 - k));
+  return ema;
+}
 import { db, profileTable, botStateTable, tradeMemoryTable } from "@workspace/db";
 import { eq, and, desc }               from "drizzle-orm";
 
@@ -132,28 +142,111 @@ async function makePositionReview(
   if (!livePositions.length) return { positions: [] };
 
   const signalContext = opps.slice(0, 5)
-    .map(s => `${s.symbol} ${s.recommendation} score=${s.score}`)
+    .map(s => `${s.symbol} ${s.recommendation} score=${s.score} direction=${s.direction ?? "?"}`)
     .join(", ");
 
-  const positionLines = livePositions.map(p => {
+  // Fetch funding rate + 1h klines per position in parallel for richer context
+  const enriched = await Promise.allSettled(
+    livePositions.map(async pos => {
+      const [frRes, klRes] = await Promise.allSettled([
+        getFundingRate(pos.symbol),
+        getKlines(pos.symbol, "60", 50),
+      ]);
+
+      const direction = pos.side === "Buy" ? "LONG" : "SHORT";
+
+      // Funding rate alignment
+      const frRate = frRes.status === "fulfilled" ? frRes.value.rate : 0;
+      const frPct  = (frRate * 100).toFixed(4);
+      const frSign = frRate >= 0 ? "+" : "";
+      // Positive funding = longs pay shorts (crowded long = good for short, bad for long)
+      const frNote = pos.side === "Buy"
+        ? (frRate < 0  ? `funding ${frSign}${frPct}% — supports LONG (shorts paying)`
+                       : `funding ${frSign}${frPct}% — opposes LONG (longs paying, crowded)`)
+        : (frRate > 0  ? `funding ${frSign}${frPct}% — supports SHORT (longs paying, crowded)`
+                       : `funding ${frSign}${frPct}% — opposes SHORT (shorts paying)`);
+
+      // Key level from EMA20 / EMA50
+      let keyLevelNote = "no kline data";
+      if (klRes.status === "fulfilled") {
+        const closes       = klRes.value.map(k => k.close);
+        const currentPrice = closes[closes.length - 1] ?? pos.entryPrice;
+        const ema20        = calcEMA(closes, 20);
+        const ema50        = calcEMA(closes, 50);
+        const pctEma20     = Math.abs((currentPrice - ema20) / ema20 * 100);
+        const pctEma50     = Math.abs((currentPrice - ema50) / ema50 * 100);
+
+        if (pctEma20 < 1.5) {
+          keyLevelNote = `price at EMA20=$${ema20.toFixed(4)} (±${pctEma20.toFixed(1)}%) — key level`;
+        } else if (pctEma50 < 2.0) {
+          keyLevelNote = `price at EMA50=$${ema50.toFixed(4)} (±${pctEma50.toFixed(1)}%) — key level`;
+        } else if (pos.side === "Sell" && currentPrice >= ema20 && currentPrice >= ema50) {
+          keyLevelNote = `price $${currentPrice.toFixed(4)} ABOVE EMA20+EMA50 — resistance zone (favours short)`;
+        } else if (pos.side === "Buy" && currentPrice <= ema20 && currentPrice <= ema50) {
+          keyLevelNote = `price $${currentPrice.toFixed(4)} BELOW EMA20+EMA50 — support zone (favours long)`;
+        } else {
+          keyLevelNote = `price $${currentPrice.toFixed(4)} EMA20=$${ema20.toFixed(4)} EMA50=$${ema50.toFixed(4)}`;
+        }
+      }
+
+      return { direction, frNote, keyLevelNote };
+    })
+  );
+
+  const positionLines = livePositions.map((p, i) => {
     const pnlStr = `${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)} (${p.pnlPct.toFixed(2)}%)`;
     const slStr  = p.stopLoss   ? ` SL=$${p.stopLoss}`   : "";
     const tpStr  = p.takeProfit ? ` TP=$${p.takeProfit}`  : "";
-    return `- ${p.symbol} ${p.side} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`;
+    const ctx    = enriched[i];
+    if (ctx?.status === "fulfilled") {
+      const { direction, frNote, keyLevelNote } = ctx.value;
+      return [
+        `- ${p.symbol} ${direction} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`,
+        `  Key level: ${keyLevelNote}`,
+        `  Funding:   ${frNote}`,
+      ].join("\n");
+    }
+    return `- ${p.symbol} ${p.side === "Buy" ? "LONG" : "SHORT"} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`;
   }).join("\n");
 
+  const systemContext = [
+    "You are a disciplined quant managing a Bybit live futures account. Respond JSON only.",
+    "",
+    "For each open position, consider direction:",
+    "",
+    "LONG position is profitable when price rises.",
+    "Signals supporting HOLD: bullish momentum intact, price above support, funding rate supports long.",
+    "",
+    "SHORT position is profitable when price falls.",
+    "Signals supporting HOLD: bearish momentum intact, price below resistance,",
+    "  funding rate supports short (positive = longs paying = crowded long = good for short),",
+    "  no bullish reversal signals.",
+    "",
+    "CRITICAL — for SHORT positions:",
+    "  - Price hitting resistance = thesis intact → HOLD",
+    "  - Bearish signals = good for short → HOLD",
+    "  - Bullish signals = threat to short → consider CUT",
+    "  - No bullish reversal signals = short thesis intact → HOLD",
+    "",
+    "CRITICAL — for LONG positions:",
+    "  - Price at support = thesis intact → HOLD",
+    "  - Bullish signals = good for long → HOLD",
+    "  - Bearish breakdown below support = threat → consider CUT",
+    "",
+    "NEVER apply long logic to short positions or vice versa.",
+    "RULES: ADD if P/L > +3% and not already scaled. CUT if P/L < -8% OR opposite-direction reversal confirmed. HOLD otherwise.",
+  ].join("\n");
+
   const prompt = [
-    `Market context: ${signalContext}`,
+    `Market signals: ${signalContext}`,
     ``,
     `EXISTING POSITIONS (${livePositions.length}):`,
     positionLines,
-    ``,
-    `RULES: ADD if P/L > +3% and not already scaled. CUT if P/L < -8% or trend reversed. HOLD otherwise.`,
   ].join("\n");
 
   const res = await llm.json<{ positions: PositionDecision[] }>({
     taskType:      "position_review",
-    systemContext: "You are a disciplined quant managing a Bybit live account. Respond JSON only.",
+    systemContext,
     prompt,
     schema: {
       type: "object", required: ["positions"],

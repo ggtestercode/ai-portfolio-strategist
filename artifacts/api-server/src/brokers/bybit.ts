@@ -185,7 +185,7 @@ export async function openPosition(
   amountUsd: number,
   leverage = 10,
   opts?: { stopLoss?: number; takeProfit?: number },
-): Promise<{ orderId: string; entryPrice: number }> {
+): Promise<{ orderId: string; entryPrice: number; positionIdx: number }> {
   if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
   const sym = normalise(symbol);
   await setLeverage(sym, leverage);
