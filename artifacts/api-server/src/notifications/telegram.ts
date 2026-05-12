@@ -54,6 +54,8 @@ import {
   profileTable,
   holdingsTable,
   targetAllocationsTable,
+  botStateTable,
+  type PositionMeta,
 } from "@workspace/db";
 
 let _bot: TelegramBot | null = null;
@@ -673,10 +675,12 @@ export function startPolling(): void {
   b.onText(/^\/positions(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [bybitPos, localPending] = await Promise.all([
+      const [[stateRow], bybitPos, localPending] = await Promise.all([
+        db.select({ positionMetadata: botStateTable.positionMetadata }).from(botStateTable).limit(1).catch(() => [{ positionMetadata: {} }]),
         bybitGetPositions().catch(() => []),
         Promise.resolve(getPendingOrders()),
       ]);
+      const posMeta = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
 
       const now = new Date().toLocaleTimeString("en-SG", {
         hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore",
@@ -696,7 +700,9 @@ export function startPolling(): void {
         const pnlStr = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
         const slStr  = p.stopLoss  ? `\n  SL $${p.stopLoss.toLocaleString("en-US",  { maximumFractionDigits: 4 })}`  : "";
         const tpStr  = p.takeProfit ? ` · TP $${p.takeProfit.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
-        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}${pnlStr}${slStr}${tpStr}`);
+        const meta   = posMeta[p.symbol];
+        const atrStr = meta ? `\n  ATR TP1 $${meta.tp1.toLocaleString("en-US", { maximumFractionDigits: 4 })} · TP2 $${meta.tp2.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
+        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}${pnlStr}${slStr}${tpStr}${atrStr}`);
       }
 
       if (localPending.length) {
