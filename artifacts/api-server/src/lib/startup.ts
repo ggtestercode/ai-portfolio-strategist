@@ -7,6 +7,7 @@ import {
   setStopLoss     as bybitSetStopLoss,
   setTakeProfit   as bybitSetTakeProfit,
   getKlines,
+  getTicker,
   type BybitKline,
 } from "../brokers/bybit";
 import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
@@ -71,8 +72,12 @@ async function applyAtrSlTp(
     console.warn(`[startup] ${symbol} ATR SL capped at 40% from entry`);
   }
 
+  // Validate SL is on the correct side before submitting
+  const livePrice = await getTicker(symbol).then(t => t.lastPrice).catch(() => entryPrice);
+  const slValid = (direction === "long" && sl < livePrice) || (direction === "short" && sl > livePrice);
+
   await Promise.allSettled([
-    bybitSetStopLoss(symbol,  sl,  positionIdx),
+    slValid ? bybitSetStopLoss(symbol, sl, positionIdx) : Promise.resolve(),
     bybitSetTakeProfit(symbol, tp1, positionIdx),
   ]);
 
@@ -198,9 +203,18 @@ async function setSlTpForExistingPositions(): Promise<void> {
       sl = direction === "long" ? pos.entryPrice - maxSlDist : pos.entryPrice + maxSlDist;
     }
 
-    // Sync exchange SL/TP to ATR values (overrides any old values)
+    // Validate SL is on the correct side of the current price before submitting
+    const livePrice = await getTicker(pos.symbol).then(t => t.lastPrice).catch(() => 0);
+    const slValid = livePrice === 0 ||
+      (direction === "long"  && sl < livePrice) ||
+      (direction === "short" && sl > livePrice);
+
+    if (!slValid) {
+      console.warn(`[startup] ${pos.symbol} ATR SL=$${sl.toFixed(4)} above live price $${livePrice.toFixed(4)} — skipping SL, keeping existing`);
+    }
+
     await Promise.allSettled([
-      bybitSetStopLoss(pos.symbol,   sl,  pos.positionIdx),
+      slValid ? bybitSetStopLoss(pos.symbol,  sl,  pos.positionIdx) : Promise.resolve(),
       bybitSetTakeProfit(pos.symbol, tp2, pos.positionIdx),
     ]);
 
