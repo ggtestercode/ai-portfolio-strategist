@@ -187,35 +187,33 @@ async function setSlTpForExistingPositions(): Promise<void> {
       continue;
     }
 
-    const mult  = direction === "long" ? 1 : -1;
-    let   sl    = hasMeta ? existingMeta[pos.symbol]!.sl : pos.entryPrice - mult * atr * 1.5;
-    const tp1   = hasMeta ? existingMeta[pos.symbol]!.tp1 : pos.entryPrice + mult * atr * 1.0;
-    const tp2   = hasMeta ? existingMeta[pos.symbol]!.tp2 : pos.entryPrice + mult * atr * 2.0;
+    // Always recompute from current ATR — don't rely on stored values for exchange sync
+    const mult = direction === "long" ? 1 : -1;
+    let   sl   = pos.entryPrice - mult * atr * 1.5;
+    const tp1  = pos.entryPrice + mult * atr * 1.0;
+    const tp2  = pos.entryPrice + mult * atr * 2.0;
 
-    if (!hasMeta) {
-      const maxSlDist = pos.entryPrice * 0.40;
-      if (Math.abs(sl - pos.entryPrice) > maxSlDist) {
-        sl = direction === "long" ? pos.entryPrice - maxSlDist : pos.entryPrice + maxSlDist;
-      }
+    const maxSlDist = pos.entryPrice * 0.40;
+    if (Math.abs(sl - pos.entryPrice) > maxSlDist) {
+      sl = direction === "long" ? pos.entryPrice - maxSlDist : pos.entryPrice + maxSlDist;
     }
 
-    // Always sync exchange SL/TP to ATR values (override any old Claude-based values)
+    // Sync exchange SL/TP to ATR values (overrides any old values)
     await Promise.allSettled([
       bybitSetStopLoss(pos.symbol,   sl,  pos.positionIdx),
       bybitSetTakeProfit(pos.symbol, tp2, pos.positionIdx),
     ]);
 
-    if (!hasMeta) {
-      await storePositionMeta(pos.symbol, {
-        originalQty: pos.size,
-        entryPrice:  pos.entryPrice,
-        sl,
-        atr,
-        tp1,
-        tp2,
-        openedAt:    pos.openTime ?? Date.now(),
-      }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}: ${e.message}`));
-    }
+    // Always upsert metadata so sl field is populated
+    await storePositionMeta(pos.symbol, {
+      originalQty: existingMeta[pos.symbol]?.originalQty ?? pos.size,
+      entryPrice:  pos.entryPrice,
+      sl,
+      atr,
+      tp1,
+      tp2,
+      openedAt:    existingMeta[pos.symbol]?.openedAt ?? (pos.openTime ?? Date.now()),
+    }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}: ${e.message}`));
 
     console.log(`[startup] ATR SL/TP for ${pos.symbol} ${direction}: SL=$${sl.toFixed(4)} TP1=$${tp1.toFixed(4)} TP2=$${tp2.toFixed(4)}`);
   }
