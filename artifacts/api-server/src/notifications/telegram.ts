@@ -123,6 +123,10 @@ async function send(text: string, opts?: TelegramBot.SendMessageOptions): Promis
   await getBot().sendMessage(chatId, text, opts);
 }
 
+export async function checkBotHealth(): Promise<void> {
+  await getBot().getMe();
+}
+
 export async function sendAlert(text: string): Promise<void> {
   await send(text, { parse_mode: "HTML" }).catch(() => {});
 }

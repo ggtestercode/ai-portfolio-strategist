@@ -1,7 +1,7 @@
-import { db }                from "@workspace/db";
-import { sql }               from "drizzle-orm";
-import { getAccountBalance } from "../brokers/okx";
-import { getBalance }        from "../brokers/bybit";
+import { db }              from "@workspace/db";
+import { sql }             from "drizzle-orm";
+import { getBalance }      from "../brokers/bybit";
+import { checkBotHealth }  from "../notifications/telegram";
 
 const INTERVAL_MS      = 5 * 60 * 1000;
 const WATCHDOG_ENABLED = process.env["WATCHDOG_ENABLED"] !== "false";
@@ -29,9 +29,9 @@ async function check(name: string, fn: () => Promise<unknown>): Promise<boolean>
 async function runChecks(): Promise<void> {
   if (!WATCHDOG_ENABLED) return;
   await Promise.allSettled([
-    check("Database",    () => db.execute(sql`SELECT 1`)),
-    check("OKX API",     () => getAccountBalance()),
-    check("Bybit API",   () => getBalance()),
+    check("Database",     () => db.execute(sql`SELECT 1`)),
+    check("Bybit API",    () => getBalance()),
+    check("Telegram bot", () => checkBotHealth()),
   ]);
 }
 
