@@ -392,9 +392,10 @@ export function startPolling(): void {
   });
 
   // ── /mode — show current mode (no arg) or set mode ───────────────────────
-  b.onText(/^\/mode(?:@\w+)?(?:\s+(autonomous|approval))?$/, async (msg, match) => {
+  b.onText(/^\/mode(?:@\w+)?(?:\s+(autonomous|auto|approval))?$/, async (msg, match) => {
     const chatId  = String(msg.chat.id);
-    const newMode = match?.[1] as "autonomous" | "approval" | undefined;
+    const raw     = match?.[1];
+    const newMode = (raw === "auto" ? "autonomous" : raw) as "autonomous" | "approval" | undefined;
     try {
       if (!newMode) {
         const { mode, thresholdUsd } = await approvalGate.getConfig();
