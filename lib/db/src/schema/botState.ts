@@ -9,6 +9,7 @@ export interface CoinPenalty {
 export interface PositionMeta {
   originalQty: number;
   entryPrice:  number;
+  sl:          number;
   atr:         number;
   tp1:         number;
   tp2:         number;

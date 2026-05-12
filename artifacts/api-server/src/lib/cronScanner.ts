@@ -166,8 +166,9 @@ async function applyHardFilters(
   const rejected: Array<{ symbol: string; reason: string }> = [];
 
   for (const opp of opps) {
-    // Filter 1: CHOPPY regime — no new entries
-    if (regime?.regime === "CHOPPY" || regime?.regime === "EXHAUSTION") {
+    // Filter 1: non-trending regime — no new entries
+    if (regime?.regime === "CHOPPY" || regime?.regime === "RANGING" ||
+        regime?.regime === "EXHAUSTION" || regime?.regime === "VOLATILE") {
       rejected.push({ symbol: opp.symbol, reason: `regime=${regime.regime} — no new entries` });
       continue;
     }
@@ -364,9 +365,9 @@ async function checkRegimeFlattener(
     await saveBotState({ currentRegime: regime.regime, regimeChangedAt: new Date() }).catch(() => {});
   }
 
-  // Flatten 50% if regime shifted to CHOPPY or EXHAUSTION
+  // Flatten 50% if regime shifted to CHOPPY, RANGING, or EXHAUSTION
   if (
-    (regime.regime === "CHOPPY" || regime.regime === "EXHAUSTION") &&
+    (regime.regime === "CHOPPY" || regime.regime === "RANGING" || regime.regime === "EXHAUSTION") &&
     prevRegime !== regime.regime &&
     prevRegime !== "" &&
     livePositions.length > 0
@@ -617,7 +618,8 @@ function formatScanSummary(
   balance:   number,
 ): string {
   const regimeEmoji: Record<string, string> = {
-    TRENDING_UP: "📈", TRENDING_DOWN: "📉", CHOPPY: "↔️", EXHAUSTION: "⚠️", VOLATILE: "⚡",
+    STRONG_TREND: "🚀", TRENDING_UP: "📈", TRENDING_DOWN: "📉",
+    RANGING: "↕️", CHOPPY: "↔️", EXHAUSTION: "⚠️", VOLATILE: "⚡",
   };
   const re = regime ? `${regimeEmoji[regime.regime] ?? "?"} ${regime.regime} | ADX:${regime.adx.toFixed(0)} ATR:${regime.atr.toFixed(0)}` : "? Unknown";
   const dailyTag = `${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(2)} (${dailyPnl >= 0 ? "+" : ""}${balance > 0 ? (dailyPnl / balance * 100).toFixed(1) : "?"}%)`;

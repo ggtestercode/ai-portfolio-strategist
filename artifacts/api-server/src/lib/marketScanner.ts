@@ -8,7 +8,7 @@ import { db, profileTable, holdingsTable }   from "@workspace/db";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
 export type Conviction     = "low" | "medium" | "high" | "strong_buy" | "strong_sell";
-export type RegimeType     = "TRENDING_UP" | "TRENDING_DOWN" | "CHOPPY" | "EXHAUSTION" | "VOLATILE";
+export type RegimeType     = "STRONG_TREND" | "TRENDING_UP" | "TRENDING_DOWN" | "RANGING" | "CHOPPY" | "EXHAUSTION" | "VOLATILE";
 
 export interface MarketRegime {
   regime:     RegimeType;
@@ -178,19 +178,27 @@ export async function detectMarketRegime(): Promise<MarketRegime> {
     if (atrRatio > 2.0) {
       regime  = "VOLATILE";
       summary = `ATR ${atrRatio.toFixed(1)}× above 30d avg — extreme volatility`;
-    } else if (adx > 25 && prevADX > adx * 0.85 && rsi4h > 65 && price < ema20_4h) {
-      // ADX was high but declining, RSI diverging
+    } else if (adx > 35 && prevADX > adx * 1.05) {
+      // ADX was higher → declining from a strong trend
       regime  = "EXHAUSTION";
-      summary = `ADX ${adx.toFixed(1)} declining, RSI ${rsi4h.toFixed(0)} diverging — trend exhaustion`;
-    } else if (adx > 25 && diPlus > diMinus && price > ema20_4h && ema20_4h > ema50_4h) {
+      summary = `ADX ${adx.toFixed(1)} declining from peak — trend exhaustion`;
+    } else if (adx > 35) {
+      // Strong trend — direction from DI
+      const dir = diPlus >= diMinus ? "bullish" : "bearish";
+      regime  = "STRONG_TREND";
+      summary = `ADX ${adx.toFixed(1)} — strong ${dir} trend | DI+ ${diPlus.toFixed(1)} DI- ${diMinus.toFixed(1)}`;
+    } else if (adx > 25 && diPlus > diMinus) {
       regime  = "TRENDING_UP";
-      summary = `ADX ${adx.toFixed(1)}, DI+ ${diPlus.toFixed(1)} > DI- ${diMinus.toFixed(1)}, price > EMA20 > EMA50`;
-    } else if (adx > 25 && diMinus > diPlus && price < ema20_4h && ema20_4h < ema50_4h) {
+      summary = `ADX ${adx.toFixed(1)}, DI+ ${diPlus.toFixed(1)} > DI- ${diMinus.toFixed(1)}`;
+    } else if (adx > 25 && diMinus > diPlus) {
       regime  = "TRENDING_DOWN";
-      summary = `ADX ${adx.toFixed(1)}, DI- ${diMinus.toFixed(1)} > DI+ ${diPlus.toFixed(1)}, price < EMA20 < EMA50`;
+      summary = `ADX ${adx.toFixed(1)}, DI- ${diMinus.toFixed(1)} > DI+ ${diPlus.toFixed(1)}`;
+    } else if (adx >= 20) {
+      regime  = "RANGING";
+      summary = `ADX ${adx.toFixed(1)} — low trend strength, ranging`;
     } else {
       regime  = "CHOPPY";
-      summary = `ADX ${adx.toFixed(1)} < 25 — ranging/choppy, no clear trend`;
+      summary = `ADX ${adx.toFixed(1)} < 20 — directionless/choppy`;
     }
 
     console.log(`[regime] BTC 4h: ${regime} | ADX=${adx.toFixed(1)} DI+=${diPlus.toFixed(1)} DI-=${diMinus.toFixed(1)} ATR=${atr.toFixed(0)} (${atrRatio.toFixed(1)}× avg)`);

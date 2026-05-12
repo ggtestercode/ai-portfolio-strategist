@@ -698,11 +698,23 @@ export function startPolling(): void {
       for (const p of bybitPos) {
         const sign   = p.pnl >= 0 ? "+" : "";
         const pnlStr = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
-        const slStr  = p.stopLoss  ? `\n  SL $${p.stopLoss.toLocaleString("en-US",  { maximumFractionDigits: 4 })}`  : "";
-        const tpStr  = p.takeProfit ? ` · TP $${p.takeProfit.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
+        const fmt    = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 4 });
         const meta   = posMeta[p.symbol];
-        const atrStr = meta ? `\n  ATR TP1 $${meta.tp1.toLocaleString("en-US", { maximumFractionDigits: 4 })} · TP2 $${meta.tp2.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
-        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })}${pnlStr}${slStr}${tpStr}${atrStr}`);
+
+        let stopsStr: string;
+        if (meta) {
+          stopsStr = [
+            `\n  SL:  $${fmt(meta.sl)} (ATR×1.5)`,
+            `\n  TP1: $${fmt(meta.tp1)} (ATR×1.0) → close 30%`,
+            `\n  TP2: $${fmt(meta.tp2)} (ATR×2.0) → close 30% | runner: 40%`,
+          ].join("");
+        } else {
+          const slStr = p.stopLoss   ? `\n  SL $${fmt(p.stopLoss)}`  : "";
+          const tpStr = p.takeProfit ? ` · TP $${fmt(p.takeProfit)}` : "";
+          stopsStr = slStr + tpStr;
+        }
+
+        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${fmt(p.entryPrice)}${pnlStr}${stopsStr}`);
       }
 
       if (localPending.length) {

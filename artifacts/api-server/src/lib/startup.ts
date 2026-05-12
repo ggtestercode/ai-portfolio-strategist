@@ -79,6 +79,7 @@ async function applyAtrSlTp(
   await storePositionMeta(symbol, {
     originalQty,
     entryPrice,
+    sl,
     atr,
     tp1,
     tp2,
@@ -173,8 +174,8 @@ async function setSlTpForExistingPositions(): Promise<void> {
     const hasMeta = !!existingMeta[pos.symbol];
 
     if (hasSl && hasTp && hasMeta) {
-      console.log(`[startup] ${pos.symbol} already has SL/TP + metadata — skipping`);
-      continue;
+      // Metadata already set from this run — still sync exchange values to ATR
+      // (fall through — don't skip)
     }
 
     const direction = pos.side === "Buy" ? "long" : "short" as "long" | "short";
@@ -187,22 +188,28 @@ async function setSlTpForExistingPositions(): Promise<void> {
     }
 
     const mult  = direction === "long" ? 1 : -1;
-    let   sl    = pos.entryPrice - mult * atr * 1.5;
-    const tp1   = pos.entryPrice + mult * atr * 1.0;
-    const tp2   = pos.entryPrice + mult * atr * 2.0;
+    let   sl    = hasMeta ? existingMeta[pos.symbol]!.sl : pos.entryPrice - mult * atr * 1.5;
+    const tp1   = hasMeta ? existingMeta[pos.symbol]!.tp1 : pos.entryPrice + mult * atr * 1.0;
+    const tp2   = hasMeta ? existingMeta[pos.symbol]!.tp2 : pos.entryPrice + mult * atr * 2.0;
 
-    const maxSlDist = pos.entryPrice * 0.40;
-    if (Math.abs(sl - pos.entryPrice) > maxSlDist) {
-      sl = direction === "long" ? pos.entryPrice - maxSlDist : pos.entryPrice + maxSlDist;
+    if (!hasMeta) {
+      const maxSlDist = pos.entryPrice * 0.40;
+      if (Math.abs(sl - pos.entryPrice) > maxSlDist) {
+        sl = direction === "long" ? pos.entryPrice - maxSlDist : pos.entryPrice + maxSlDist;
+      }
     }
 
-    if (!hasSl) await bybitSetStopLoss(pos.symbol,   sl,  pos.positionIdx).catch(e => console.warn(`[startup] SL ${pos.symbol}: ${e.message}`));
-    if (!hasTp) await bybitSetTakeProfit(pos.symbol, tp1, pos.positionIdx).catch(e => console.warn(`[startup] TP ${pos.symbol}: ${e.message}`));
+    // Always sync exchange SL/TP to ATR values (override any old Claude-based values)
+    await Promise.allSettled([
+      bybitSetStopLoss(pos.symbol,   sl,  pos.positionIdx),
+      bybitSetTakeProfit(pos.symbol, tp2, pos.positionIdx),
+    ]);
 
     if (!hasMeta) {
       await storePositionMeta(pos.symbol, {
         originalQty: pos.size,
         entryPrice:  pos.entryPrice,
+        sl,
         atr,
         tp1,
         tp2,
