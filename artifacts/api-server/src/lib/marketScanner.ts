@@ -321,7 +321,7 @@ export async function runScan(): Promise<ScanResult> {
       regime.regime === "CHOPPY"
         ? "REGIME=CHOPPY: DO NOT suggest new entries. Return WATCH or AVOID for all signals."
       : regime.regime === "RANGING"
-        ? "REGIME=RANGING: Trend weak. No momentum entries. Limit orders only at clear support/resistance. Small size. Both directions allowed but lower conviction expected."
+        ? "REGIME=RANGING: Price oscillating between support and resistance. ONLY enter at range boundaries — SHORT when price is within 3% of the 50-period high (resistance), LONG when price is within 3% of the 50-period low (support). DO NOT enter mid-range. Include the 50-period high as entry/resistance context for shorts and 50-period low for longs. Use limit orders at or just inside the boundary. SL beyond the boundary (short: above 50-period high, long: below 50-period low). Target the opposite boundary for TP. Small size, tight SL. Both directions allowed — pick whichever boundary price is near."
       : regime.regime === "EXHAUSTION"
         ? "REGIME=EXHAUSTION: No new trend entries. Counter-trend scalps only. Force partial profits on existing winning positions."
       : regime.regime === "VOLATILE"

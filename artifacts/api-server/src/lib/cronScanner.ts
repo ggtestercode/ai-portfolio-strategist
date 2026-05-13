@@ -178,9 +178,11 @@ async function applyHardFilters(
   const rejected: Array<{ symbol: string; reason: string }> = [];
 
   for (const opp of opps) {
-    // Filter 1: non-trending regime — no new entries
-    if (regime?.regime === "CHOPPY" || regime?.regime === "RANGING" ||
-        regime?.regime === "EXHAUSTION" || regime?.regime === "VOLATILE") {
+    // Filter 1: hard regime blocks — CHOPPY (no trend/no range), EXHAUSTION, VOLATILE
+    // RANGING is allowed through: range trades at support/resistance are valid entries
+    if (regime?.regime === "CHOPPY" ||
+        regime?.regime === "EXHAUSTION" ||
+        regime?.regime === "VOLATILE") {
       rejected.push({ symbol: opp.symbol, reason: `regime=${regime.regime} — no new entries` });
       continue;
     }
@@ -201,34 +203,46 @@ async function applyHardFilters(
       const lows   = klines4h.map(k => k.low);
       const price  = closes[closes.length - 1] ?? opp.price;
 
-      // Filter 3: Price within 0.5% of 50-period high or low (HTF resistance/support)
-      const high50 = Math.max(...highs.slice(-50));
-      const low50  = Math.min(...lows.slice(-50));
+      const high50      = Math.max(...highs.slice(-50));
+      const low50       = Math.min(...lows.slice(-50));
       const pctFromHigh = Math.abs(price - high50) / high50 * 100;
       const pctFromLow  = Math.abs(price - low50)  / low50  * 100;
-      if (opp.direction === "long"  && pctFromLow  < 0.5) {
-        // At 50-period low — could be support bounce, allow
-      } else if (opp.direction === "short" && pctFromHigh < 0.5) {
-        // At 50-period high — resistance, allow for shorts
-      } else if (opp.direction === "long" && pctFromHigh < 0.5) {
-        rejected.push({ symbol: opp.symbol, reason: `near 50-period high (HTF resistance) — long rejected` });
-        continue;
-      } else if (opp.direction === "short" && pctFromLow < 0.5) {
-        rejected.push({ symbol: opp.symbol, reason: `near 50-period low (HTF support) — short rejected` });
-        continue;
-      }
 
-      // Filter 4: price vs 4h EMA20 misalignment (reactive — avoids lagging EMA50/200 that blocks all shorts in bull mkt)
-      const ema20_4h = calcEMA(closes, 20);
-      const ema50_4h = calcEMA(closes, 50);
-      const price4h  = closes[closes.length - 1] ?? opp.price;
-      if (opp.direction === "long" && price4h < ema50_4h * 0.97) {
-        rejected.push({ symbol: opp.symbol, reason: `price $${price4h.toFixed(4)} > 3% below 4h EMA50 — weak momentum for long` });
-        continue;
-      }
-      if (opp.direction === "short" && price4h > ema20_4h * 1.03) {
-        rejected.push({ symbol: opp.symbol, reason: `price $${price4h.toFixed(4)} > 3% above 4h EMA20 — strong uptrend, short rejected` });
-        continue;
+      if (regime?.regime === "RANGING") {
+        // In RANGING: only allow entries at range boundaries (within 3%)
+        // Bot advantage: catch exact turns at support/resistance
+        const BOUNDARY = 3.0;
+        if (opp.direction === "short" && pctFromHigh > BOUNDARY) {
+          rejected.push({ symbol: opp.symbol, reason: `RANGING: price ${pctFromHigh.toFixed(1)}% from resistance $${high50.toFixed(4)} — wait for boundary` });
+          continue;
+        }
+        if (opp.direction === "long" && pctFromLow > BOUNDARY) {
+          rejected.push({ symbol: opp.symbol, reason: `RANGING: price ${pctFromLow.toFixed(1)}% from support $${low50.toFixed(4)} — wait for boundary` });
+          continue;
+        }
+        // At the correct boundary — skip directional EMA filters (price oscillates in ranges)
+      } else {
+        // Filter 3: Trending regime — reject entries at wrong boundary
+        if (opp.direction === "long" && pctFromHigh < 0.5) {
+          rejected.push({ symbol: opp.symbol, reason: `near 50-period high (HTF resistance) — long rejected` });
+          continue;
+        }
+        if (opp.direction === "short" && pctFromLow < 0.5) {
+          rejected.push({ symbol: opp.symbol, reason: `near 50-period low (HTF support) — short rejected` });
+          continue;
+        }
+
+        // Filter 4: EMA trend alignment (skip in RANGING — price oscillates through EMAs)
+        const ema20_4h = calcEMA(closes, 20);
+        const ema50_4h = calcEMA(closes, 50);
+        if (opp.direction === "long" && price < ema50_4h * 0.97) {
+          rejected.push({ symbol: opp.symbol, reason: `price > 3% below 4h EMA50 — weak momentum for long` });
+          continue;
+        }
+        if (opp.direction === "short" && price > ema20_4h * 1.03) {
+          rejected.push({ symbol: opp.symbol, reason: `price > 3% above 4h EMA20 — strong uptrend, short rejected` });
+          continue;
+        }
       }
     }
 
@@ -484,9 +498,9 @@ async function checkRegimeFlattener(
     await saveBotState({ currentRegime: regime.regime, regimeChangedAt: new Date() }).catch(() => {});
   }
 
-  // Flatten 50% if regime shifted to CHOPPY, RANGING, or EXHAUSTION
+  // Flatten 50% if regime shifted to CHOPPY or EXHAUSTION (not RANGING — that allows range trades)
   if (
-    (regime.regime === "CHOPPY" || regime.regime === "RANGING" || regime.regime === "EXHAUSTION") &&
+    (regime.regime === "CHOPPY" || regime.regime === "EXHAUSTION") &&
     prevRegime !== regime.regime &&
     prevRegime !== "" &&
     livePositions.length > 0
