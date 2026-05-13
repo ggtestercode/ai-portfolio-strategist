@@ -566,7 +566,13 @@ async function makePositionReview(
   if (!livePositions.length) return { positions: [] };
 
   const signalContext = opps.slice(0, 5)
-    .map(s => `${s.symbol} ${s.recommendation} score=${s.score} direction=${s.direction ?? "?"}`)
+    .map(s => {
+      const dir = s.direction ?? "?";
+      const label = dir === "short"
+        ? (s.score ?? 0) >= 80 ? "STRONG SELL" : "SELL"
+        : s.recommendation;
+      return `${s.symbol} ${label} score=${s.score} direction=${dir}`;
+    })
     .join(", ");
 
   const enriched = await Promise.allSettled(
@@ -930,7 +936,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         amountUsd,
         assetClass:      opp.assetClass,
         broker:          "bybit",
-        rationale:       `[Cron] ${opp.recommendation} score=${opp.score} regime=${regime?.regime ?? "?"}. ${opp.reasoning ?? ""}`,
+        rationale:       `[Cron] ${opp.direction === "short" ? ((opp.score ?? 0) >= 80 ? "STRONG SELL" : "SELL") : opp.recommendation} score=${opp.score} regime=${regime?.regime ?? "?"}. ${opp.reasoning ?? ""}`,
         score:           opp.score,
         currentPrice:    opp.price,
         dataTimestamp:   opp.dataTimestamp,
