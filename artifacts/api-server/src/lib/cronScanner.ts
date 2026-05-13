@@ -743,57 +743,73 @@ async function handlePositionDecision(
 
 // ── Format scan summary for Telegram ─────────────────────────────────────────
 function formatScanSummary(
-  outcomes:  SignalOutcome[],
-  total:     number,
-  regime:    ScanResult["regime"],
-  rejected:  Array<{ symbol: string; reason: string }>,
-  dailyPnl:  number,
-  balance:   number,
+  outcomes:      SignalOutcome[],
+  signalCount:   number,
+  regime:        ScanResult["regime"],
+  rejected:       Array<{ symbol: string; reason: string }>,
+  dailyPnl:       number,
+  balance:        number,
+  openPositions:  number,
+  maxPositions:   number,
+  signalsPassed:  number,
 ): string {
   const regimeEmoji: Record<string, string> = {
     STRONG_TREND: "🚀", TRENDING_UP: "📈", TRENDING_DOWN: "📉",
     RANGING: "↕️", CHOPPY: "↔️", EXHAUSTION: "⚠️", VOLATILE: "⚡",
   };
-  const re = regime ? `${regimeEmoji[regime.regime] ?? "?"} ${regime.regime} | ADX:${regime.adx.toFixed(0)} ATR:${regime.atr.toFixed(0)}` : "? Unknown";
-  const dailyTag = `${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(2)} (${dailyPnl >= 0 ? "+" : ""}${balance > 0 ? (dailyPnl / balance * 100).toFixed(1) : "?"}%)`;
+  const re = regime ? `${regimeEmoji[regime.regime] ?? "?"} ${regime.regime} | ADX:${regime.adx.toFixed(0)}` : "? Unknown";
+  const pct = balance > 0 ? (dailyPnl / balance * 100).toFixed(1) : "?";
+  const dailyTag = `${dailyPnl >= 0 ? "+" : ""}$${dailyPnl.toFixed(2)} (${dailyPnl >= 0 ? "+" : ""}${pct}%)`;
+
+  const newEntries = outcomes.filter(o => o.action === "NEW" || o.action === "ADD");
+  const holds      = outcomes.filter(o => o.action === "HOLD");
+  const cuts       = outcomes.filter(o => o.action === "CUT");
 
   const lines = [
     `🔍 <b>Scan complete</b> — ${re}`,
     ``,
   ];
 
+  // Position review section — always shown when there are holds or cuts
+  const positionOutcomes = [...holds, ...cuts];
+  if (positionOutcomes.length) {
+    lines.push(`📊 <b>Position review (${positionOutcomes.length}):</b>`);
+    for (const o of holds) {
+      lines.push(`  • ${o.symbol} — HOLD${o.reason ? ` (${o.reason})` : ""}`);
+    }
+    for (const o of cuts) {
+      const pnlTag = o.pnlPct != null ? ` ${o.pnlPct >= 0 ? "+" : ""}${o.pnlPct.toFixed(1)}%` : "";
+      lines.push(`  • ${o.symbol} — CUT${pnlTag}${o.reason ? ` (${o.reason})` : ""}`);
+    }
+    lines.push(``);
+  }
+
+  // New entries executed
+  if (newEntries.length) {
+    lines.push(`✅ <b>Executed (${newEntries.length}):</b>`);
+    for (const o of newEntries) lines.push(`  • ${o.symbol} ${o.action} — $${o.amount ?? "?"}`);
+    lines.push(``);
+  }
+
+  // Filtered signals
   if (rejected.length) {
     lines.push(`🚫 <b>Filtered (${rejected.length}):</b>`);
     for (const r of rejected) lines.push(`  • ${r.symbol} — ${r.reason}`);
     lines.push(``);
   }
 
-  const newEntries = outcomes.filter(o => o.action === "NEW" || o.action === "ADD");
-  const holds      = outcomes.filter(o => o.action === "HOLD");
-  const cuts       = outcomes.filter(o => o.action === "CUT");
-
-  if (newEntries.length) {
-    lines.push(`📊 <b>Executed (${newEntries.length}):</b>`);
-    for (const o of newEntries) lines.push(`  • ${o.symbol} ${o.action} — $${o.amount ?? "?"}`);
-    lines.push(``);
+  // New signals result
+  if (signalsPassed > 0) {
+    lines.push(`📈 <b>New signals:</b> ${signalsPassed} above threshold → ${newEntries.length} executed`);
+  } else if (signalCount > 0) {
+    lines.push(`📈 <b>New signals:</b> none above threshold (${signalCount} scanned)`);
+  } else {
+    lines.push(`📈 <b>New signals:</b> none`);
   }
 
-  if (cuts.length) {
-    for (const o of cuts) {
-      const pnlTag = o.pnlPct != null ? ` (${o.pnlPct >= 0 ? "+" : ""}${o.pnlPct.toFixed(1)}%)` : "";
-      lines.push(`✂️ Cut: ${o.symbol}${pnlTag}`);
-    }
-    lines.push(``);
-  }
-
-  if (holds.length) {
-    lines.push(`⏸️ <b>Held (${holds.length}):</b> ${holds.map(o => o.symbol).join(", ")}`);
-  }
-
-  lines.push(`💰 Daily P/L: ${dailyTag} | Balance: $${balance.toFixed(2)}`);
-  if (outcomes.length === 0 && !rejected.length) {
-    lines.push(`⏭️ No actions taken`);
-  }
+  lines.push(``);
+  lines.push(`💰 Daily P/L: ${dailyTag}`);
+  lines.push(`💼 Positions: ${openPositions}/${maxPositions} slots | Balance: $${balance.toFixed(2)}`);
 
   return lines.join("\n");
 }
@@ -866,16 +882,28 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     // Layer 2: Apply hard filters to new signals
     const existingSyms  = new Set(livePositions.map(p => bybitSym(p.symbol)));
-    const newSignals    = cryptoOpps.filter(o =>
-      (o.conviction === "strong_buy" || o.conviction === "strong_sell") &&
-      !existingSyms.has(bybitSym(o.symbol)) &&
-      (o.score ?? 0) >= 65
-    );
 
-    const { passed: filteredSignals, rejected } = await applyHardFilters(newSignals, regime);
+    // Log all signals received from Claude for diagnostics
+    console.log(`[cronScanner] Signals from Claude: ${cryptoOpps.map(o => `${o.symbol}(score=${o.score},dir=${o.direction ?? "?"},conv=${o.conviction ?? "?"}`).join(", ")}`);
+
+    // Pre-filter: score >= 65 (removes WATCH/AVOID), skip already-held symbols
+    // Note: conviction check removed — "high" (score 65-79) is valid for both longs and shorts
+    const preRejected: Array<{ symbol: string; reason: string }> = [];
+    const newSignals = cryptoOpps.filter(o => {
+      if (existingSyms.has(bybitSym(o.symbol))) return false; // already in position
+      const score = o.score ?? 0;
+      if (score < 65) {
+        preRejected.push({ symbol: o.symbol, reason: `score ${score} below threshold (65)` });
+        return false;
+      }
+      return true;
+    });
+
+    const { passed: filteredSignals, rejected: hardRejected } = await applyHardFilters(newSignals, regime);
+    const rejected = [...preRejected, ...hardRejected];
 
     if (rejected.length) {
-      console.log(`[cronScanner] Hard filters rejected: ${rejected.map(r => `${r.symbol}(${r.reason})`).join(", ")}`);
+      console.log(`[cronScanner] Filtered out: ${rejected.map(r => `${r.symbol}(${r.reason})`).join(", ")}`);
     }
 
     // Layer 4: rank by score, take top available slots
@@ -922,7 +950,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     // Telegram summary
     const dailyPnl = await getDailyPnl().catch(() => 0);
-    const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance);
+    const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, maxPositions, filteredSignals.length);
     await alertFn?.(summary).catch(() => {});
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);
