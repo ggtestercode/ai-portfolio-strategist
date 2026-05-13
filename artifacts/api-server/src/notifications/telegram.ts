@@ -88,6 +88,20 @@ const REC_EMOJI: Record<Recommendation, string> = {
   "AVOID":      "🔴",
 };
 
+function signalLabel(o: ScanOpportunity): string {
+  if (o.direction === "short") {
+    const tag = o.score >= 80 ? "STRONG SHORT" : o.score >= 60 ? "SHORT" : o.recommendation;
+    return `🔻 ${tag} (${o.score})`;
+  }
+  if (o.direction === "long") {
+    const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
+    return `${emoji} ${o.recommendation} (${o.score})`;
+  }
+  // neutral / avoid
+  const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
+  return `${emoji} ${o.recommendation} (${o.score})`;
+}
+
 async function buildContext(): Promise<AssistantContext> {
   return getCachedContext(async () => {
     const [profile, holdings, allocations, config] = await Promise.all([
@@ -222,9 +236,8 @@ async function notifyScanComplete(result: ScanResult, triggered: "cron" | "manua
   }
 
   const lines = top.map((o, i) => {
-    const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
     return [
-      `${i + 1}. ${emoji} <b>${escapeHtml(o.symbol)}</b> — ${o.recommendation} (${o.score})`,
+      `${i + 1}. ${signalLabel(o)} <b>${escapeHtml(o.symbol)}</b>`,
       `$${o.price.toLocaleString("en-US", { maximumFractionDigits: 4 })} · <i>${new Date(o.dataTimestamp).toUTCString()}</i>`,
       escapeHtml(o.reasoning),
     ].join("\n");
@@ -432,9 +445,8 @@ export function startPolling(): void {
 
       const top5 = result.opportunities.slice(0, 5);
       const lines = top5.map((o, i) => {
-        const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
         return [
-          `${i + 1}. ${emoji} <b>${escapeHtml(o.symbol)}</b> — ${o.recommendation} (score: ${o.score})`,
+          `${i + 1}. ${signalLabel(o)} <b>${escapeHtml(o.symbol)}</b>`,
           `$${o.price.toLocaleString("en-US", { maximumFractionDigits: 4 })} | data: <i>${new Date(o.dataTimestamp).toUTCString()}</i>`,
           escapeHtml(o.reasoning),
         ].join("\n");
