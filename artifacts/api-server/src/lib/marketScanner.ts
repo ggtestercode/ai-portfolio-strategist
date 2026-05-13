@@ -316,15 +316,21 @@ export async function runScan(): Promise<ScanResult> {
           : `MEDIUM risk: balanced approach. Leverage max 10x. Target: ${targetReturn}%/period.`;
 
     // ── Regime-aware scoring weights ─────────────────────────────────────────
-    const regimeScoring = regime.regime === "CHOPPY"
-      ? "REGIME=CHOPPY: DO NOT suggest new entries. Return WATCH or AVOID for all signals. Only manage existing positions."
+    const strongTrendDir = regime.diPlus >= regime.diMinus ? "bullish" : "bearish";
+    const regimeScoring =
+      regime.regime === "CHOPPY"
+        ? "REGIME=CHOPPY: DO NOT suggest new entries. Return WATCH or AVOID for all signals."
+      : regime.regime === "RANGING"
+        ? "REGIME=RANGING: Trend weak. No momentum entries. Limit orders only at clear support/resistance. Small size. Both directions allowed but lower conviction expected."
       : regime.regime === "EXHAUSTION"
-      ? "REGIME=EXHAUSTION: No new trend entries. Consider counter-trend only. Force partial profits on any existing winning position."
+        ? "REGIME=EXHAUSTION: No new trend entries. Counter-trend scalps only. Force partial profits on existing winning positions."
       : regime.regime === "VOLATILE"
-      ? `REGIME=VOLATILE: ATR is ${(regime.atr / (regime.atrAvg30d || 1)).toFixed(1)}× above average. Halve position size. Widen SL to 2×ATR. Quick TP targets (≤1×ATR). Prefer limit orders only.`
+        ? `REGIME=VOLATILE: ATR is ${(regime.atr / (regime.atrAvg30d || 1)).toFixed(1)}× above average. Halve position size. Widen SL to 2×ATR. Quick TP (≤1×ATR). Limit orders only.`
+      : regime.regime === "STRONG_TREND"
+        ? `REGIME=STRONG_TREND (${strongTrendDir}, ADX=${regime.adx.toFixed(0)}): Very strong trend. ${strongTrendDir === "bullish" ? "Prefer longs but identify coins showing individual bearish divergence for short opportunities." : "Prefer shorts but identify coins showing individual bullish divergence for long opportunities."} Allow both directions — check each coin's own momentum.`
       : regime.regime === "TRENDING_UP"
-      ? "REGIME=TRENDING_UP: Allow longs, prefer market orders on breakouts. Wider TP (2×ATR). Trail aggressively after TP1."
-      : "REGIME=TRENDING_DOWN: Allow shorts, prefer market orders on breakdowns. Wider TP (2×ATR). Trail aggressively after TP1.";
+        ? "REGIME=TRENDING_UP: Prefer longs on breakouts. Shorts allowed on coins showing bearish divergence or weakness (price rejecting resistance, failing to follow BTC higher). Both directions valid — scan each coin individually."
+        : "REGIME=TRENDING_DOWN: Prefer shorts on breakdowns. Longs allowed on coins showing bullish divergence or holding support (failing to follow BTC lower). Both directions valid — scan each coin individually.";
 
     const scoringWeights = regime.regime === "VOLATILE"
       ? [
@@ -347,7 +353,7 @@ export async function runScan(): Promise<ScanResult> {
       "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
       `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":"","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","stopLossReasoning":"","takeProfitReasoning":"","rrReasoning":"","fundingRateContext":"","openInterestContext":"","regimeAlignment":"","rejectReasons":[],"scoreBreakdown":{}}],"scanTimestamp":"","summary":""}`,
       "Rules: rank exactly 5 opportunities. 80-100=STRONG BUY(strong_buy), 60-79=BUY(high), 40-59=WATCH(medium), <40=AVOID.",
-      "DIRECTION BIAS: NO bias toward long or short. Analyse objectively. Short positions are equally valid.",
+      "DIRECTION BIAS: MANDATORY — include at least 1-2 short signals per scan if any coins show bearish setups. Do not return all longs. Actively look for coins lagging the market, rejecting resistance, or with bearish divergence.",
       "FUNDING RATE (nonlinear): |rate|<0.03% neutral. 0.03-0.07% positive=mild long +3pts. >0.07% positive=crowded long -5pts. 0.03-0.07% negative=mild short +3pts. >0.07% negative=panic -5pts.",
       "OI CONTEXT: price up+OI up=new longs bullish +5pts. price up+OI down=short covering weaker +2pts. price down+OI up=new shorts bearish +5pts. price down+OI down=capitulation -3pts.",
       "Multi-timeframe: confirm trend across 1h, 4h, 1D. Higher conviction = more TF alignment.",

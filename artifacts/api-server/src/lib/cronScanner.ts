@@ -218,15 +218,16 @@ async function applyHardFilters(
         continue;
       }
 
-      // Filter 4: 4h trend misalignment
-      const ema50_4h  = calcEMA(closes, 50);
-      const ema200_4h = calcEMA(closes, Math.min(200, closes.length));
-      if (opp.direction === "long" && ema50_4h < ema200_4h) {
-        rejected.push({ symbol: opp.symbol, reason: `4h EMA50 < EMA200 — bearish structure, long rejected` });
+      // Filter 4: price vs 4h EMA20 misalignment (reactive — avoids lagging EMA50/200 that blocks all shorts in bull mkt)
+      const ema20_4h = calcEMA(closes, 20);
+      const ema50_4h = calcEMA(closes, 50);
+      const price4h  = closes[closes.length - 1] ?? opp.price;
+      if (opp.direction === "long" && price4h < ema50_4h * 0.97) {
+        rejected.push({ symbol: opp.symbol, reason: `price $${price4h.toFixed(4)} > 3% below 4h EMA50 — weak momentum for long` });
         continue;
       }
-      if (opp.direction === "short" && ema50_4h > ema200_4h) {
-        rejected.push({ symbol: opp.symbol, reason: `4h EMA50 > EMA200 — bullish structure, short rejected` });
+      if (opp.direction === "short" && price4h > ema20_4h * 1.03) {
+        rejected.push({ symbol: opp.symbol, reason: `price $${price4h.toFixed(4)} > 3% above 4h EMA20 — strong uptrend, short rejected` });
         continue;
       }
     }
