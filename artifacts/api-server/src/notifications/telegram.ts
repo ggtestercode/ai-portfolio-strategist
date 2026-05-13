@@ -282,7 +282,7 @@ export function startPolling(): void {
 
   // Register all callbacks
   registerScanNotifier(notifyScanComplete);
-  const alertHandler: (msg: string) => Promise<void> = async (msg) => send(escapeHtml(msg), { parse_mode: "HTML" });
+  const alertHandler: (msg: string) => Promise<void> = async (msg) => send(msg, { parse_mode: "HTML" });
   registerAlertNotifier(alertHandler);
   registerLeverageAlert(alertHandler);
   registerWatchdogAlert(alertHandler);
