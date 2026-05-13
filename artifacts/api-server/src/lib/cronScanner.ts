@@ -4,7 +4,7 @@ import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
-import { getDailyPnl, logOpenTrade, closeOpenTrade } from "./tradeMemoryLib";
+import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades } from "./tradeMemoryLib";
 import { llm }                         from "./llmRouter";
 import {
   getPositions    as bybitGetPositions,
@@ -20,13 +20,25 @@ import {
 import { db, profileTable, botStateTable, tradeMemoryTable, type PositionMeta } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
 
-// ── EMA helper ────────────────────────────────────────────────────────────────
+// ── Technical helpers ─────────────────────────────────────────────────────────
 function calcEMA(closes: number[], period: number): number {
   if (closes.length < period) return closes[closes.length - 1] ?? 0;
   const k = 2 / (period + 1);
   let ema = closes.slice(0, period).reduce((s, v) => s + v, 0) / period;
   for (let i = period; i < closes.length; i++) ema = (closes[i]! * k) + (ema * (1 - k));
   return ema;
+}
+
+function calcRSI(closes: number[], period = 14): number {
+  if (closes.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = (closes[i] ?? 0) - (closes[i - 1] ?? 0);
+    if (diff > 0) gains += diff; else losses -= diff;
+  }
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + (gains / period) / avgLoss);
 }
 
 // ── Runtime state ─────────────────────────────────────────────────────────────
@@ -254,28 +266,134 @@ async function cancelStaleOrders(): Promise<void> {
   }
 }
 
-// ── Layer 5: 48h hold timer ───────────────────────────────────────────────────
-async function checkHoldTimers(livePositions: BybitPosition[]): Promise<void> {
-  const fortyEightH = 48 * 60 * 60 * 1000;
-  const now = Date.now();
+// ── Layer 5: 48h hold timer → Claude review ──────────────────────────────────
+async function checkHoldTimers(
+  livePositions: BybitPosition[],
+  regime:        ScanResult["regime"],
+): Promise<void> {
+  const REVIEW_MS   = 48 * 60 * 60 * 1000;
+  const EXTEND_MS   = 24 * 60 * 60 * 1000;
+  const now         = Date.now();
+
+  const state      = await loadBotState().catch(() => null);
+  const allMeta    = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  const openTrades = await getOpenTrades().catch(() => [] as Awaited<ReturnType<typeof getOpenTrades>>);
+
   for (const pos of livePositions) {
-    if (!pos.openTime || pos.openTime <= 0) continue;
-    const holdMs = now - pos.openTime;
-    if (holdMs >= fortyEightH) {
-      console.log(`[cronScanner] 48h timer: closing ${pos.symbol} (open ${Math.round(holdMs / 3600000)}h)`);
+    const pm       = allMeta[pos.symbol];
+    const openedAt = pm?.openedAt ?? pos.openTime ?? 0;
+    if (!openedAt || openedAt <= 0) continue;
+
+    const holdMs = now - openedAt;
+    if (holdMs < REVIEW_MS) continue;
+
+    const holdH       = Math.round(holdMs / 3600000);
+    const direction   = pos.side === "Buy" ? "long" : "short";
+    const currentPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
+    const pnlSign     = pos.pnl >= 0 ? "+" : "";
+
+    console.log(`[cronScanner] 48h review: ${pos.symbol} ${direction} open ${holdH}h — asking Claude`);
+
+    // Fetch 4h klines + funding rate in parallel
+    const [klRes, frRes] = await Promise.allSettled([
+      getKlines(pos.symbol, "240", 50),
+      getFundingRate(pos.symbol),
+    ]);
+
+    let rsi4h    = 50;
+    let emaLine  = "unavailable";
+    if (klRes.status === "fulfilled") {
+      const closes = klRes.value.map(k => k.close);
+      rsi4h        = calcRSI(closes, 14);
+      const ema20  = calcEMA(closes, 20);
+      const ema50  = calcEMA(closes, 50);
+      const rel    = currentPrice > ema20 ? "above" : "below";
+      emaLine      = `price ${rel} EMA20=$${ema20.toFixed(4)}, EMA50=$${ema50.toFixed(4)}`;
+    }
+
+    const frRate = frRes.status === "fulfilled" ? frRes.value.rate : 0;
+    const frSign = frRate >= 0 ? "+" : "";
+    const frLine = `${frSign}${(frRate * 100).toFixed(4)}%`;
+
+    const slLine  = pm?.sl   ? `$${pm.sl.toFixed(4)}`  : (pos.stopLoss   ? `$${pos.stopLoss}`   : "none");
+    const tp1Line = pm?.tp1  ? `$${pm.tp1.toFixed(4)}` : (pos.takeProfit ? `$${pos.takeProfit}` : "none");
+
+    const openTrade = openTrades.find(t => t.symbol === pos.symbol && t.broker === "bybit");
+    const thesis    = openTrade?.reasoning ?? "No thesis recorded";
+
+    const prompt = [
+      `Position held ${holdH}h — time review:`,
+      `Symbol: ${pos.symbol}`,
+      `Direction: ${direction}`,
+      `Entry: $${pos.entryPrice.toFixed(4)}`,
+      `Current: $${currentPrice.toFixed(4)}`,
+      `P/L: ${pnlSign}${pos.pnlPct.toFixed(2)}%`,
+      `SL: ${slLine} (not hit)`,
+      `TP1: ${tp1Line} (not hit)`,
+      ``,
+      `Current regime: ${regime?.regime ?? "UNKNOWN"} (ADX ${regime?.adx?.toFixed(0) ?? "?"})`,
+      `4h RSI: ${rsi4h.toFixed(1)}`,
+      `4h EMA trend: ${emaLine}`,
+      `Funding rate: ${frLine}`,
+      ``,
+      `Trade thesis at entry: ${thesis}`,
+      ``,
+      `Decide: HOLD / CLOSE / EXTEND_24H`,
+      `HOLD = thesis intact, resume monitoring with timer reset to 24h`,
+      `CLOSE = thesis broken or risk not justified, exit now`,
+      `EXTEND_24H = uncertain, revisit in 24h`,
+      `Explain why in one sentence.`,
+      `Return JSON: {"decision":"HOLD"|"CLOSE"|"EXTEND_24H","reason":"<one sentence>"}`,
+    ].join("\n");
+
+    const res = await llm.json<{ decision: string; reason: string }>({
+      taskType:      "trade_decision",
+      systemContext: "You are a disciplined trading risk manager reviewing a held futures position. Respond JSON only.",
+      prompt,
+      schema: {
+        type: "object", required: ["decision", "reason"],
+        properties: { decision: { type: "string" }, reason: { type: "string" } },
+      },
+      fallback: { decision: "CLOSE", reason: "LLM unavailable — defaulting to close" },
+    }).catch(() => ({ data: { decision: "CLOSE", reason: "LLM error — defaulting to close" }, parseSuccess: false }));
+
+    const raw      = res.data.decision?.toUpperCase() ?? "CLOSE";
+    const decision = (["HOLD", "CLOSE", "EXTEND_24H"].includes(raw) ? raw : "CLOSE") as "HOLD" | "CLOSE" | "EXTEND_24H";
+    const reason   = res.data.reason ?? "";
+
+    console.log(`[cronScanner] 48h review ${pos.symbol}: ${decision} — ${reason}`);
+
+    if (decision === "CLOSE") {
       try {
         await bybitClose(pos.symbol);
-        const exitPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
-        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
-        const sign = pos.pnl >= 0 ? "+" : "";
+        await closeOpenTrade({
+          symbol: pos.symbol, broker: "bybit",
+          exitPrice: currentPrice, amountUsd: pos.size * pos.entryPrice,
+          entryPriceOverride: pos.entryPrice,
+        }).catch(() => {});
         await alertFn?.([
-          `⏱️ 48h time exit — ${pos.symbol}`,
-          `Closed at ~$${exitPrice.toFixed(4)}`,
-          `P/L: ${sign}$${pos.pnl.toFixed(2)} (${sign}${pos.pnlPct.toFixed(2)}%)`,
+          `⏱️ 48h review — ${pos.symbol}`,
+          `Decision: CLOSE`,
+          `Reason: ${reason}`,
+          `P/L: ${pnlSign}$${pos.pnl.toFixed(2)} (${pnlSign}${pos.pnlPct.toFixed(2)}%)`,
         ].join("\n")).catch(() => {});
       } catch (e) {
-        console.error(`[cronScanner] 48h close ${pos.symbol} failed:`, (e as Error).message);
+        console.error(`[cronScanner] 48h close ${pos.symbol}:`, (e as Error).message);
       }
+    } else {
+      // HOLD or EXTEND_24H — push openedAt forward so review fires again in 24h
+      const newOpenedAt = now - (REVIEW_MS - EXTEND_MS); // holdMs will be 24h on next check
+      if (pm) {
+        const updatedMeta = { ...pm, openedAt: newOpenedAt };
+        const patchedMeta = { ...allMeta, [pos.symbol]: updatedMeta };
+        await saveBotState({ positionMetadata: patchedMeta }).catch(() => {});
+      }
+      await alertFn?.([
+        `⏱️ 48h review — ${pos.symbol}`,
+        `Decision: ${decision}`,
+        `Reason: ${reason}`,
+        `Next review: 24h`,
+      ].join("\n")).catch(() => {});
     }
   }
 }
@@ -702,8 +820,8 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       console.error("[cronScanner] partialExits:", e)
     );
 
-    // Layer 5: 48h hold timers
-    await checkHoldTimers(livePositions).catch(e =>
+    // Layer 5: 48h hold timers → Claude review
+    await checkHoldTimers(livePositions, regime).catch(e =>
       console.error("[cronScanner] holdTimers:", e)
     );
 
