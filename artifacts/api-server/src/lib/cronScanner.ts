@@ -972,6 +972,20 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       });
 
       if (gateResult.action === "executed") {
+        // Log to trade memory so history page and future reviews have entry context
+        await logOpenTrade({
+          symbol:          sym,
+          broker:          "bybit",
+          direction:       opp.direction === "short" ? "short" : "long",
+          entryPrice:      opp.entry ?? opp.price,
+          leverage:        opp.leverage ?? 10,
+          amountUsd,
+          reasoning:       `[Cron] score=${opp.score} regime=${regime?.regime ?? "?"} setup=${opp.setupType ?? "?"} whyNow=${opp.whyNow ?? opp.reasoning?.slice(0, 200) ?? ""}`,
+          stopLoss:        opp.stopLoss,
+          takeProfit:      opp.takeProfit,
+          stopLossMethod:  opp.stopLossMethod,
+        }).catch(e => console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message));
+
         const rMult = (opp.score ?? 65) >= 90 ? 1.2 : (opp.score ?? 65) >= 75 ? 1.0 : 0.5;
         const entryLines = [
           `✅ <b>NEW ENTRY — ${sym} ${(opp.direction ?? "?").toUpperCase()}</b>`,
@@ -1045,6 +1059,7 @@ async function checkPositionMonitor(): Promise<void> {
       await bybitClose(pos.symbol).catch(e =>
         console.error(`[posMonitor] close ${pos.symbol}:`, (e as Error).message)
       );
+      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
       await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(() => {});
       void closeSide; // suppress unused variable warning
       continue;
@@ -1168,6 +1183,7 @@ async function runPositionReview(
   if (upper.startsWith("CLOSE")) {
     await bybitClose(pos.symbol)
       .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
+    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
     await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE\n${reason}`).catch(() => {});
 
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
