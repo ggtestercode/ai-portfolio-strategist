@@ -140,8 +140,16 @@ async function send(text: string, opts?: TelegramBot.SendMessageOptions): Promis
   await getBot().sendMessage(chatId, text, opts);
 }
 
+// Only alarm when polling has failed consecutively — transient network blips are normal.
+let consecutivePollingErrors = 0;
+const ERROR_ALARM_THRESHOLD  = 5; // ~25 min of sustained failure at 5-min watchdog interval
+
+export function recordPollingSuccess(): void { consecutivePollingErrors = 0; }
+export function recordPollingError():   void { consecutivePollingErrors++;   }
+
 export async function checkBotHealth(): Promise<void> {
-  await getBot().getMe();
+  if (consecutivePollingErrors >= ERROR_ALARM_THRESHOLD)
+    throw new Error(`Telegram polling failing: ${consecutivePollingErrors} consecutive errors`);
 }
 
 export async function sendAlert(text: string): Promise<void> {
@@ -1130,9 +1138,13 @@ export function startPolling(): void {
       console.warn("[telegram] Polling 409 Conflict — exiting for PM2 clean restart…");
       process.exit(1);
     } else {
-      console.warn("[telegram] Polling error (will retry):", msg || cause || err.code);
+      recordPollingError();
+      console.warn(`[telegram] Polling error (will retry, consecutive=${consecutivePollingErrors}):`, msg || cause || err.code);
     }
   });
+
+  b.on("message",        () => { recordPollingSuccess(); });
+  b.on("callback_query", () => { recordPollingSuccess(); });
 
   b.startPolling();
   console.log("[telegram] Bot polling started");
