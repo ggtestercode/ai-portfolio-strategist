@@ -1166,19 +1166,25 @@ async function runPositionReview(
     oi != null ? `OI: ${oi}` : null,
     `SL: ${sl ? "$" + sl.toFixed(4) : "not set"} | TP1: ${tp1 ? "$" + tp1.toFixed(4) : "not set"} | TP2: ${tp2 ? "$" + tp2.toFixed(4) : "not set"}`,
     trigger ? `\nIMMEDIATE TRIGGER: ${trigger}` : null,
-    `\nDecide: is the thesis still valid?`,
-    `Reply with EXACTLY one of these on the FIRST LINE, nothing else on that line:`,
+    `\nEXIT TIMING RULES (follow strictly):`,
+    `- NEVER market-close at support (for shorts) or resistance (for longs) — that is the worst exit price.`,
+    `- If thesis is broken but price is at a BAD exit spot: use ADJUST_SL to a tight level just beyond the nearest key level and let the market stop you out cleanly.`,
+    `- CLOSE immediately only if: (1) loss is accelerating fast with no nearby support/resistance, OR (2) trigger is urgent (e.g. funding flip or OI collapse while in loss).`,
+    `- PARTIAL_CLOSE when partially right — secure some profit/cut partial loss, keep runner.`,
+    `- HOLD when thesis is intact and price is just consolidating.`,
+    `- ADJUST_SL to trail closer to price when in profit — protect gains without rushing out.`,
+    `\nReply with EXACTLY one of these on the FIRST LINE:`,
     `  HOLD`,
     `  PARTIAL_CLOSE [number 1-99]`,
     `  CLOSE`,
     `  ADJUST_SL [$price]`,
-    `Then on the SECOND LINE: one sentence of reasoning.`,
-    `Do NOT put HOLD if your reasoning says to exit — use CLOSE instead.`,
+    `Then on the SECOND LINE: one sentence of reasoning (include WHERE you'd want to exit if using ADJUST_SL).`,
+    `Do NOT use HOLD if your reasoning says the thesis is broken.`,
   ].filter(Boolean).join("\n");
 
   const resp = await llm.chat({
     taskType: "trade_decision",
-    systemContext: "You are a disciplined trading risk manager reviewing a held futures position. Reply with one of HOLD, PARTIAL_CLOSE [pct], CLOSE, ADJUST_SL [$price]. Then one line of reasoning.",
+    systemContext: "You are a patient, disciplined futures position manager. You do not panic-close. You find the right exit: tighten stops to key levels, take partials at targets, and only market-close when loss is accelerating with no recovery signal. Never exit at support (for shorts) or resistance (for longs) — those are the worst prices.",
     userMessage: prompt,
   }).catch(() => null);
   if (!resp) return;
