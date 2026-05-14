@@ -1273,8 +1273,8 @@ async function runPositionReview(
       await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(() => {});
     }
   } else {
-    // HOLD
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: HOLD\n${reason}`).catch(() => {});
+    // HOLD — log to console only, no Telegram (avoid notification spam for routine holds)
+    console.log(`[posMonitor] HOLD ${pos.symbol} ${dir} P/L:${pnlPct.toFixed(2)}% — ${reason}`);
   }
 }
 

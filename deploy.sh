@@ -7,7 +7,10 @@ ssh root@139.180.215.150 << 'EOF'
 set -e
 cd /root/ai-portfolio-strategist
 echo "📥 Pulling latest..."
-git pull origin feature/sprint-6
+git pull origin main
+
+echo "🗄️  Syncing DB schema..."
+cd lib/db && npx drizzle-kit push --config ./drizzle.config.ts && cd ../..
 
 echo "🔨 Building API..."
 cd artifacts/api-server && pnpm build
