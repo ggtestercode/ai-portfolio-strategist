@@ -1148,20 +1148,32 @@ async function runPositionReview(
   const ema20  = closes.length >= 20 ? calcEMA(closes, 20) : 0;
   const ema50  = closes.length >= 50 ? calcEMA(closes, 50) : 0;
   const rsi    = closes.length >= 15 ? calcRSI(closes, 14) : 0;
-  const heldH  = meta ? ((Date.now() - meta.openedAt) / 3_600_000).toFixed(1) : "?";
+  const heldH  = meta?.openedAt ? ((Date.now() - meta.openedAt) / 3_600_000).toFixed(1) : "?";
   const pnlPct = pos.pnlPct ?? 0;
   const dir    = pos.side === "Buy" ? "LONG" : "SHORT";
+
+  // Use metadata SL/TP if available, fall back to exchange values on position
+  const sl  = meta?.sl  ?? pos.stopLoss;
+  const tp1 = meta?.tp1 ?? pos.takeProfit;
+  const tp2 = meta?.tp2;
 
   const currentPrice = closes.length > 0 ? (closes[closes.length - 1] ?? pos.entryPrice) : pos.entryPrice;
   const prompt = [
     `Position: ${pos.symbol} ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Current: $${currentPrice.toFixed(4)}`,
     `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${heldH}h`,
     `RSI(14): ${rsi.toFixed(1)} | EMA20: $${ema20.toFixed(4)} | EMA50: $${ema50.toFixed(4)}`,
-    `Funding: ${fr ? (fr.rate*100).toFixed(4) + "%" : "?"}`,
-    oi != null ? `OI: ${oi}` : "",
-    `SL: $${meta?.sl?.toFixed(4) ?? "?"} | TP1: $${meta?.tp1?.toFixed(4) ?? "?"} | TP2: $${meta?.tp2?.toFixed(4) ?? "?"}`,
-    trigger ? `\nIMMEDIATE TRIGGER: ${trigger}` : "",
-    `\nIs thesis still valid? Reply with one of:\nHOLD\nPARTIAL_CLOSE [1-99]\nCLOSE\nADJUST_SL [$price]\n\nThen one line of reasoning.`,
+    `Funding: ${fr ? (fr.rate*100).toFixed(4) + "%" : "unknown"}`,
+    oi != null ? `OI: ${oi}` : null,
+    `SL: ${sl ? "$" + sl.toFixed(4) : "not set"} | TP1: ${tp1 ? "$" + tp1.toFixed(4) : "not set"} | TP2: ${tp2 ? "$" + tp2.toFixed(4) : "not set"}`,
+    trigger ? `\nIMMEDIATE TRIGGER: ${trigger}` : null,
+    `\nDecide: is the thesis still valid?`,
+    `Reply with EXACTLY one of these on the FIRST LINE, nothing else on that line:`,
+    `  HOLD`,
+    `  PARTIAL_CLOSE [number 1-99]`,
+    `  CLOSE`,
+    `  ADJUST_SL [$price]`,
+    `Then on the SECOND LINE: one sentence of reasoning.`,
+    `Do NOT put HOLD if your reasoning says to exit — use CLOSE instead.`,
   ].filter(Boolean).join("\n");
 
   const resp = await llm.chat({
