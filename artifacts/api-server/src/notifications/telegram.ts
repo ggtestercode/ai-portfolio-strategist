@@ -1053,9 +1053,11 @@ export function startPolling(): void {
         return;
       }
 
+      // Manual UTC+8 formatter — avoids toLocaleString "24:xx" midnight bug in Node
       const fmtSGT = (ms: number) => {
-        const d = new Date(ms);
-        return d.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false, hourCycle: "h23" }) + " SGT";
+        const d  = new Date(ms + 8 * 3_600_000); // shift to SGT (UTC+8)
+        const p  = (n: number) => String(n).padStart(2, "0");
+        return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}, ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} SGT`;
       };
 
       const out: string[] = [`📋 <b>Trade History (Bybit)</b>`, ``];
@@ -1079,11 +1081,7 @@ export function startPolling(): void {
           const dir  = p.side === "Buy" ? "▲" : "▼";
           const sign = p.closedPnl >= 0 ? "+" : "";
           const when = fmtSGT(p.closedAt);
-          // cumEntryValue / avgEntryPrice = original full position size
-          const fullSize  = p.avgEntryPrice > 0 ? p.cumEntryValue / p.avgEntryPrice : 0;
-          const isPartial = fullSize > 0 && p.closedSize < fullSize * 0.999;
-          const tag  = isPartial ? ` <i>[partial ${p.closedSize}/${fullSize.toFixed(4)}]</i>` : ``;
-          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}${tag}`);
+          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}`);
         });
         out.push(``);
       }
