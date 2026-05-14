@@ -116,14 +116,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
   const r = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear", settleCoin: "USDT" });
   console.log("[Bybit] Raw positions (settleCoin=USDT):", JSON.stringify(r.list));
 
-  let list = r.list.filter(p => parseFloat(p.size) > 0);
-
-  // If settleCoin filter returns nothing, retry without it (testnet quirk)
-  if (list.length === 0 && r.list.length === 0) {
-    const r2 = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear" });
-    console.log("[Bybit] Raw positions (no filter):", JSON.stringify(r2.list));
-    list = r2.list.filter(p => parseFloat(p.size) > 0);
-  }
+  const list = r.list.filter(p => parseFloat(p.size) > 0);
 
   return list.map(p => {
     const entry     = parseFloat(p.avgPrice);
