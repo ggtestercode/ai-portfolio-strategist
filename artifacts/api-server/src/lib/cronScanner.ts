@@ -1120,11 +1120,14 @@ async function checkPositionMonitor(): Promise<void> {
         if (state.lastRSI1h < 70 && rsi >= 70) trigger = `1h RSI crossed above 70 (${rsi.toFixed(1)}) — overbought`;
         if (state.lastRSI1h > 30 && rsi <= 30) trigger = `1h RSI crossed below 30 (${rsi.toFixed(1)}) — oversold`;
       }
-      if (!trigger && klines.length >= 21) {
-        const volAvg = klines.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
-        const lastVol = klines[klines.length - 1]!.volume;
+      // Use second-to-last candle (last COMPLETE 1h bar) — avoids re-firing every 5 min
+      // on the same in-progress candle
+      if (!trigger && klines.length >= 22) {
+        const completedCandles = klines.slice(0, -1); // drop the forming candle
+        const volAvg = completedCandles.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
+        const lastVol = completedCandles[completedCandles.length - 1]!.volume;
         if (volAvg > 0 && lastVol > volAvg * 3)
-          trigger = `Volume spike ${(lastVol/volAvg).toFixed(1)}× avg on latest 1h candle`;
+          trigger = `Volume spike ${(lastVol/volAvg).toFixed(1)}× on last completed 1h candle`;
       }
       monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastRSI1h: rsi };
     }
@@ -1133,7 +1136,11 @@ async function checkPositionMonitor(): Promise<void> {
     if (fr != null)    monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastFundingRate: fr.rate };
     if (oiVal != null) monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastOI: oiVal };
 
-    const shouldReview = trigger !== null || (now - state.lastReviewAt) >= intervalMs;
+    // Triggers respect a 30-min cooldown — prevents re-firing every tick on a
+    // persistent condition (e.g. same high-volume candle, OI still low)
+    const timeSinceReview = now - state.lastReviewAt;
+    const TRIGGER_COOLDOWN_MS = 30 * 60_000;
+    const shouldReview = (trigger !== null && timeSinceReview >= TRIGGER_COOLDOWN_MS) || timeSinceReview >= intervalMs;
     if (!shouldReview) continue;
 
     await runPositionReview(pos, trigger, klines, fr, oiVal, posMeta[pos.symbol], stateRow?.currentRegime ?? null).catch(e =>
