@@ -1035,6 +1035,9 @@ const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
 // In-memory cache: survives DB failures within a single server session.
 // Seeded from DB on first successful read; DB is the write-through target.
 const monitorStateCache: Record<string, PositionMonitorState> = {};
+// Track last time an ADJUST_SL notification was sent per symbol (to avoid spam)
+const lastAdjustSlNotifyAt: Record<string, number> = {};
+const ADJUST_SL_NOTIFY_COOLDOWN_MS = 2 * 3_600_000; // at most once per 2h per position
 
 async function checkPositionMonitor(): Promise<void> {
   const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
@@ -1080,12 +1083,12 @@ async function checkPositionMonitor(): Promise<void> {
 
     // Review interval by P/L tier
     const intervalMs =
-      pnlPct <= -20 ? 5  * 60_000  :
-      pnlPct <= -10 ? 30 * 60_000  :
-      pnlPct <= -5  ? 60 * 60_000  :
-      pnlPct >= 100 ? 15 * 60_000  :
-      pnlPct >= 50  ? 30 * 60_000  :
-      pnlPct >= 20  ? 60 * 60_000  :
+      pnlPct <= -20 ? 30 * 60_000  :
+      pnlPct <= -10 ? 60 * 60_000  :
+      pnlPct <= -5  ? 2  * 3_600_000 :
+      pnlPct >= 100 ? 30 * 60_000  :
+      pnlPct >= 50  ? 60 * 60_000  :
+      pnlPct >= 20  ? 2  * 3_600_000 :
                       4  * 3_600_000;
 
     // Fetch fresh data for trigger checks
@@ -1288,7 +1291,13 @@ async function runPositionReview(
     if (!isNaN(newSl) && newSl > 0) {
       await bybitSetStopLoss(pos.symbol, newSl, pos.positionIdx)
         .catch(e => console.error(`[posMonitor] ADJUST_SL ${pos.symbol}:`, (e as Error).message));
-      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(() => {});
+      const lastNotify = lastAdjustSlNotifyAt[pos.symbol] ?? 0;
+      if (Date.now() - lastNotify >= ADJUST_SL_NOTIFY_COOLDOWN_MS) {
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(() => {});
+        lastAdjustSlNotifyAt[pos.symbol] = Date.now();
+      } else {
+        console.log(`[posMonitor] ADJUST_SL ${pos.symbol} → $${newSl.toFixed(4)} (notify suppressed — cooldown)`);
+      }
     }
   } else {
     // HOLD — log to console only, no Telegram (avoid notification spam for routine holds)
