@@ -1076,12 +1076,27 @@ export function startPolling(): void {
       }
 
       if (closedPnl.length) {
+        // Group by symbol+side+avgEntryPrice — same group = same original position
+        // Sort each group chronologically; all but the last record = partial close
+        const chronological = [...closedPnl].sort((a, b) => a.closedAt - b.closedAt);
+        const finalCloseSet = new Set<typeof closedPnl[number]>();
+        const groups = new Map<string, typeof closedPnl>();
+        for (const p of chronological) {
+          const key = `${p.symbol}|${p.side}|${p.avgEntryPrice}`;
+          const g = groups.get(key) ?? [];
+          g.push(p);
+          groups.set(key, g);
+        }
+        for (const g of groups.values()) finalCloseSet.add(g[g.length - 1]!);
+
         out.push(`<b>Closed (last ${closedPnl.length}):</b>`);
         closedPnl.forEach((p, i) => {
-          const dir  = p.side === "Buy" ? "▲" : "▼";
-          const sign = p.closedPnl >= 0 ? "+" : "";
-          const when = fmtSGT(p.closedAt);
-          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}`);
+          const dir      = p.side === "Buy" ? "▲" : "▼";
+          const sign     = p.closedPnl >= 0 ? "+" : "";
+          const when     = fmtSGT(p.closedAt);
+          const isFinal  = finalCloseSet.has(p);
+          const tag      = !isFinal ? ` <i>[partial]</i>` : ``;
+          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · entry $${p.avgEntryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} → exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}${tag}`);
         });
         out.push(``);
       }
