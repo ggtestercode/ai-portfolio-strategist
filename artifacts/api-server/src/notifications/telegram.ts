@@ -1130,6 +1130,11 @@ export function startPolling(): void {
 
   // Exit only on 409 Conflict (multiple polling instances) — let PM2 restart cleanly.
   // Do NOT exit on ECONNRESET or other transient network errors; the library retries those.
+  // Catch any raw 'error' event from the underlying transport — unhandled 'error' events crash Node
+  b.on("error", (err: Error) => {
+    console.warn("[telegram] Bot error (suppressed):", err.message);
+  });
+
   b.on("polling_error", (err: Error & { code?: string; cause?: { code?: string } }) => {
     const msg   = err.message ?? "";
     const cause = err.cause?.code ?? "";

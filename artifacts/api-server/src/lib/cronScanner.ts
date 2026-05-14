@@ -1325,8 +1325,7 @@ export function startCronScanner(): void {
   }
   const interval = cron.validate(SCAN_INTERVAL) ? SCAN_INTERVAL : "*/30 * * * *";
   if (!cron.validate(SCAN_INTERVAL)) console.warn(`[cronScanner] Invalid SCAN_INTERVAL, using every 30 min`);
-  cronTask = cron.schedule(interval, () => { void runCronScan("cron"); });
-  setTimeout(() => { void runCronScan("cron"); }, 10_000);
+  cronTask = cron.schedule(interval, () => { void runCronScan("cron").catch(e => console.error("[cronScanner] unhandled:", e)); });
   console.log(`[cronScanner] Started — schedule: ${humanInterval(interval)}`);
 }
 
