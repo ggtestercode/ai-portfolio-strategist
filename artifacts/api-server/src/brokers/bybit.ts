@@ -356,3 +356,29 @@ export async function closePercentPosition(symbol: string, pct: number): Promise
 export async function placeOrder(symbol: string, side: "Buy" | "Sell", amountUsd: number): Promise<{ orderId?: string }> {
   return openPosition(symbol, side, amountUsd, 1);
 }
+
+export interface BybitClosedPnl {
+  symbol: string;
+  side: "Buy" | "Sell";
+  qty: number;
+  avgEntryPrice: number;
+  avgExitPrice: number;
+  closedPnl: number;
+  leverage: number;
+  closedAt: number; // ms timestamp
+}
+
+export async function getClosedPnl(limit = 10): Promise<BybitClosedPnl[]> {
+  type Raw = { symbol: string; side: string; qty: string; avgEntryPrice: string; avgExitPrice: string; closedPnl: string; leverage: string; updatedTime: string };
+  const r = await get<{ list: Raw[] }>("/v5/position/closed-pnl", { category: "linear", limit: String(limit) });
+  return r.list.map(p => ({
+    symbol:        p.symbol,
+    side:          p.side as "Buy" | "Sell",
+    qty:           parseFloat(p.qty),
+    avgEntryPrice: parseFloat(p.avgEntryPrice),
+    avgExitPrice:  parseFloat(p.avgExitPrice),
+    closedPnl:     parseFloat(p.closedPnl),
+    leverage:      parseFloat(p.leverage),
+    closedAt:      parseInt(p.updatedTime),
+  }));
+}

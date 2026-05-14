@@ -27,10 +27,11 @@ import {
   getBalancePaper,
 } from "../brokers/okxPaper";
 import {
-  getPositions as bybitGetPositions,
-  getBalance   as bybitGetBalance,
-  getTicker    as bybitGetTicker,
+  getPositions  as bybitGetPositions,
+  getBalance    as bybitGetBalance,
+  getTicker     as bybitGetTicker,
   getOrders,
+  getClosedPnl  as bybitGetClosedPnl,
 } from "../brokers/bybit";
 import { okxPaperMode } from "../lib/startup";
 import {
@@ -1028,49 +1029,51 @@ export function startPolling(): void {
     }
   });
 
-  // ── /history — open + closed trades ─────────────────────────────────────
+  // ── /history — live Bybit open positions + closed PnL ───────────────────
   b.onText(/^\/history(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [openTrades, closedTrades] = await Promise.all([
-        getOpenTrades(),
-        getRecentTrades(10),
+      const [openPositions, closedPnl] = await Promise.all([
+        bybitGetPositions(),
+        bybitGetClosedPnl(10),
       ]);
 
-      if (!openTrades.length && !closedTrades.length) {
+      if (!openPositions.length && !closedPnl.length) {
         await b.sendMessage(chatId,
-          `📋 No trade history yet. Trades are logged after you execute a buy or sell.\n<i>${utcNow()}</i>`,
+          `📋 No Bybit trades found.\n<i>${utcNow()}</i>`,
           { parse_mode: "HTML" });
         return;
       }
 
-      const out: string[] = [`📋 <b>Trade History</b>`, ``];
+      const fmtSGT = (ms: number) => {
+        const d = new Date(ms);
+        return d.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false, hourCycle: "h23" }) + " SGT";
+      };
 
-      if (openTrades.length) {
-        out.push(`<b>Open (${openTrades.length}):</b>`);
-        for (const t of openTrades) {
-          const dir    = t.direction === "long" ? "▲" : "▼";
-          const when   = t.entryAt.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT";
-          const amt    = t.amountUsd ? ` · $${parseFloat(t.amountUsd).toFixed(0)}` : "";
-          const ep     = t.entryPrice ? ` · entry $${parseFloat(t.entryPrice).toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
-          out.push(`• <b>${escapeHtml(t.symbol)}</b> ${dir} ${t.direction}${amt}${ep} · ${when} [${t.broker}]`);
+      const out: string[] = [`📋 <b>Trade History (Bybit)</b>`, ``];
+
+      if (openPositions.length) {
+        out.push(`<b>Open (${openPositions.length}):</b>`);
+        for (const p of openPositions) {
+          const dir    = p.side === "Buy" ? "▲ long" : "▼ short";
+          const pnlSign = p.pnl >= 0 ? "+" : "";
+          const sl     = p.stopLoss  ? ` SL:$${p.stopLoss.toLocaleString("en-US",  { maximumFractionDigits: 4 })}` : "";
+          const tp     = p.takeProfit ? ` TP:$${p.takeProfit.toLocaleString("en-US", { maximumFractionDigits: 4 })}` : "";
+          const when   = p.openTime > 0 ? ` · ${fmtSGT(p.openTime)}` : "";
+          out.push(`• <b>${escapeHtml(p.symbol)}</b> ${dir} · entry $${p.entryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${p.leverage}x · PnL: ${pnlSign}$${p.pnl.toFixed(2)} (${pnlSign}${p.pnlPct.toFixed(1)}%)${sl}${tp}${when}`);
         }
         out.push(``);
       }
 
-      if (closedTrades.length) {
-        out.push(`<b>Closed (last ${closedTrades.length}):</b>`);
-        const lines = closedTrades.map((t, i) => {
-          const pnl    = parseFloat(t.pnl  ?? "0");
-          const pnlPct = parseFloat(t.pnlPct ?? "0");
-          const sign   = pnl >= 0 ? "+" : "";
-          const dir    = t.direction === "long" ? "▲" : "▼";
-          const when   = t.exitAt
-            ? t.exitAt.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
-            : "—";
-          return `${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${sign}$${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) · ${when} [${t.broker}]`;
+      if (closedPnl.length) {
+        out.push(`<b>Closed (last ${closedPnl.length}):</b>`);
+        closedPnl.forEach((p, i) => {
+          const dir    = p.side === "Buy" ? "▲" : "▼";
+          const sign   = p.closedPnl >= 0 ? "+" : "";
+          const when   = fmtSGT(p.closedAt);
+          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}`);
         });
-        out.push(...lines, ``);
+        out.push(``);
       }
 
       out.push(`<i>${utcNow()}</i>`);
