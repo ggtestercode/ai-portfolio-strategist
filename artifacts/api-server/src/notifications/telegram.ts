@@ -1076,28 +1076,89 @@ export function startPolling(): void {
       }
 
       if (closedPnl.length) {
-        // Group by symbol+side+avgEntryPrice — same group = same original position
-        // Sort each group chronologically; all but the last record = partial close
-        const chronological = [...closedPnl].sort((a, b) => a.closedAt - b.closedAt);
-        const finalCloseSet = new Set<typeof closedPnl[number]>();
-        const groups = new Map<string, typeof closedPnl>();
-        for (const p of chronological) {
-          const key = `${p.symbol}|${p.side}|${p.avgEntryPrice}`;
-          const g = groups.get(key) ?? [];
-          g.push(p);
-          groups.set(key, g);
-        }
-        for (const g of groups.values()) finalCloseSet.add(g[g.length - 1]!);
+        type ClosedRec = typeof closedPnl[number];
 
-        out.push(`<b>Closed (last ${closedPnl.length}):</b>`);
-        closedPnl.forEach((p, i) => {
-          const dir      = p.side === "Buy" ? "▲" : "▼";
-          const sign     = p.closedPnl >= 0 ? "+" : "";
-          const when     = fmtSGT(p.closedAt);
-          const isFinal  = finalCloseSet.has(p);
-          const tag      = !isFinal ? ` <i>[partial]</i>` : ``;
-          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · entry $${p.avgEntryPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} → exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}${tag}`);
+        // Group by symbol+side+avgEntryPrice (= same original position), sort each group chron
+        const groupMap = new Map<string, ClosedRec[]>();
+        for (const p of [...closedPnl].sort((a, b) => a.closedAt - b.closedAt)) {
+          const key = `${p.symbol}|${p.side}|${p.avgEntryPrice}`;
+          const g   = groupMap.get(key) ?? [];
+          g.push(p);
+          groupMap.set(key, g);
+        }
+
+        interface TradeSummary {
+          symbol: string; side: "Buy"|"Sell"; entryPrice: number;
+          closes: ClosedRec[]; totalPnl: number;
+          bestExit: number; finalExit: number;
+          firstCloseAt: number; lastCloseAt: number;
+        }
+
+        const trades: TradeSummary[] = [...groupMap.values()].map(closes => {
+          const side     = closes[0]!.side;
+          const totalPnl = closes.reduce((s, c) => s + c.closedPnl, 0);
+          const bestExit = side === "Buy"
+            ? Math.max(...closes.map(c => c.avgExitPrice))
+            : Math.min(...closes.map(c => c.avgExitPrice));
+          return {
+            symbol: closes[0]!.symbol, side, entryPrice: closes[0]!.avgEntryPrice,
+            closes, totalPnl, bestExit,
+            finalExit:    closes[closes.length - 1]!.avgExitPrice,
+            firstCloseAt: closes[0]!.closedAt,
+            lastCloseAt:  closes[closes.length - 1]!.closedAt,
+          };
+        }).sort((a, b) => b.lastCloseAt - a.lastCloseAt); // newest first
+
+        const fmtPrice = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 4 });
+        const fmtDur   = (ms: number) => {
+          if (ms < 60_000)         return `<1min`;
+          if (ms < 3_600_000)      return `~${Math.round(ms / 60_000)}min`;
+          if (ms < 86_400_000)     return `~${(ms / 3_600_000).toFixed(1)}h`;
+          return `~${(ms / 86_400_000).toFixed(1)}d`;
+        };
+
+        out.push(`<b>Trades (${trades.length} positions, ${closedPnl.length} closes):</b>`);
+        trades.forEach((t, i) => {
+          const dir      = t.side === "Buy" ? "▲" : "▼";
+          const label    = t.side === "Buy" ? "LONG" : "SHORT";
+          const sign     = t.totalPnl >= 0 ? "+" : "";
+          const nPartial = t.closes.length - 1;
+          const closeLbl = t.closes.length === 1
+            ? "Full close"
+            : `${t.closes.length} closes (${nPartial} partial + 1 full)`;
+          const durMs    = t.lastCloseAt - t.firstCloseAt;
+
+          out.push(`${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${label} — Total: <b>${sign}$${t.totalPnl.toFixed(2)}</b>`);
+          out.push(`   Entry: $${fmtPrice(t.entryPrice)} | ${closeLbl}`);
+          if (t.closes.length > 1) {
+            out.push(`   Best exit: $${fmtPrice(t.bestExit)} | Final exit: $${fmtPrice(t.finalExit)}`);
+            if (durMs > 60_000) out.push(`   Duration: ${fmtDur(durMs)}`);
+          } else {
+            out.push(`   Exit: $${fmtPrice(t.finalExit)} | ${fmtSGT(t.lastCloseAt)}`);
+          }
+          out.push(``);
         });
+
+        // ── Summary ────────────────────────────────────────────────────────────
+        const winners  = trades.filter(t => t.totalPnl > 0);
+        const losers   = trades.filter(t => t.totalPnl <= 0);
+        const totalPnl = trades.reduce((s, t) => s + t.totalPnl, 0);
+        const avgWin   = winners.length ? winners.reduce((s, t) => s + t.totalPnl, 0) / winners.length : 0;
+        const avgLoss  = losers.length  ? Math.abs(losers.reduce((s, t) => s + t.totalPnl, 0) / losers.length) : 0;
+        const winPct   = Math.round(winners.length / trades.length * 100);
+        const totalSign = totalPnl >= 0 ? "+" : "";
+
+        out.push(`📊 <b>Summary (${trades.length} trades)</b>`);
+        out.push(`✅ Winners: ${winners.length} (${winPct}%)`);
+        out.push(`❌ Losers: ${losers.length} (${100 - winPct}%)`);
+        out.push(`💰 Total P/L: ${totalSign}$${totalPnl.toFixed(2)}`);
+        if (avgWin  > 0) out.push(`📈 Avg win: +$${avgWin.toFixed(2)}`);
+        if (avgLoss > 0) out.push(`📉 Avg loss: -$${avgLoss.toFixed(2)}`);
+        if (avgWin > 0 && avgLoss > 0) {
+          const rr      = avgLoss / avgWin;
+          const rrLabel = rr > 2 ? " (needs improvement)" : " (good)";
+          out.push(`⚖️ R:R ratio: 1:${rr.toFixed(1)}${rrLabel}`);
+        }
         out.push(``);
       }
 
