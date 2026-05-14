@@ -1039,9 +1039,11 @@ async function checkPositionMonitor(): Promise<void> {
   const [stateRow] = await db.select({
     positionMonitorState: botStateTable.positionMonitorState,
     positionMetadata:     botStateTable.positionMetadata,
+    currentRegime:        botStateTable.currentRegime,
   }).from(botStateTable).limit(1).catch(() => [{
     positionMonitorState: {} as Record<string, PositionMonitorState>,
     positionMetadata:     {} as Record<string, PositionMeta>,
+    currentRegime:        null as string | null,
   }]);
 
   const monitorState = (stateRow?.positionMonitorState ?? {}) as Record<string, PositionMonitorState>;
@@ -1123,7 +1125,7 @@ async function checkPositionMonitor(): Promise<void> {
     const shouldReview = trigger !== null || (now - state.lastReviewAt) >= intervalMs;
     if (!shouldReview) continue;
 
-    await runPositionReview(pos, trigger, klines, fr, oiVal, posMeta[pos.symbol]).catch(e =>
+    await runPositionReview(pos, trigger, klines, fr, oiVal, posMeta[pos.symbol], stateRow?.currentRegime ?? null).catch(e =>
       console.error(`[posMonitor] review ${pos.symbol}:`, e)
     );
     monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastReviewAt: now };
@@ -1143,6 +1145,7 @@ async function runPositionReview(
   fr:      { rate: number } | null,
   oi:      number | null,
   meta:    PositionMeta | undefined,
+  regime:  string | null,
 ): Promise<void> {
   const closes = klines.map(k => k.close);
   const ema20  = closes.length >= 20 ? calcEMA(closes, 20) : 0;
@@ -1151,6 +1154,7 @@ async function runPositionReview(
   const heldH  = meta?.openedAt ? ((Date.now() - meta.openedAt) / 3_600_000).toFixed(1) : "?";
   const pnlPct = pos.pnlPct ?? 0;
   const dir    = pos.side === "Buy" ? "LONG" : "SHORT";
+  const isLong = dir === "LONG";
 
   // Use metadata SL/TP if available, fall back to exchange values on position
   const sl  = meta?.sl  ?? pos.stopLoss;
@@ -1158,33 +1162,82 @@ async function runPositionReview(
   const tp2 = meta?.tp2;
 
   const currentPrice = closes.length > 0 ? (closes[closes.length - 1] ?? pos.entryPrice) : pos.entryPrice;
+  const fundingStr   = fr ? `${(fr.rate * 100).toFixed(4)}%` : "unknown";
+  const isRanging    = regime?.toUpperCase().includes("RANGING") ?? false;
+
+  // Direction-aware thesis signals
+  const thesisCheck = isLong ? [
+    `LONG thesis SUPPORTING signals (each one you see adds conviction):`,
+    `  • Price above EMA20 and EMA50`,
+    `  • RSI below 70 (not overbought)`,
+    `  • Funding rate negative or near zero (longs not overcrowded)`,
+    `  • OI stable or rising with price (genuine demand)`,
+    `  • BTC or broader market green / neutral`,
+    `  • Recent candles show higher lows or strong closes`,
+    `LONG thesis UNDERMINING signals (each one you see reduces conviction):`,
+    `  • Price breaks below EMA20 on high volume`,
+    `  • RSI above 70 and rolling over`,
+    `  • Funding rate positive and rising (long squeeze risk)`,
+    `  • OI dropping while price still up (distribution)`,
+    `  • BTC selling off or making lower highs`,
+    `  • Large wicks to upside rejected at resistance`,
+  ] : [
+    `SHORT thesis SUPPORTING signals (each one you see adds conviction):`,
+    `  • Price below EMA20 and EMA50`,
+    `  • RSI above 30 but declining (not yet oversold)`,
+    `  • Funding rate positive (shorts getting paid, longs overcrowded)`,
+    `  • OI stable or rising as price falls (genuine selling)`,
+    `  • BTC or broader market weak / lower`,
+    `  • Recent candles show lower highs or weak closes`,
+    `SHORT thesis UNDERMINING signals (each one you see reduces conviction):`,
+    `  • Price reclaims EMA20 on strong volume`,
+    `  • RSI drops below 30 and bouncing (oversold bounce risk)`,
+    `  • Funding rate flips negative (short squeeze risk)`,
+    `  • OI dropping as price also drops (short covering rally ahead)`,
+    `  • BTC recovering strongly`,
+    `  • Breakout candle through recent resistance with volume`,
+  ];
+
+  const rangingNote = isRanging
+    ? `\nREGIME NOTE — Market is RANGING. Act one tier more aggressively than normal: if conviction is mixed, choose PARTIAL_CLOSE instead of HOLD; if conviction is weak, choose PARTIAL_CLOSE 50%+ or ADJUST_SL very tight. Chop erodes both sides — do not overstay.`
+    : "";
+
   const prompt = [
     `Position: ${pos.symbol} ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Current: $${currentPrice.toFixed(4)}`,
-    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${heldH}h`,
+    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${heldH}h | Regime: ${regime ?? "unknown"}`,
     `RSI(14): ${rsi.toFixed(1)} | EMA20: $${ema20.toFixed(4)} | EMA50: $${ema50.toFixed(4)}`,
-    `Funding: ${fr ? (fr.rate*100).toFixed(4) + "%" : "unknown"}`,
+    `Funding: ${fundingStr}`,
     oi != null ? `OI: ${oi}` : null,
     `SL: ${sl ? "$" + sl.toFixed(4) : "not set"} | TP1: ${tp1 ? "$" + tp1.toFixed(4) : "not set"} | TP2: ${tp2 ? "$" + tp2.toFixed(4) : "not set"}`,
     trigger ? `\nIMMEDIATE TRIGGER: ${trigger}` : null,
-    `\nEXIT TIMING RULES (follow strictly):`,
-    `- NEVER market-close at support (for shorts) or resistance (for longs) — that is the worst exit price.`,
-    `- If thesis is broken but price is at a BAD exit spot: use ADJUST_SL to a tight level just beyond the nearest key level and let the market stop you out cleanly.`,
-    `- CLOSE immediately only if: (1) loss is accelerating fast with no nearby support/resistance, OR (2) trigger is urgent (e.g. funding flip or OI collapse while in loss).`,
-    `- PARTIAL_CLOSE when partially right — secure some profit/cut partial loss, keep runner.`,
-    `- HOLD when thesis is intact and price is just consolidating.`,
-    `- ADJUST_SL to trail closer to price when in profit — protect gains without rushing out.`,
+    `\n── CONFIDENCE-BASED DECISION FRAMEWORK ──`,
+    ...thesisCheck,
+    `\nCount how many supporting vs undermining signals you see for the ${dir} position above.`,
+    `Then pick your action based on conviction level:`,
+    `  STRONG conviction (supporting clearly outweighs undermining) → HOLD`,
+    `  MIXED conviction (roughly even, or 1-2 key signals undermined) → PARTIAL_CLOSE 30%`,
+    `  WEAK conviction (undermining outweighs supporting, thesis fading) → PARTIAL_CLOSE 50-70%`,
+    `  BROKEN thesis (almost all signals now against position) but at BAD exit spot → ADJUST_SL to nearest key level, let market stop out cleanly`,
+    `  BROKEN thesis + loss accelerating with no nearby support/resistance → CLOSE`,
+    rangingNote,
+    `\nEXIT DISCIPLINE (non-negotiable):`,
+    `  • NEVER market-close at support (for shorts) or resistance (for longs) — worst possible exit`,
+    `  • ADJUST_SL to a key level first; market will stop you out at a rational price`,
+    `  • CLOSE immediately only when: loss is accelerating AND no nearby level to hide behind`,
+    `  • PARTIAL_CLOSE to take some off while keeping a runner`,
+    `  • ADJUST_SL to trail tighter when in profit — lock in gains without rushing out`,
     `\nReply with EXACTLY one of these on the FIRST LINE:`,
     `  HOLD`,
     `  PARTIAL_CLOSE [number 1-99]`,
     `  CLOSE`,
     `  ADJUST_SL [$price]`,
-    `Then on the SECOND LINE: one sentence of reasoning (include WHERE you'd want to exit if using ADJUST_SL).`,
-    `Do NOT use HOLD if your reasoning says the thesis is broken.`,
+    `Then on the SECOND LINE: one sentence of reasoning — state which supporting/undermining signals swung the decision, and the specific price level for any SL adjustment.`,
+    `Do NOT use HOLD if your reasoning says the thesis is broken or mixed.`,
   ].filter(Boolean).join("\n");
 
   const resp = await llm.chat({
     taskType: "trade_decision",
-    systemContext: "You are a patient, disciplined futures position manager. You do not panic-close. You find the right exit: tighten stops to key levels, take partials at targets, and only market-close when loss is accelerating with no recovery signal. Never exit at support (for shorts) or resistance (for longs) — those are the worst prices.",
+    systemContext: `You are a patient, disciplined futures position manager. You manage conviction, not just stops. When the thesis weakens, you reduce size first — not panic-close. You find the right exit: tighten stops to key levels, take partials when conviction drops, and only market-close when the thesis is fully broken AND loss is accelerating with no recovery signal. Never exit a short at support or a long at resistance — those are the worst prices. Your job is to manage conviction in tiers.`,
     userMessage: prompt,
   }).catch(() => null);
   if (!resp) return;
