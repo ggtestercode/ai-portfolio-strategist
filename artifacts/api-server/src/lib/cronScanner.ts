@@ -1038,8 +1038,11 @@ const monitorStateCache: Record<string, PositionMonitorState> = {};
 // Track last time an ADJUST_SL notification was sent per symbol (to avoid spam)
 const lastAdjustSlNotifyAt: Record<string, number> = {};
 const ADJUST_SL_NOTIFY_COOLDOWN_MS = 2 * 3_600_000; // at most once per 2h per position
+let monitorRunning = false;
 
 async function checkPositionMonitor(): Promise<void> {
+  if (monitorRunning) { console.log("[posMonitor] Previous check still running — skipping tick"); return; }
+  monitorRunning = true;
   const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
   if (!positions.length) return;
 
@@ -1144,6 +1147,7 @@ async function checkPositionMonitor(): Promise<void> {
     const timeSinceReview = now - state.lastReviewAt;
     const TRIGGER_COOLDOWN_MS = 30 * 60_000;
     const shouldReview = (trigger !== null && timeSinceReview >= TRIGGER_COOLDOWN_MS) || timeSinceReview >= intervalMs;
+    console.log(`[posMonitor] ${pos.symbol} P/L:${pnlPct.toFixed(1)}% lastReviewAt:${state.lastReviewAt === 0 ? "never" : new Date(state.lastReviewAt).toISOString()} sinceLast:${Math.round(timeSinceReview/60000)}min interval:${Math.round(intervalMs/60000)}min trigger:${trigger ?? "none"} → ${shouldReview ? "REVIEW" : "skip"}`);
     if (!shouldReview) continue;
 
     await runPositionReview(pos, trigger, klines, fr, oiVal, posMeta[pos.symbol], stateRow?.currentRegime ?? null).catch(e =>
@@ -1157,6 +1161,8 @@ async function checkPositionMonitor(): Promise<void> {
     .set({ positionMonitorState: monitorState, lastUpdated: new Date() })
     .where(eq(botStateTable.id, 1))
     .catch(e => console.warn("[posMonitor] state save:", (e as Error).message));
+
+  monitorRunning = false;
 }
 
 async function runPositionReview(
