@@ -1043,6 +1043,7 @@ let monitorRunning = false;
 async function checkPositionMonitor(): Promise<void> {
   if (monitorRunning) { console.log("[posMonitor] Previous check still running — skipping tick"); return; }
   monitorRunning = true;
+  try {
   const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
   if (!positions.length) return;
 
@@ -1162,7 +1163,9 @@ async function checkPositionMonitor(): Promise<void> {
     .where(eq(botStateTable.id, 1))
     .catch(e => console.warn("[posMonitor] state save:", (e as Error).message));
 
-  monitorRunning = false;
+  } finally {
+    monitorRunning = false;
+  }
 }
 
 async function runPositionReview(
