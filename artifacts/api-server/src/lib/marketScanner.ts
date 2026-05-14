@@ -2,7 +2,7 @@ import { llm }                      from "./llmRouter";
 import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
-import { getKlines, getFundingRate, getOpenInterest, type BybitKline } from "../brokers/bybit";
+import { getKlines, getFundingRate, getOpenInterest, getTicker, type BybitKline } from "../brokers/bybit";
 import { getRecentMemory }                   from "./tradeMemoryLib";
 import { db, profileTable, holdingsTable }   from "@workspace/db";
 
@@ -57,6 +57,20 @@ export interface ScanOpportunity {
   rejectReasons?:       string[];
   scoreBreakdown?:      Record<string, number>;
   volume24h?:           number;
+  // New v2 fields
+  setupType?:           "REJECTION" | "MOMENTUM" | "OVEREXTENDED" | "LIQUIDITY_SWEEP";
+  setupQuality?:        "HIGH" | "MEDIUM" | "LOW";
+  timing?:              "EARLY" | "MIDDLE" | "LATE";
+  timingReasoning?:     string;
+  whyNow?:              string;
+  edgeType?:            "LIQUIDITY_TRAP" | "SQUEEZE_SETUP" | "RELATIVE_WEAKNESS" | "SWEEP_REVERSAL" | "TREND_CONTINUATION" | "MEAN_REVERSION";
+  conflicts?:           string[];
+  conflictResolution?:  "NO_CONFLICT" | "MINOR_REDUCED" | "MAJOR_SKIP";
+  conflictReasoning?:   string;
+  sweepDetected?:       boolean;
+  squeezeDetected?:     boolean;
+  relativeStrengthVsBtc?: number;
+  rMultiple?:           number;
 }
 
 // ── Technical indicators ──────────────────────────────────────────────────────
@@ -226,6 +240,114 @@ async function fetchMTFData(symbol: string): Promise<string> {
   return parts.join(" | ");
 }
 
+// ── Relative strength helpers ─────────────────────────────────────────────────
+
+interface RSData {
+  symbol: string;
+  rs4h:   number;
+  rs1d:   number;
+  rs7d:   number;
+  rsAvg:  number;
+  bias:   "long" | "short" | "neutral";
+}
+
+async function fetchRelativeStrength(symbols: string[]): Promise<Map<string, RSData>> {
+  // BTC baseline
+  const btcK4h   = await getKlines("BTCUSDT", "240", 2).catch(() => [] as BybitKline[]);
+  const btcK7d   = await getKlines("BTCUSDT", "D",   8).catch(() => [] as BybitKline[]);
+  const btcTicker = await getTicker("BTCUSDT").catch(() => null);
+
+  // change24h is already in %, e.g. 5.0 for +5%
+  const btcH4 = btcK4h.length >= 2 ? (btcK4h[1]!.close - btcK4h[0]!.close) / btcK4h[0]!.close * 100 : 0;
+  const btcD1 = btcTicker ? (btcTicker.change24h ?? 0) : 0;
+  const btcD7 = btcK7d.length >= 2  ? (btcK7d[btcK7d.length-1]!.close - btcK7d[0]!.close) / btcK7d[0]!.close * 100 : 0;
+
+  const result = new Map<string, RSData>();
+  await Promise.allSettled(symbols.map(async sym => {
+    try {
+      const [ticker, k4h, k7d] = await Promise.all([
+        getTicker(sym).catch(() => null),
+        getKlines(sym, "240", 2).catch(() => [] as BybitKline[]),
+        getKlines(sym, "D",   8).catch(() => [] as BybitKline[]),
+      ]);
+      const d1  = ticker ? (ticker.change24h ?? 0) : 0;
+      const h4  = k4h.length >= 2 ? (k4h[1]!.close - k4h[0]!.close) / k4h[0]!.close * 100 : d1;
+      const d7  = k7d.length >= 2  ? (k7d[k7d.length-1]!.close - k7d[0]!.close) / k7d[0]!.close * 100 : d1;
+      const rs4h = h4 - btcH4;
+      const rs1d = d1 - btcD1;
+      const rs7d = d7 - btcD7;
+      const rsAvg = (rs4h + rs1d + rs7d) / 3;
+      result.set(sym, { symbol: sym, rs4h, rs1d, rs7d, rsAvg, bias: rsAvg < -5 ? "short" : rsAvg > 5 ? "long" : "neutral" });
+    } catch { /* skip symbol */ }
+  }));
+  return result;
+}
+
+// ── Liquidity sweep detection ─────────────────────────────────────────────────
+
+interface SweepResult {
+  detected:        boolean;
+  type:            "BULLISH_SWEEP" | "BEARISH_SWEEP" | "NONE";
+  level:           number;
+  sweepExtreme:    number;
+  wickRatio:       number;
+  volumeRatio:     number;
+  reversalCandles: number;
+  quality:         "HIGH" | "MEDIUM" | "LOW" | "NONE";
+}
+
+function detectLiquiditySweep(klines: BybitKline[]): SweepResult {
+  const NONE: SweepResult = { detected: false, type: "NONE", level: 0, sweepExtreme: 0, wickRatio: 0, volumeRatio: 0, reversalCandles: 0, quality: "NONE" };
+  if (klines.length < 20) return NONE;
+
+  const recent   = klines.slice(-10);
+  const volAvg20 = klines.slice(-20).reduce((s, k) => s + k.volume, 0) / 20;
+  const lookback = recent.slice(0, 6);
+  const support    = Math.min(...lookback.map(k => k.low));
+  const resistance = Math.max(...lookback.map(k => k.high));
+
+  for (let i = recent.length - 4; i < recent.length; i++) {
+    const c         = recent[i]!;
+    const body      = Math.abs(c.close - c.open);
+    const upperWick = c.high - Math.max(c.open, c.close);
+    const lowerWick = Math.min(c.open, c.close) - c.low;
+    const volRatio  = c.volume / (volAvg20 || 1);
+
+    // BEARISH_SWEEP
+    if (c.high > resistance && upperWick > body * 1.5 && c.close < resistance) {
+      const quality: SweepResult["quality"] = volRatio >= 2 ? "HIGH" : volRatio >= 1.5 ? "MEDIUM" : "LOW";
+      if (quality === "LOW") continue;
+      return { detected: true, type: "BEARISH_SWEEP", level: resistance, sweepExtreme: c.high,
+               wickRatio: upperWick / (body || 0.0001), volumeRatio: volRatio,
+               reversalCandles: recent.length - i, quality };
+    }
+    // BULLISH_SWEEP
+    if (c.low < support && lowerWick > body * 1.5 && c.close > support) {
+      const quality: SweepResult["quality"] = volRatio >= 2 ? "HIGH" : volRatio >= 1.5 ? "MEDIUM" : "LOW";
+      if (quality === "LOW") continue;
+      return { detected: true, type: "BULLISH_SWEEP", level: support, sweepExtreme: c.low,
+               wickRatio: lowerWick / (body || 0.0001), volumeRatio: volRatio,
+               reversalCandles: recent.length - i, quality };
+    }
+  }
+  return NONE;
+}
+
+// ── Squeeze detection ─────────────────────────────────────────────────────────
+
+function detectSqueeze(
+  fundingRate: number,
+  price:       number,
+  high50:      number,
+  low50:       number,
+): "LONG_SQUEEZE_SETUP" | "SHORT_SQUEEZE_SETUP" | "NONE" {
+  const nearTop    = high50 > 0 && (high50 - price) / high50 < 0.03;
+  const nearBottom = low50  > 0 && (price - low50)  / low50  < 0.03;
+  if (fundingRate >  0.0007 && nearTop)    return "LONG_SQUEEZE_SETUP";
+  if (fundingRate < -0.0007 && nearBottom) return "SHORT_SQUEEZE_SETUP";
+  return "NONE";
+}
+
 export interface ScanResult {
   opportunities:  ScanOpportunity[];
   scanTimestamp:  string;
@@ -298,6 +420,55 @@ export async function runScan(): Promise<ScanResult> {
       } catch { /* skip */ }
     }
 
+    // ── Relative strength vs BTC ──────────────────────────────────────────────
+    const symbolList = cryptoSyms;
+    const rsMap = await fetchRelativeStrength(symbolList).catch(() => new Map<string, RSData>());
+
+    // ── Liquidity sweep + squeeze detection (1h klines) ──────────────────────
+    const sweepMap   = new Map<string, SweepResult>();
+    const squeezeMap = new Map<string, string>();
+    await Promise.allSettled(symbolList.map(async sym => {
+      const klines = await getKlines(sym, "60", 25).catch(() => [] as BybitKline[]);
+      sweepMap.set(sym, detectLiquiditySweep(klines));
+      const fr     = await getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 }));
+      const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
+      const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
+      const price  = klines.length > 0 ? (klines[klines.length - 1]!.close) : 0;
+      squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
+    }));
+
+    // Build RS context string
+    const rsLines = symbolList.map(sym => {
+      const rs = rsMap.get(sym);
+      if (!rs) return null;
+      const sign = rs.rsAvg > 0 ? "+" : "";
+      const tag  = rs.bias === "short" ? "→ weak, short bias" : rs.bias === "long" ? "→ strong, long bias" : "→ neutral";
+      return `  ${sym}: ${sign}${rs.rsAvg.toFixed(1)}% vs BTC ${tag}`;
+    }).filter(Boolean);
+
+    const rsContext = rsLines.length
+      ? `Relative strength vs BTC (avg 4h/1D/7D):\n${rsLines.join("\n")}`
+      : "";
+
+    // Build sweep/squeeze context
+    const sweepLines: string[] = [];
+    for (const [sym, sw] of sweepMap) {
+      if (!sw.detected) continue;
+      sweepLines.push(
+        `Liquidity sweep detected on ${sym}: ${sw.type}\n` +
+        `  Level: $${sw.level.toFixed(4)} | Sweep extreme: $${sw.sweepExtreme.toFixed(4)}\n` +
+        `  Wick: ${sw.wickRatio.toFixed(1)}× body | Volume: ${sw.volumeRatio.toFixed(1)}× avg\n` +
+        `  Reversal: ${sw.reversalCandles} candle(s) | Quality: ${sw.quality}`
+      );
+    }
+    const squeezeLines: string[] = [];
+    for (const [sym, sq] of squeezeMap) {
+      if (sq === "NONE") continue;
+      squeezeLines.push(`Squeeze setup on ${sym}: ${sq}`);
+    }
+    const sweepContext   = sweepLines.join("\n\n");
+    const squeezeContext = squeezeLines.join("\n");
+
     const tableRows      = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
     const holdingSummary = holdings.map(h => `${h.symbol}:$${(h.quantity * h.price).toFixed(0)}`).join(" ");
     const totalPortfolio = holdings.reduce((s, h) => s + h.quantity * h.price, 0);
@@ -351,7 +522,7 @@ export async function runScan(): Promise<ScanResult> {
 
     const systemContext = [
       "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|STRONG SELL|SELL|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":"","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","stopLossReasoning":"","takeProfitReasoning":"","rrReasoning":"","fundingRateContext":"","openInterestContext":"","regimeAlignment":"","rejectReasons":[],"scoreBreakdown":{}}],"scanTimestamp":"","summary":""}`,
+      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|STRONG SELL|SELL|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":"","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","stopLossReasoning":"","takeProfitReasoning":"","rrReasoning":"","fundingRateContext":"","openInterestContext":"","regimeAlignment":"","rejectReasons":[],"scoreBreakdown":{},"setupType":"REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP","setupQuality":"HIGH|MEDIUM|LOW","timing":"EARLY|MIDDLE|LATE","timingReasoning":"","whyNow":"","edgeType":"LIQUIDITY_TRAP|SQUEEZE_SETUP|RELATIVE_WEAKNESS|SWEEP_REVERSAL|TREND_CONTINUATION|MEAN_REVERSION","conflicts":[],"conflictResolution":"NO_CONFLICT|MINOR_REDUCED|MAJOR_SKIP","conflictReasoning":"","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":0,"rMultiple":0}],"scanTimestamp":"","summary":""}`,
       "Rules: rank exactly 5 opportunities. For LONGS: 80-100=STRONG BUY(strong_buy), 60-79=BUY(high). For SHORTS: 80-100=STRONG SELL(strong_sell), 60-79=SELL(high). Both: 40-59=WATCH(medium), <40=AVOID.",
       "DIRECTION BIAS: MANDATORY — include at least 1-2 short signals per scan if any coins show bearish setups. Do not return all longs. Actively look for coins lagging the market, rejecting resistance, or with bearish divergence.",
       "FUNDING RATE (nonlinear): |rate|<0.03% neutral. 0.03-0.07% positive=mild long +3pts. >0.07% positive=crowded long -5pts. 0.03-0.07% negative=mild short +3pts. >0.07% negative=panic -5pts.",
@@ -368,6 +539,13 @@ export async function runScan(): Promise<ScanResult> {
       "riskRewardRatio: longs=(takeProfit-entry)/(entry-stopLoss); shorts=(entry-takeProfit)/(stopLoss-entry). Must be ≥1.5.",
       "Order type: MARKET(IOC) only on confirmed breakout with volume. LIMIT(GTC) when mid-range — set limitPrice at nearest support/resistance. NEVER market order mid-range.",
       `Max position: $${maxPosition.toFixed(0)} (50% of capital). Never exceed.`,
+      "SETUP CLASSIFICATION: Set setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP based on primary pattern. Set setupQuality=HIGH|MEDIUM|LOW.",
+      "TIMING: EARLY=just broke/rejected level, RSI not extreme. MIDDLE=1-2 ATR into move. LATE=3+ ATR moved or RSI extreme. Omit signal (set direction=neutral) if timing=LATE UNLESS setupType=LIQUIDITY_SWEEP.",
+      "WHY NOW: whyNow must name a specific edge. Bad: 'RSI overbought'. Good: 'Funding +0.089% longs trapped, failed breakout $96.50'. If you cannot write a specific whyNow, set direction=neutral.",
+      "CONFLICTS: List conflicting signals in conflicts[]. NO_CONFLICT=all indicators agree. MINOR_REDUCED=majority agree. MAJOR_SKIP=split — set direction=neutral for MAJOR_SKIP.",
+      "RELATIVE STRENGTH: Use provided RS vs BTC data. rsScore<-5%=strong short candidate (score+5pts). rsScore>+5%=strong long candidate (score+5pts). Set relativeStrengthVsBtc field.",
+      "SWEEP: If liquidity sweep detected for this symbol, strongly consider it as primary signal. sweepDetected=true. setupType=LIQUIDITY_SWEEP preferred.",
+      "SQUEEZE: If squeeze setup detected, squeezeDetected=true. Funding-rate crowding is the edge.",
     ].join("\n");
 
     const prompt = [
@@ -383,6 +561,9 @@ export async function runScan(): Promise<ScanResult> {
       ``,
       mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
       fundingLines.length ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n` : "",
+      rsContext ? `\n${rsContext}\n` : "",
+      sweepContext   ? `\n${sweepContext}` : "",
+      squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",
       `Market snapshot (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
       tableRows.join("\n"),
       ``,

@@ -3,11 +3,12 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { initBrokers } from "./lib/startup";
 import { startPolling } from "./notifications/telegram";
-import { startCronScanner } from "./lib/cronScanner";
+import { startCronScanner, startPositionMonitor } from "./lib/cronScanner";
 
 void initBrokers();
 startPolling();     // registers Telegram notifiers (must be before cronScanner)
-startCronScanner(); // starts cron after Telegram is ready; first scan in 10s
+startCronScanner();       // starts cron after Telegram is ready; first scan in 10s
+startPositionMonitor();   // starts 5-min position monitor
 
 const rawPort = process.env["PORT"];
 

@@ -16,6 +16,13 @@ export interface PositionMeta {
   openedAt:    number; // epoch ms
 }
 
+export interface PositionMonitorState {
+  lastReviewAt:    number;  // epoch ms
+  lastFundingRate: number;
+  lastOI:          number;
+  lastRSI1h:       number;
+}
+
 export const botStateTable = pgTable("bot_state", {
   id:                   integer("id").primaryKey().default(1),
   portfolioLeverage:    integer("portfolio_leverage").notNull().default(10),
@@ -30,6 +37,7 @@ export const botStateTable = pgTable("bot_state", {
   regimeChangedAt:      timestamp("regime_changed_at", { withTimezone: true }),
   dailyLossStartEquity: real("daily_loss_start_equity"),
   positionMetadata:     jsonb("position_metadata").$type<Record<string, PositionMeta>>().notNull().default({}),
+  positionMonitorState: jsonb("position_monitor_state").$type<Record<string, PositionMonitorState>>().notNull().default({}),
 });
 
 export type BotState       = typeof botStateTable.$inferSelect;

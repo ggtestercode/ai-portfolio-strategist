@@ -15,9 +15,11 @@ import {
   setStopLoss     as bybitSetStopLoss,
   getFundingRate,
   getKlines,
+  getOpenInterest,
   type BybitPosition,
+  type BybitKline,
 } from "../brokers/bybit";
-import { db, profileTable, botStateTable, tradeMemoryTable, type PositionMeta } from "@workspace/db";
+import { db, profileTable, botStateTable, tradeMemoryTable, type PositionMeta, type PositionMonitorState } from "@workspace/db";
 import { eq, and, desc } from "drizzle-orm";
 
 // ── Technical helpers ─────────────────────────────────────────────────────────
@@ -148,20 +150,36 @@ async function checkDailyLossLimit(bybitBalance: number): Promise<boolean> {
   } catch { return true; }
 }
 
-// ── Layer 4: Risk-based position sizing ───────────────────────────────────────
-function calcRiskBasedSize(
-  bybitBalance: number,
-  stopLoss:     number,
+// ── Layer 4: R-multiple position sizing ──────────────────────────────────────
+function calcRMultipleSizing(
+  balance:      number,
   entry:        number,
+  stopLoss:     number,
   leverage:     number,
+  score:        number,
+  conflictRes:  string,
+  timing:       string,
+  setupQuality: string,
 ): number {
-  if (!stopLoss || !entry || entry === stopLoss) return Math.min(5, bybitBalance * 0.05);
-  const stopLossPct  = Math.abs(entry - stopLoss) / entry;
-  const positionRisk = bybitBalance * 0.05;                        // 5% equity risk
-  const notional     = positionRisk / stopLossPct;                 // notional size
-  const margin       = notional / leverage;                        // margin required
-  const capped       = Math.min(margin, bybitBalance * 0.30);      // cap at 30% equity
-  return Math.max(5, parseFloat(capped.toFixed(2)));               // min $5
+  if (entry <= 0 || stopLoss <= 0) return balance * 0.05 * leverage;
+
+  let rMult =
+    score >= 90 ? 1.2 :
+    score >= 75 ? 1.0 :
+    score >= 65 ? 0.5 : 0;
+
+  if (rMult === 0) return 0;
+  if (conflictRes === "MINOR_REDUCED") rMult *= 0.5;
+  if (timing       === "LATE")         rMult *= 0.5;
+  if (setupQuality === "LOW")          rMult *= 0.5;
+
+  const stopLossPct = Math.abs(entry - stopLoss) / entry;
+  if (stopLossPct <= 0) return balance * 0.05 * leverage;
+
+  const riskAmount   = balance * 0.05 * rMult;
+  const positionSize = (riskAmount / stopLossPct) * leverage;
+  const cap          = balance * 0.30 * leverage;
+  return Math.min(positionSize, cap);
 }
 
 // ── Layer 2: Hard filters ─────────────────────────────────────────────────────
@@ -727,7 +745,7 @@ async function handlePositionDecision(
       outcomes.push({ symbol: sym, action: "HOLD", reason: "Already scaled once — no further ADD", pnlPct: pos.pnlPct });
       return;
     }
-    const riskSize = calcRiskBasedSize(bybitBalance, pos.stopLoss ?? 0, pos.entryPrice, pos.leverage);
+    const riskSize = calcRMultipleSizing(bybitBalance, pos.entryPrice, pos.stopLoss ?? 0, pos.leverage, 65, "NO_CONFLICT", "EARLY", "MEDIUM");
     const proposal = buildProposal({
       symbol:       sym,
       side:         pos.side === "Buy" ? "buy" : "sell",
@@ -922,13 +940,18 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       if (await isCoinSuspended(opp.symbol)) continue;
       const sym = bybitSym(opp.symbol);
 
-      // Layer 4+5: risk-based sizing
-      const amountUsd = calcRiskBasedSize(
+      // Layer 4+5: R-multiple sizing
+      const amountUsd = calcRMultipleSizing(
         bybitBalance,
-        opp.stopLoss  ?? 0,
         opp.entry     ?? opp.price,
+        opp.stopLoss  ?? 0,
         opp.leverage  ?? 10,
+        opp.score     ?? 65,
+        opp.conflictResolution ?? "NO_CONFLICT",
+        opp.timing             ?? "EARLY",
+        opp.setupQuality       ?? "MEDIUM",
       );
+      if (amountUsd <= 0) continue; // skip MAJOR_SKIP or zero-size
 
       const proposal = buildProposal({
         symbol:          sym,
@@ -947,6 +970,31 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         console.error(`[cronScanner] submit ${sym}:`, e);
         return { action: "failed" as const, proposal, message: String(e), orderId: undefined };
       });
+
+      if (gateResult.action === "executed") {
+        const rMult = (opp.score ?? 65) >= 90 ? 1.2 : (opp.score ?? 65) >= 75 ? 1.0 : 0.5;
+        const entryLines = [
+          `✅ <b>NEW ENTRY — ${sym} ${(opp.direction ?? "?").toUpperCase()}</b>`,
+          ``,
+          `📊 Setup: ${opp.setupType ?? "?"} (${opp.setupQuality ?? "?"} quality)`,
+          `⏰ Timing: ${opp.timing ?? "?"}`,
+          `🎯 Edge: ${opp.whyNow ?? opp.reasoning?.slice(0, 120) ?? "?"}`,
+          opp.relativeStrengthVsBtc != null && opp.relativeStrengthVsBtc !== 0
+            ? `📉 vs BTC: ${opp.relativeStrengthVsBtc > 0 ? "+" : ""}${(opp.relativeStrengthVsBtc as number).toFixed(1)}%`
+            : null,
+          opp.squeezeDetected ? `💰 Squeeze setup detected` : null,
+          (opp.conflicts as string[] | undefined)?.length
+            ? `⚔️ Conflicts: ${(opp.conflicts as string[]).join("; ")}`
+            : `⚔️ Conflicts: none`,
+          ``,
+          `Entry: ${opp.orderType === "limit" ? `limit $${opp.limitPrice ?? opp.entry ?? "?"}` : "market"} | Score: ${opp.score} → ${rMult}R`,
+          `SL: $${opp.stopLoss?.toFixed(4) ?? "?"} | TP1: $${opp.tp1?.toFixed(4) ?? "?"} | TP2: $${opp.tp2?.toFixed(4) ?? "?"}`,
+          `Risk: $${(bybitBalance * 0.05 * rMult).toFixed(2)} | Size: $${amountUsd.toFixed(0)} (${opp.leverage ?? 10}×)`,
+          opp.riskRewardRatio ? `R:R 1:${opp.riskRewardRatio.toFixed(1)}` : null,
+        ].filter(Boolean).join("\n");
+        await alertFn?.(entryLines).catch(() => {});
+      }
+
       outcomes.push({
         symbol: sym, amount: amountUsd,
         action: gateResult.action === "executed" ? "NEW" : "HOLD",
@@ -965,6 +1013,187 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
   } finally {
     isScanning = false;
   }
+}
+
+// ── Position monitor (5-min) ──────────────────────────────────────────────────
+const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
+
+async function checkPositionMonitor(): Promise<void> {
+  const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+  if (!positions.length) return;
+
+  const [stateRow] = await db.select({
+    positionMonitorState: botStateTable.positionMonitorState,
+    positionMetadata:     botStateTable.positionMetadata,
+  }).from(botStateTable).limit(1).catch(() => [{
+    positionMonitorState: {} as Record<string, PositionMonitorState>,
+    positionMetadata:     {} as Record<string, PositionMeta>,
+  }]);
+
+  const monitorState = (stateRow?.positionMonitorState ?? {}) as Record<string, PositionMonitorState>;
+  const posMeta      = (stateRow?.positionMetadata     ?? {}) as Record<string, PositionMeta>;
+  const now          = Date.now();
+
+  for (const pos of positions) {
+    const pnlPct = pos.pnlPct ?? 0;
+    const state  = monitorState[pos.symbol] ?? { lastReviewAt: 0, lastFundingRate: 0, lastOI: 0, lastRSI1h: 0 };
+
+    // Hard stop: -40%
+    if (pnlPct <= -40) {
+      console.warn(`[posMonitor] ${pos.symbol} hit -40% hard stop — closing`);
+      const closeSide = pos.side === "Buy" ? "Sell" as const : "Buy" as const;
+      await bybitClose(pos.symbol).catch(e =>
+        console.error(`[posMonitor] close ${pos.symbol}:`, (e as Error).message)
+      );
+      await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(() => {});
+      void closeSide; // suppress unused variable warning
+      continue;
+    }
+
+    // Review interval by P/L tier
+    const intervalMs =
+      pnlPct <= -20 ? 5  * 60_000  :
+      pnlPct <= -10 ? 30 * 60_000  :
+      pnlPct <= -5  ? 60 * 60_000  :
+      pnlPct >= 100 ? 15 * 60_000  :
+      pnlPct >= 50  ? 30 * 60_000  :
+      pnlPct >= 20  ? 60 * 60_000  :
+                      4  * 3_600_000;
+
+    // Fetch fresh data for trigger checks
+    const [frRes, klRes, oiRes] = await Promise.allSettled([
+      getFundingRate(pos.symbol),
+      getKlines(pos.symbol, "60", 25),
+      getOpenInterest(pos.symbol),
+    ]);
+    const fr     = frRes.status === "fulfilled" ? frRes.value  : null;
+    const klines = klRes.status === "fulfilled"  ? (klRes.value as BybitKline[]) : [] as BybitKline[];
+    const oiVal  = oiRes.status === "fulfilled"  ? (oiRes.value as number)       : null;
+
+    let trigger: string | null = null;
+
+    // Trigger 1: Funding flip
+    if (fr && state.lastFundingRate !== 0) {
+      const flipped = (state.lastFundingRate > 0 && fr.rate < 0) || (state.lastFundingRate < 0 && fr.rate > 0);
+      if (flipped) trigger = `Funding rate flipped: ${(state.lastFundingRate*100).toFixed(4)}% → ${(fr.rate*100).toFixed(4)}%`;
+    }
+
+    // Trigger 2: OI drop >10%
+    if (!trigger && oiVal != null && state.lastOI > 0) {
+      const drop = (state.lastOI - oiVal) / state.lastOI;
+      if (drop > 0.10) trigger = `OI dropped ${(drop*100).toFixed(1)}% since last check`;
+    }
+
+    // Trigger 3 & 4: RSI cross + volume spike
+    if (!trigger && klines.length >= 15) {
+      const closes  = klines.map(k => k.close);
+      const rsi     = calcRSI(closes, 14);
+      if (state.lastRSI1h > 0) {
+        if (state.lastRSI1h < 70 && rsi >= 70) trigger = `1h RSI crossed above 70 (${rsi.toFixed(1)}) — overbought`;
+        if (state.lastRSI1h > 30 && rsi <= 30) trigger = `1h RSI crossed below 30 (${rsi.toFixed(1)}) — oversold`;
+      }
+      if (!trigger && klines.length >= 21) {
+        const volAvg = klines.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
+        const lastVol = klines[klines.length - 1]!.volume;
+        if (volAvg > 0 && lastVol > volAvg * 3)
+          trigger = `Volume spike ${(lastVol/volAvg).toFixed(1)}× avg on latest 1h candle`;
+      }
+      monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastRSI1h: rsi };
+    }
+
+    // Update funding/OI state
+    if (fr != null)    monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastFundingRate: fr.rate };
+    if (oiVal != null) monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastOI: oiVal };
+
+    const shouldReview = trigger !== null || (now - state.lastReviewAt) >= intervalMs;
+    if (!shouldReview) continue;
+
+    await runPositionReview(pos, trigger, klines, fr, oiVal, posMeta[pos.symbol]).catch(e =>
+      console.error(`[posMonitor] review ${pos.symbol}:`, e)
+    );
+    monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastReviewAt: now };
+  }
+
+  // Persist monitor state
+  await db.update(botStateTable)
+    .set({ positionMonitorState: monitorState, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1))
+    .catch(e => console.warn("[posMonitor] state save:", (e as Error).message));
+}
+
+async function runPositionReview(
+  pos:     BybitPosition,
+  trigger: string | null,
+  klines:  BybitKline[],
+  fr:      { rate: number } | null,
+  oi:      number | null,
+  meta:    PositionMeta | undefined,
+): Promise<void> {
+  const closes = klines.map(k => k.close);
+  const ema20  = closes.length >= 20 ? calcEMA(closes, 20) : 0;
+  const ema50  = closes.length >= 50 ? calcEMA(closes, 50) : 0;
+  const rsi    = closes.length >= 15 ? calcRSI(closes, 14) : 0;
+  const heldH  = meta ? ((Date.now() - meta.openedAt) / 3_600_000).toFixed(1) : "?";
+  const pnlPct = pos.pnlPct ?? 0;
+  const dir    = pos.side === "Buy" ? "LONG" : "SHORT";
+
+  const currentPrice = closes.length > 0 ? (closes[closes.length - 1] ?? pos.entryPrice) : pos.entryPrice;
+  const prompt = [
+    `Position: ${pos.symbol} ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Current: $${currentPrice.toFixed(4)}`,
+    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${heldH}h`,
+    `RSI(14): ${rsi.toFixed(1)} | EMA20: $${ema20.toFixed(4)} | EMA50: $${ema50.toFixed(4)}`,
+    `Funding: ${fr ? (fr.rate*100).toFixed(4) + "%" : "?"}`,
+    oi != null ? `OI: ${oi}` : "",
+    `SL: $${meta?.sl?.toFixed(4) ?? "?"} | TP1: $${meta?.tp1?.toFixed(4) ?? "?"} | TP2: $${meta?.tp2?.toFixed(4) ?? "?"}`,
+    trigger ? `\nIMMEDIATE TRIGGER: ${trigger}` : "",
+    `\nIs thesis still valid? Reply with one of:\nHOLD\nPARTIAL_CLOSE [1-99]\nCLOSE\nADJUST_SL [$price]\n\nThen one line of reasoning.`,
+  ].filter(Boolean).join("\n");
+
+  const resp = await llm.chat({
+    taskType: "trade_decision",
+    systemContext: "You are a disciplined trading risk manager reviewing a held futures position. Reply with one of HOLD, PARTIAL_CLOSE [pct], CLOSE, ADJUST_SL [$price]. Then one line of reasoning.",
+    userMessage: prompt,
+  }).catch(() => null);
+  if (!resp) return;
+
+  const text  = resp.text.trim();
+  const upper = text.toUpperCase();
+  const lines = text.split("\n").filter(Boolean);
+  const reason = lines.slice(1).join(" ") || "";
+
+  const prefix = trigger
+    ? `⚡ <b>Immediate review — ${pos.symbol}</b>\nTrigger: ${trigger}`
+    : `🔄 <b>Position review — ${pos.symbol} ${dir}</b>`;
+
+  if (upper.startsWith("CLOSE")) {
+    await bybitClose(pos.symbol)
+      .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE\n${reason}`).catch(() => {});
+
+  } else if (upper.startsWith("PARTIAL_CLOSE")) {
+    const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
+    const pct = Math.min(99, Math.max(1, parseInt(m?.[1] ?? "50", 10)));
+    await closePercentPosition(pos.symbol, pct)
+      .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}%\n${reason}`).catch(() => {});
+
+  } else if (upper.startsWith("ADJUST_SL")) {
+    const m    = text.match(/ADJUST_SL\s+\$?([\d.]+)/i);
+    const newSl = m ? parseFloat(m[1]!) : NaN;
+    if (!isNaN(newSl) && newSl > 0) {
+      await bybitSetStopLoss(pos.symbol, newSl, pos.positionIdx)
+        .catch(e => console.error(`[posMonitor] ADJUST_SL ${pos.symbol}:`, (e as Error).message));
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(() => {});
+    }
+  } else {
+    // HOLD
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: HOLD\n${reason}`).catch(() => {});
+  }
+}
+
+export function startPositionMonitor(): void {
+  setInterval(() => { void checkPositionMonitor().catch(e => console.error("[posMonitor]", e)); }, MONITOR_INTERVAL_MS);
+  console.log("[posMonitor] Started — checks every 5 min");
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
