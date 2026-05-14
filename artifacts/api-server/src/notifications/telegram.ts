@@ -1035,7 +1035,7 @@ export function startPolling(): void {
     try {
       const [openPositions, closedPnl] = await Promise.all([
         bybitGetPositions(),
-        bybitGetClosedPnl(10),
+        bybitGetClosedPnl(20),
       ]);
 
       if (!openPositions.length && !closedPnl.length) {
@@ -1066,12 +1066,27 @@ export function startPolling(): void {
       }
 
       if (closedPnl.length) {
-        out.push(`<b>Closed (last ${closedPnl.length}):</b>`);
-        closedPnl.forEach((p, i) => {
+        // Sort chronologically to detect partial-close sequences, then reverse for display
+        const SAME_TRADE_WINDOW_MS = 24 * 3_600_000;
+        const chron = [...closedPnl].sort((a, b) => a.closedAt - b.closedAt);
+        // A record is a partial close when the same symbol+side closes again within 24 h
+        const isPartial = chron.map((r, i) =>
+          chron.slice(i + 1).some(
+            later => later.symbol === r.symbol && later.side === r.side
+              && (later.closedAt - r.closedAt) <= SAME_TRADE_WINDOW_MS
+          )
+        );
+        // Flip back to newest-first
+        const display      = chron.reverse();
+        const displayFlags = isPartial.reverse();
+
+        out.push(`<b>Closed (last ${display.length}):</b>`);
+        display.forEach((p, i) => {
           const dir    = p.side === "Buy" ? "▲" : "▼";
           const sign   = p.closedPnl >= 0 ? "+" : "";
           const when   = fmtSGT(p.closedAt);
-          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}`);
+          const tag    = displayFlags[i] ? ` <i>[partial]</i>` : ``;
+          out.push(`${i + 1}. <b>${escapeHtml(p.symbol)}</b> ${dir} ${sign}$${p.closedPnl.toFixed(2)} · exit $${p.avgExitPrice.toLocaleString("en-US", { maximumFractionDigits: 4 })} · ${when}${tag}`);
         });
         out.push(``);
       }
