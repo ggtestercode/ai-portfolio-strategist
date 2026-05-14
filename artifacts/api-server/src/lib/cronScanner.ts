@@ -1032,6 +1032,10 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 // ── Position monitor (5-min) ──────────────────────────────────────────────────
 const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
 
+// In-memory cache: survives DB failures within a single server session.
+// Seeded from DB on first successful read; DB is the write-through target.
+const monitorStateCache: Record<string, PositionMonitorState> = {};
+
 async function checkPositionMonitor(): Promise<void> {
   const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
   if (!positions.length) return;
@@ -1041,13 +1045,20 @@ async function checkPositionMonitor(): Promise<void> {
     positionMetadata:     botStateTable.positionMetadata,
     currentRegime:        botStateTable.currentRegime,
   }).from(botStateTable).limit(1).catch(() => [{
-    positionMonitorState: {} as Record<string, PositionMonitorState>,
+    positionMonitorState: null as Record<string, PositionMonitorState> | null,
     positionMetadata:     {} as Record<string, PositionMeta>,
     currentRegime:        null as string | null,
   }]);
 
-  const monitorState = (stateRow?.positionMonitorState ?? {}) as Record<string, PositionMonitorState>;
-  const posMeta      = (stateRow?.positionMetadata     ?? {}) as Record<string, PositionMeta>;
+  // Seed in-memory cache from DB on first successful read, otherwise use cache
+  if (stateRow?.positionMonitorState) {
+    for (const [sym, s] of Object.entries(stateRow.positionMonitorState)) {
+      if (!monitorStateCache[sym]) monitorStateCache[sym] = s;
+    }
+  }
+
+  const monitorState = monitorStateCache;
+  const posMeta      = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   const now          = Date.now();
 
   for (const pos of positions) {
