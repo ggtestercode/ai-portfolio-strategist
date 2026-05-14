@@ -659,9 +659,6 @@ importers:
       drizzle-zod:
         specifier: ^0.8.3
         version: 0.8.3(drizzle-orm@0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0))(zod@3.25.76)
-      pg:
-        specifier: ^8.20.0
-        version: 8.20.0
       ws:
         specifier: ^8.20.0
         version: 8.20.0
@@ -681,6 +678,9 @@ importers:
       drizzle-kit:
         specifier: ^0.31.9
         version: 0.31.9
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
 
   lib/integrations-openai-ai-react: {}
 
