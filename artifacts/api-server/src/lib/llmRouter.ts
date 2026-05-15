@@ -27,7 +27,7 @@ const TASK_CONFIG = {
   strategy_generation:  { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },
   trade_decision:       { model: "sonnet" as ModelTier, maxTokens: 200,  cache: true  },
   rebalance_plan:       { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },
-  market_scan:          { model: "sonnet" as ModelTier, maxTokens: 4000, cache: true  },
+  market_scan:          { model: "sonnet" as ModelTier, maxTokens: 8192, cache: true  },
   performance_analysis: { model: "sonnet" as ModelTier, maxTokens: 600,  cache: true  },
   deep_research:        { model: "opus"   as ModelTier, maxTokens: 2000, cache: true  },
 } as const;
