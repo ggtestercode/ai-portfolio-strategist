@@ -1,5 +1,5 @@
 import cron, { type ScheduledTask }   from "node-cron";
-import { runScan, type ScanResult, type ScanOpportunity, calcATR } from "./marketScanner";
+import { runScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
@@ -766,8 +766,6 @@ async function handlePositionDecision(
 }
 
 // ── Format scan summary for Telegram ─────────────────────────────────────────
-const SCORE_THRESHOLD = 65;
-
 function formatScanSummary(
   outcomes:      SignalOutcome[],
   signalCount:   number,
@@ -798,20 +796,18 @@ function formatScanSummary(
   ];
 
   // Top 5 scores (executed symbols shown separately below)
+  const threshold    = getRegimeThreshold(regime?.regime);
   const executedSyms = new Set(newEntries.map(o => o.symbol));
   const top5 = [...opps]
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
     .filter(o => !executedSyms.has(bybitSym(o.symbol)))
     .slice(0, 5);
   if (top5.length) {
-    const thresholdTag = (regime?.regime === "CHOPPY" || regime?.regime === "EXHAUSTION")
-      ? `(${regime.regime} — no new entries)`
-      : `(need ${SCORE_THRESHOLD} to trade)`;
-    lines.push(`📊 <b>Top scores</b> ${thresholdTag}:`);
+    lines.push(`📊 <b>Top scores</b> (need ${threshold} in ${regime?.regime ?? "?"}):`)  ;
     for (const o of top5) {
       const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
-      const nearTag = o.score >= SCORE_THRESHOLD - 5 && o.score < SCORE_THRESHOLD
-        ? ` ⚠️ close (need ${SCORE_THRESHOLD})`
+      const nearTag = o.score >= threshold - 5 && o.score < threshold
+        ? ` ⚠️ close (need ${threshold})`
         : "";
       lines.push(`  ${dir} ${o.symbol} — ${o.score}${nearTag}`);
     }
@@ -856,8 +852,9 @@ function formatScanSummary(
   }
 
   // Watch: sweep/squeeze detected but below threshold
+  console.log("[scanSummary] Watch candidates:", opps.filter(o => o.sweepDetected || o.squeezeDetected).map(o => `${o.symbol}(sweep=${String(o.sweepDetected)},squeeze=${String(o.squeezeDetected)},score=${o.score})`).join(", ") || "none");
   const watched = [...opps]
-    .filter(o => o.score < SCORE_THRESHOLD && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
+    .filter(o => o.score < threshold && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
     .slice(0, 3);
   if (watched.length) {
@@ -947,14 +944,14 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     // Log all signals received from Claude for diagnostics
     console.log(`[cronScanner] Signals from Claude: ${cryptoOpps.map(o => `${o.symbol}(score=${o.score},dir=${o.direction ?? "?"},conv=${o.conviction ?? "?"}`).join(", ")}`);
 
-    // Pre-filter: score >= 65 (removes WATCH/AVOID), skip already-held symbols
-    // Note: conviction check removed — "high" (score 65-79) is valid for both longs and shorts
+    // Pre-filter: score >= regime threshold, skip already-held symbols
+    const execThreshold = getRegimeThreshold(regime?.regime);
     const preRejected: Array<{ symbol: string; reason: string }> = [];
     const newSignals = cryptoOpps.filter(o => {
       if (existingSyms.has(bybitSym(o.symbol))) return false; // already in position
       const score = o.score ?? 0;
-      if (score < 65) {
-        preRejected.push({ symbol: o.symbol, reason: `score ${score} below threshold (65)` });
+      if (score < execThreshold) {
+        preRejected.push({ symbol: o.symbol, reason: `score ${score} below threshold (${execThreshold})` });
         return false;
       }
       return true;

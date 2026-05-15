@@ -10,7 +10,7 @@ import {
   type AssistantContext,
 } from "../lib/aiResponder";
 import { getPortfolioSnapshot }            from "../lib/portfolio";
-import { runScan, type ScanResult } from "../lib/marketScanner";
+import { runFreshScan, type ScanResult, getRegimeThreshold } from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
 import { getPortfolio, getOrders as etoroGetOrders, getPositionsWithSymbols as etoroGetPositions } from "../brokers/etoro";
@@ -392,7 +392,7 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       await b.sendMessage(chatId, `🔍 Running market scan… <i>this takes ~20 s</i>`, { parse_mode: "HTML" });
-      const result = await runScan();
+      const result = await runFreshScan();
 
       if (!result.opportunities.length) {
         await b.sendMessage(chatId,
@@ -401,17 +401,8 @@ export function startPolling(): void {
         return;
       }
 
-      const THRESHOLD = 65;
-      const top5 = result.opportunities.slice(0, 5);
-      const scoreLines = top5.map(o => {
-        const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
-        const nearTag = o.score >= THRESHOLD - 5 && o.score < THRESHOLD
-          ? ` ⚠️ close (need ${THRESHOLD})`
-          : "";
-        return `  ${dir} ${escapeHtml(o.symbol)} — ${o.score}${nearTag}`;
-      });
-
-      const regime = result.regime;
+      const regime    = result.regime;
+      const threshold = getRegimeThreshold(regime?.regime);
       const regimeEmoji: Record<string, string> = {
         STRONG_TREND: "🚀", TRENDING_UP: "📈", TRENDING_DOWN: "📉",
         RANGING: "↕️", CHOPPY: "↔️", EXHAUSTION: "⚠️", VOLATILE: "⚡",
@@ -420,9 +411,18 @@ export function startPolling(): void {
         ? `${regimeEmoji[regime.regime] ?? "?"} ${regime.regime} | ADX:${regime.adx.toFixed(0)}`
         : "? Unknown";
 
-      // Watch candidates: sweep/squeeze detected but below execution threshold
+      const top5 = result.opportunities.slice(0, 5);
+      const scoreLines = top5.map(o => {
+        const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
+        const nearTag = o.score >= threshold - 5 && o.score < threshold
+          ? ` ⚠️ close (need ${threshold})`
+          : "";
+        return `  ${dir} ${escapeHtml(o.symbol)} — ${o.score}${nearTag}`;
+      });
+
+      // Watch: sweep/squeeze detected but below threshold
       const watched = result.opportunities
-        .filter(o => o.score < 65 && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
+        .filter(o => o.score < threshold && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
         .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
         .slice(0, 3);
       const watchLines = watched.map(o => {
@@ -432,24 +432,24 @@ export function startPolling(): void {
         return `  👀 ${escapeHtml(o.symbol)} — ${reason}, ${cond}`;
       });
 
-      // Truncate summary to 3 lines
-      const summaryShort = result.summary.split("\n").filter(Boolean).slice(0, 3).join("\n");
-
-      const thresholdTag = (regime?.regime === "CHOPPY" || regime?.regime === "EXHAUSTION")
-        ? `(${regime.regime} — no new entries)`
-        : `(need ${THRESHOLD} to trade)`;
+      // Fix 1: truncate summary — split by newlines, fall back to sentences
+      const shortSummary = result.summary
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .slice(0, 3)
+        .join('\n');
 
       await b.sendMessage(chatId, [
         `🔍 <b>Scan complete</b> — ${re}`,
         `<i>${utcNow()}</i>`,
         ``,
-        `📊 <b>Top scores</b> ${thresholdTag}:`,
+        `📊 <b>Top scores</b> (need ${threshold} in ${regime?.regime ?? "?"}):`  ,
         ...scoreLines,
         watchLines.length ? `` : null,
-        watchLines.length ? `<b>Watch:</b>` : null,
+        watchLines.length ? `👀 <b>Watch:</b>` : null,
         ...watchLines,
         ``,
-        `<i>${escapeHtml(summaryShort)}</i>`,
+        `<i>${escapeHtml(shortSummary)}</i>`,
       ].filter(l => l !== null).join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);

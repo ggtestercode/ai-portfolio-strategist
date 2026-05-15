@@ -361,6 +361,21 @@ const FALLBACK_RESULT: ScanResult = {
   summary:       "Scan unavailable",
 };
 
+export function getRegimeThreshold(regimeType: string | undefined): number {
+  switch (regimeType) {
+    case "RANGING":    return 70;
+    case "CHOPPY":     return 80;
+    case "VOLATILE":   return 75;
+    case "EXHAUSTION": return 80;
+    default:           return 65; // TRENDING_UP, TRENDING_DOWN, STRONG_TREND
+  }
+}
+
+export async function runFreshScan(): Promise<ScanResult> {
+  cache.invalidate(CacheKey.marketScan());
+  return runScan();
+}
+
 async function fetchBatch(entries: WatchlistEntry[]): Promise<AssetData[]> {
   const settled = await Promise.allSettled(
     entries.map(e => fetchAssetData(e.symbol, e.assetClass))
