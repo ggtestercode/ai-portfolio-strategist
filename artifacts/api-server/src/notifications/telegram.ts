@@ -1236,9 +1236,9 @@ export function startPolling(): void {
     const msg   = err.message ?? "";
     const cause = err.cause?.code ?? "";
     const is409 = msg.includes("409") || msg.toLowerCase().includes("conflict");
-    if (err.code === "EFATAL" && is409) {
-      console.warn("[telegram] Polling 409 Conflict — exiting for PM2 clean restart…");
-      process.exit(1);
+    if (is409) {
+      recordPollingError();
+      console.warn(`[telegram] 409 Conflict (consecutive=${consecutivePollingErrors}): another bot instance is polling — check for remote deployments`);
     } else {
       recordPollingError();
       console.warn(`[telegram] Polling error (will retry, consecutive=${consecutivePollingErrors}):`, msg || cause || err.code);

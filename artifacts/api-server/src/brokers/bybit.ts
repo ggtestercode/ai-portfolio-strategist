@@ -186,6 +186,31 @@ export async function openPosition(
   opts?: { stopLoss?: number; takeProfit?: number },
 ): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number }> {
   if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
+
+  // ── Available-balance guard ────────────────────────────────────────────────
+  const { totalEquity, availableBalance } = await getBalance();
+  const maxMargin    = availableBalance * 0.30;          // max margin for this trade
+  const maxNotional  = maxMargin * leverage;             // equivalent notional cap
+  const marginNeeded = amountUsd / leverage;
+
+  console.log("[Bybit] Balance check:", {
+    totalEquity:    totalEquity.toFixed(2),
+    availableBalance: availableBalance.toFixed(2),
+    requestedSize:  amountUsd.toFixed(2),
+    maxAllowed:     maxNotional.toFixed(2),
+  });
+
+  if (marginNeeded > maxMargin) {
+    const capped = maxNotional;
+    if (capped < 5) {
+      throw new Error(
+        `❌ Insufficient available margin\nAvailable: $${availableBalance.toFixed(2)} | Minimum needed: $5`,
+      );
+    }
+    console.warn(`[Bybit] Order capped from $${amountUsd.toFixed(2)} to $${capped.toFixed(2)} notional (30% of available margin)`);
+    amountUsd = capped;
+  }
+
   const sym = normalise(symbol);
   await setLeverage(sym, leverage);
 
