@@ -181,7 +181,12 @@ function calcRMultipleSizing(
   timing:       string,
   setupQuality: string,
 ): number {
-  if (entry <= 0 || stopLoss <= 0) return balance * 0.05; // 5% of balance as margin
+  const minimumMargin = 5;                  // Bybit minimum
+  const maximumMargin = balance * 0.30;     // never commit more than 30% of balance as margin
+
+  if (entry <= 0 || stopLoss <= 0) {
+    return Math.max(minimumMargin, Math.min(balance * 0.05, maximumMargin));
+  }
 
   let rMult =
     score >= 90 ? 1.2 :
@@ -194,14 +199,23 @@ function calcRMultipleSizing(
   if (setupQuality === "LOW")          rMult *= 0.5;
 
   const stopLossPct = Math.abs(entry - stopLoss) / entry;
-  if (stopLossPct <= 0) return balance * 0.05; // 5% of balance as margin
+  if (stopLossPct <= 0) {
+    return Math.max(minimumMargin, Math.min(balance * 0.05, maximumMargin));
+  }
 
   // Margin needed so that a SL hit loses exactly riskAmount:
   //   loss = margin × stopLossPct × leverage  →  margin = riskAmount / (stopLossPct × leverage)
   const riskAmount = balance * 0.05 * rMult;
   const marginSize = riskAmount / (stopLossPct * leverage);
-  const cap        = balance * 0.30; // never commit more than 30% of balance as margin
-  return Math.min(marginSize, cap);
+
+  console.log("Position sizing:", {
+    riskAmount,
+    minimumMargin,
+    maximumMargin,
+    finalMargin: Math.max(minimumMargin, Math.min(marginSize, maximumMargin)),
+  });
+
+  return Math.max(minimumMargin, Math.min(marginSize, maximumMargin));
 }
 
 // ── Layer 2: Hard filters ─────────────────────────────────────────────────────

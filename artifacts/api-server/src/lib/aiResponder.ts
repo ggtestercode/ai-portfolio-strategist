@@ -14,6 +14,7 @@ import { closePositionPaper, getPositionsPaper } from "../brokers/okxPaper";
 import {
   getTicker    as bybitGetTicker,
   getPositions as bybitGetPositions,
+  getBalance   as bybitGetBalance,
   openLimitPosition   as bybitOpenLimit,
   closePartialByAmount as bybitClosePartial,
   closePercentPosition as bybitClosePercent,
@@ -1073,16 +1074,26 @@ export async function generateAssistantReply(
     const trade = await parseTrade(message);
 
     if (trade) {
-      // ── FIX 1: Missing amount ────────────────────────────────────────────
+      // ── FIX 1: Missing amount — auto-size for Bybit, ask for others ────────
       if (trade.amountMissing) {
-        if (sessionId) {
-          setSession(sessionId, {
-            type: "await_amount", symbol: trade.symbol, side: trade.side,
-            broker: trade.broker, assetClass: trade.assetClass,
-            orderType: trade.orderType, limitPrice: trade.limitPrice,
-          });
+        if (trade.broker === "bybit") {
+          const { availableBalance } = await bybitGetBalance().catch(() => ({ availableBalance: 0, totalEquity: 0, currency: "USDT" }));
+          const riskAmount    = availableBalance * 0.05;
+          const minimumMargin = 5;
+          const maximumMargin = availableBalance * 0.30;
+          trade.amountUsd     = Math.max(minimumMargin, Math.min(riskAmount, maximumMargin));
+          trade.amountMissing = false;
+          console.log("Position sizing (NL auto):", { riskAmount, minimumMargin, maximumMargin, finalMargin: trade.amountUsd });
+        } else {
+          if (sessionId) {
+            setSession(sessionId, {
+              type: "await_amount", symbol: trade.symbol, side: trade.side,
+              broker: trade.broker, assetClass: trade.assetClass,
+              orderType: trade.orderType, limitPrice: trade.limitPrice,
+            });
+          }
+          return { message: `How much do you want to ${trade.side} ${trade.symbol}? (e.g. "$50" or "$100")` };
         }
-        return { message: `How much do you want to ${trade.side} ${trade.symbol}? (e.g. "$50" or "$100")` };
       }
 
       // ── FIX 4: Confirmation gate for orders over $50 ─────────────────────
