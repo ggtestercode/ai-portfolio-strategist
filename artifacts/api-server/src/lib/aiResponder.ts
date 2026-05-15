@@ -6,7 +6,7 @@
 import { llm, type TaskType }   from "./llmRouter";
 import { cache, TTL, CacheKey } from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
-import { db, profileTable, holdingsTable } from "@workspace/db";
+import { db, profileTable, holdingsTable, botStateTable, type PositionMeta } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { closePosition as etoroClose, getPortfolio, getPositionsWithSymbols as etoroGetPositions, getLiveRates as etoroGetLiveRates } from "../brokers/etoro";
 import { closePosition as okxClose, closeByUnits as okxCloseByUnits, getPositions as okxGetPositions, openLimitPosition as okxOpenLimit, openPosition as okxOpenSpot } from "../brokers/okx";
@@ -398,6 +398,16 @@ async function parseCloseRequest(message: string): Promise<CloseRequest | null> 
   };
 }
 
+
+async function patchEntrySource(symbol: string, source: "manual_nl" | "auto_scan"): Promise<void> {
+  const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
+    .from(botStateTable).limit(1);
+  const meta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), entrySource: source };
+  await db.update(botStateTable)
+    .set({ positionMetadata: meta, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1));
+}
 
 async function executeClose(intent: CloseIntent): Promise<string> {
   const { symbol, amountType, amount, broker } = intent;
@@ -810,6 +820,11 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
         amountUsd:  trade.amountUsd,
         reasoning:  "NL trade instruction",
       }).catch(() => {});
+    }
+
+    // Tag Bybit NL trades so position review gate knows they're manual
+    if (isBybit) {
+      patchEntrySource(trade.symbol, "manual_nl").catch(() => {});
     }
 
     if (isOKXSpot) {

@@ -7,13 +7,14 @@ export interface CoinPenalty {
 }
 
 export interface PositionMeta {
-  originalQty: number;
-  entryPrice:  number;
-  sl:          number;
-  atr:         number;
-  tp1:         number;
-  tp2:         number;
-  openedAt:    number; // epoch ms
+  originalQty:  number;
+  entryPrice:   number;
+  sl:           number;
+  atr:          number;
+  tp1:          number;
+  tp2:          number;
+  openedAt:     number; // epoch ms
+  entrySource?: "manual_nl" | "auto_scan";
 }
 
 export interface PositionMonitorState {

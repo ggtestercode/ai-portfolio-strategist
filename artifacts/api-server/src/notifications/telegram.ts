@@ -36,6 +36,8 @@ import {
 import { okxPaperMode } from "../lib/startup";
 import {
   registerAlertNotifier,
+  registerReviewNotifier,
+  resolveReview,
   setCronEnabled,
   resumeTrading,
   triggerNow,
@@ -246,6 +248,27 @@ export function startPolling(): void {
   registerWatchdogAlert(alertHandler);
   startWatchdog();
 
+  registerReviewNotifier(async (symbol, decision, reason, pnlPctStr, reviewId) => {
+    const chatId = process.env["TELEGRAM_CHAT_ID"];
+    if (!chatId) return;
+    await getBot().sendMessage(chatId, [
+      `🔔 <b>Manual trade review — ${escapeHtml(symbol)}</b>`,
+      `Claude suggests: <b>${escapeHtml(decision)}</b>`,
+      `P/L: <b>${escapeHtml(pnlPctStr)}%</b>`,
+      reason ? `Reason: ${escapeHtml(reason)}` : null,
+      ``,
+      `<i>Approve to execute · reject or 10-min timeout → HOLD</i>`,
+    ].filter(Boolean).join("\n"), {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Execute",    callback_data: `review_approve:${reviewId}` },
+          { text: "❌ Keep HOLD", callback_data: `review_reject:${reviewId}` },
+        ]],
+      },
+    });
+  });
+
   // ── Inline button callbacks — approve / reject ───────────────────────────
   b.on("callback_query", async (query) => {
     const data   = query.data ?? "";
@@ -259,7 +282,21 @@ export function startPolling(): void {
     const action     = sep === -1 ? data : data.slice(0, sep);
     const proposalId = sep === -1 ? ""   : data.slice(sep + 1);
 
-    if (action !== "approve" && action !== "reject") return;
+    if (action !== "approve" && action !== "reject" &&
+        action !== "review_approve" && action !== "review_reject") return;
+
+    // ── Position review gate callbacks ───────────────────────────────────────
+    if (action === "review_approve" || action === "review_reject") {
+      const approved = action === "review_approve";
+      resolveReview(proposalId, approved);
+      await b.editMessageText(
+        approved
+          ? `✅ <b>Review approved</b> — executing now\n<i>${utcNow()}</i>`
+          : `⏹ <b>Review rejected</b> — HOLD maintained\n<i>${utcNow()}</i>`,
+        { chat_id: chatId, message_id: msgId, parse_mode: "HTML" },
+      ).catch(() => {});
+      return;
+    }
 
     try {
       const result = action === "approve"
@@ -718,7 +755,10 @@ export function startPolling(): void {
           stopsStr = slStr + tpStr;
         }
 
-        out.push(`• <b>${escapeHtml(p.symbol)}</b> — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${fmt(p.entryPrice)}${pnlStr}${stopsStr}`);
+        const sourceTag = meta?.entrySource === "manual_nl" ? " <i>[manual]</i>"
+                        : meta?.entrySource === "auto_scan"  ? " <i>[auto]</i>"
+                        : "";
+        out.push(`• <b>${escapeHtml(p.symbol)}</b>${sourceTag} — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${fmt(p.entryPrice)}${pnlStr}${stopsStr}`);
       }
 
       if (localPending.length) {

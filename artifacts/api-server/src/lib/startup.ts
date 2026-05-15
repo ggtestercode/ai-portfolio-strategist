@@ -38,7 +38,7 @@ async function storePositionMeta(symbol: string, meta: PositionMeta): Promise<vo
   const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
     .from(botStateTable).limit(1);
   const existing = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
-  existing[symbol] = meta;
+  existing[symbol] = { entrySource: existing[symbol]?.entrySource, ...meta };
   await db.update(botStateTable)
     .set({ positionMetadata: existing, lastUpdated: new Date() })
     .where(eq(botStateTable.id, 1));

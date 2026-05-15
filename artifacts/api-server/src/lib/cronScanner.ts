@@ -52,14 +52,32 @@ export let lastScanTime: Date | null = null;
 let cronTask:   ScheduledTask | null = null;
 let isScanning: boolean              = false;
 
-type ScanNotifier  = (result: ScanResult, triggered: "cron" | "manual") => Promise<void>;
-type AlertNotifier = (message: string) => Promise<void>;
+type ScanNotifier   = (result: ScanResult, triggered: "cron" | "manual") => Promise<void>;
+type AlertNotifier  = (message: string) => Promise<void>;
+type ReviewNotifier = (symbol: string, decision: string, reason: string, pnlPctStr: string, reviewId: string) => Promise<void>;
 
-let notifyFn: ScanNotifier  | null = null;
-let alertFn:  AlertNotifier | null = null;
+let notifyFn:  ScanNotifier   | null = null;
+let alertFn:   AlertNotifier  | null = null;
+let reviewFn:  ReviewNotifier | null = null;
 
-export function registerScanNotifier(fn: ScanNotifier): void  { notifyFn = fn; }
-export function registerAlertNotifier(fn: AlertNotifier): void { alertFn  = fn; }
+export function registerScanNotifier(fn: ScanNotifier): void    { notifyFn  = fn; }
+export function registerAlertNotifier(fn: AlertNotifier): void  { alertFn   = fn; }
+export function registerReviewNotifier(fn: ReviewNotifier): void { reviewFn = fn; }
+
+// ── Pending manual-trade review gate ─────────────────────────────────────────
+interface PendingReview {
+  resolve: (approved: boolean) => void;
+  timer:   ReturnType<typeof setTimeout>;
+}
+const pendingReviews = new Map<string, PendingReview>();
+
+export function resolveReview(reviewId: string, approved: boolean): void {
+  const r = pendingReviews.get(reviewId);
+  if (!r) return;
+  clearTimeout(r.timer);
+  pendingReviews.delete(reviewId);
+  r.resolve(approved);
+}
 
 const SCAN_INTERVAL     = process.env["SCAN_INTERVAL"] ?? "*/30 * * * *";
 const MAX_AUTO_TRADES   = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
@@ -765,6 +783,45 @@ async function handlePositionDecision(
   }
 }
 
+// ── Entry source tagging ──────────────────────────────────────────────────────
+async function patchEntrySource(symbol: string, source: "manual_nl" | "auto_scan"): Promise<void> {
+  const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
+    .from(botStateTable).limit(1);
+  const meta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), entrySource: source };
+  await db.update(botStateTable)
+    .set({ positionMetadata: meta, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1));
+}
+
+// ── Manual review gate (sends Telegram request, awaits approval, 10-min timeout → HOLD) ──
+async function gateManualReview(
+  symbol:   string,
+  decision: string,
+  reason:   string,
+  pnlPct:   number,
+): Promise<boolean> {
+  if (!reviewFn) return true; // no notifier registered → auto-approve
+
+  const reviewId = `rev_${symbol}_${Date.now()}`;
+  const pnlPctStr = `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}`;
+
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingReviews.delete(reviewId);
+      resolve(false); // timeout → HOLD
+    }, 10 * 60 * 1000);
+
+    pendingReviews.set(reviewId, { resolve, timer });
+
+    reviewFn!(symbol, decision, reason, pnlPctStr, reviewId).catch(() => {
+      clearTimeout(timer);
+      pendingReviews.delete(reviewId);
+      resolve(false);
+    });
+  });
+}
+
 // ── Format scan summary for Telegram ─────────────────────────────────────────
 function formatScanSummary(
   outcomes:      SignalOutcome[],
@@ -1007,6 +1064,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       });
 
       if (gateResult.action === "executed") {
+        // Tag as auto_scan so position review gating knows its origin
+        patchEntrySource(sym, "auto_scan").catch(e => console.warn(`[cronScanner] patchEntrySource ${sym}:`, e.message));
+
         // Log to trade memory so history page and future reviews have entry context
         await logOpenTrade({
           symbol:          sym,
@@ -1315,6 +1375,22 @@ async function runPositionReview(
   const prefix = trigger
     ? `⚡ <b>Immediate review — ${pos.symbol}</b>\nTrigger: ${trigger}`
     : `🔄 <b>Position review — ${pos.symbol} ${dir}</b>`;
+
+  // Gate non-HOLD decisions for manually-entered positions
+  if (!upper.startsWith("HOLD") && meta?.entrySource === "manual_nl") {
+    const approved = await gateManualReview(pos.symbol, lines[0] ?? text, reason, pnlPct);
+    if (!approved) {
+      console.log(`[posMonitor] Manual gate: ${pos.symbol} ${lines[0] ?? "?"} → HOLD (no approval)`);
+      await alertFn?.([
+        `${prefix}`,
+        `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
+        ``,
+        `[manual] Claude suggested: ${lines[0] ?? "?"}`,
+        `No approval received — HOLD maintained`,
+      ].join("\n")).catch(() => {});
+      return;
+    }
+  }
 
   if (upper.startsWith("CLOSE")) {
     await bybitClose(pos.symbol)
