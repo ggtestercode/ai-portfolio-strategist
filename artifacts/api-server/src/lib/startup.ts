@@ -61,9 +61,19 @@ async function applyAtrSlTp(
   }
 
   const mult = direction === "long" ? 1 : -1;
-  let   sl   = entryPrice - mult * atr * 1.5;
+  let   sl   = entryPrice - mult * atr * 1.5;   // LONG: below entry; SHORT: above entry
   const tp1  = entryPrice + mult * atr * 1.0;
   const tp2  = entryPrice + mult * atr * 2.0;
+
+  // Defensive: ensure SL is on the correct side of entry regardless of formula bugs
+  if (direction === "long" && sl >= entryPrice) {
+    console.error(`[startup] BUG: LONG SL $${sl.toFixed(4)} >= entry $${entryPrice.toFixed(4)} — recalculating`);
+    sl = entryPrice - atr * 1.5;
+  }
+  if (direction === "short" && sl <= entryPrice) {
+    console.error(`[startup] BUG: SHORT SL $${sl.toFixed(4)} <= entry $${entryPrice.toFixed(4)} — recalculating`);
+    sl = entryPrice + atr * 1.5;
+  }
 
   // Hard cap: SL cannot be more than 40% from entry
   const maxSlDist = entryPrice * 0.40;
@@ -173,6 +183,8 @@ async function setSlTpForExistingPositions(): Promise<void> {
     .from(botStateTable).limit(1).catch(() => [{ positionMetadata: {} }]);
   const existingMeta = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
 
+  console.log("[startup] Position metadata:", JSON.stringify(existingMeta, null, 2));
+
   for (const pos of positions) {
     const hasSl  = pos.stopLoss   && pos.stopLoss   > 0;
     const hasTp  = pos.takeProfit && pos.takeProfit > 0;
@@ -194,9 +206,18 @@ async function setSlTpForExistingPositions(): Promise<void> {
 
     // Always recompute from current ATR — don't rely on stored values for exchange sync
     const mult = direction === "long" ? 1 : -1;
-    let   sl   = pos.entryPrice - mult * atr * 1.5;
+    let   sl   = pos.entryPrice - mult * atr * 1.5;   // LONG: below entry; SHORT: above entry
     const tp1  = pos.entryPrice + mult * atr * 1.0;
     const tp2  = pos.entryPrice + mult * atr * 2.0;
+
+    if (direction === "long" && sl >= pos.entryPrice) {
+      console.error(`[startup] BUG: LONG SL $${sl.toFixed(4)} >= entry $${pos.entryPrice.toFixed(4)} — recalculating`);
+      sl = pos.entryPrice - atr * 1.5;
+    }
+    if (direction === "short" && sl <= pos.entryPrice) {
+      console.error(`[startup] BUG: SHORT SL $${sl.toFixed(4)} <= entry $${pos.entryPrice.toFixed(4)} — recalculating`);
+      sl = pos.entryPrice + atr * 1.5;
+    }
 
     const maxSlDist = pos.entryPrice * 0.40;
     if (Math.abs(sl - pos.entryPrice) > maxSlDist) {
