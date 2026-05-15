@@ -435,11 +435,15 @@ export function startPolling(): void {
       // Truncate summary to 3 lines
       const summaryShort = result.summary.split("\n").filter(Boolean).slice(0, 3).join("\n");
 
+      const thresholdTag = (regime?.regime === "CHOPPY" || regime?.regime === "EXHAUSTION")
+        ? `(${regime.regime} — no new entries)`
+        : `(need ${THRESHOLD} to trade)`;
+
       await b.sendMessage(chatId, [
         `🔍 <b>Scan complete</b> — ${re}`,
         `<i>${utcNow()}</i>`,
         ``,
-        `📊 <b>Top scores:</b>`,
+        `📊 <b>Top scores</b> ${thresholdTag}:`,
         ...scoreLines,
         watchLines.length ? `` : null,
         watchLines.length ? `<b>Watch:</b>` : null,

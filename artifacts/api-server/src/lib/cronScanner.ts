@@ -804,7 +804,10 @@ function formatScanSummary(
     .filter(o => !executedSyms.has(bybitSym(o.symbol)))
     .slice(0, 5);
   if (top5.length) {
-    lines.push(`📊 <b>Top scores:</b>`);
+    const thresholdTag = (regime?.regime === "CHOPPY" || regime?.regime === "EXHAUSTION")
+      ? `(${regime.regime} — no new entries)`
+      : `(need ${SCORE_THRESHOLD} to trade)`;
+    lines.push(`📊 <b>Top scores</b> ${thresholdTag}:`);
     for (const o of top5) {
       const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
       const nearTag = o.score >= SCORE_THRESHOLD - 5 && o.score < SCORE_THRESHOLD
