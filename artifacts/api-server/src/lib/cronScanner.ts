@@ -805,11 +805,12 @@ function formatScanSummary(
   if (top5.length) {
     lines.push(`📊 <b>Top scores</b> (need ${threshold} in ${regime?.regime ?? "?"}):`)  ;
     for (const o of top5) {
-      const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
+      const dir   = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "↔️";
+      const label = o.direction === "short" ? "SHORT" : o.direction === "long" ? "LONG" : "WATCH";
       const nearTag = o.score >= threshold - 5 && o.score < threshold
         ? ` ⚠️ close (need ${threshold})`
         : "";
-      lines.push(`  ${dir} ${o.symbol} — ${o.score}${nearTag}`);
+      lines.push(`  ${o.symbol} ${dir} ${label} — ${o.score}${nearTag}`);
     }
     lines.push(``);
   }

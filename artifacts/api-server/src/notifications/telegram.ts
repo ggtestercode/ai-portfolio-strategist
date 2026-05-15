@@ -413,11 +413,12 @@ export function startPolling(): void {
 
       const top5 = result.opportunities.slice(0, 5);
       const scoreLines = top5.map(o => {
-        const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
+        const dir   = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "↔️";
+        const label = o.direction === "short" ? "SHORT" : o.direction === "long" ? "LONG" : "WATCH";
         const nearTag = o.score >= threshold - 5 && o.score < threshold
           ? ` ⚠️ close (need ${threshold})`
           : "";
-        return `  ${dir} ${escapeHtml(o.symbol)} — ${o.score}${nearTag}`;
+        return `  ${escapeHtml(o.symbol)} ${dir} ${label} — ${o.score}${nearTag}`;
       });
 
       // Watch: sweep/squeeze detected but below threshold
