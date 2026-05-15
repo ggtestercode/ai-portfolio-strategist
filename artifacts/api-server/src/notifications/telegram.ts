@@ -52,7 +52,6 @@ import { getRecentTrades, getOpenTrades, getRecentMemory, getDailyPnl } from "..
 import {
   db,
   profileTable,
-  holdingsTable,
   targetAllocationsTable,
   botStateTable,
   type PositionMeta,
@@ -84,25 +83,26 @@ function displaySymbol(symbol: string): string {
 
 async function buildContext(): Promise<AssistantContext> {
   return getCachedContext(async () => {
-    const [profile, holdings, allocations, config] = await Promise.all([
+    const [profile, bybitPositions, allocations, config] = await Promise.all([
       db.select().from(profileTable).limit(1).then(r => r[0]),
-      db.select().from(holdingsTable),
+      bybitGetPositions().catch(() => []),
       db.select().from(targetAllocationsTable),
       approvalGate.getConfig(),
     ]);
+    const capital = profile?.totalCapital ?? 200;
     return {
       profile: {
         name:           profile?.name          ?? "Investor",
         riskTolerance:  (profile?.riskTolerance ?? "medium") as "low" | "medium" | "high",
         investmentGoal: `Target return: ${profile?.targetReturnPct ?? 10}% over ${profile?.timeHorizonMonths ?? 12} months`,
       },
-      totalPortfolioUsd:    holdings.reduce((s, h) => s + h.quantity * h.price, 0),
+      totalPortfolioUsd:    capital,
       availableCashUsd:     0,
-      holdings:             holdings.map(h => ({
-        symbol:           h.symbol,
-        assetClass:       h.assetClass,
-        currentValueUsd:  h.quantity * h.price,
-        unrealisedPnlPct: h.change24hPct ?? 0,
+      holdings:             bybitPositions.map(p => ({
+        symbol:           p.symbol,
+        assetClass:       "Crypto",
+        currentValueUsd:  p.size * p.entryPrice / p.leverage,
+        unrealisedPnlPct: p.pnlPct,
       })),
       targetAllocations:    Object.fromEntries(allocations.map(a => [a.assetClass, a.targetPct])),
       activeStrategy:       profile?.strategyType ?? "Balanced Growth",
