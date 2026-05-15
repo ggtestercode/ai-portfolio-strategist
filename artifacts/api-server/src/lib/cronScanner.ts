@@ -766,6 +766,8 @@ async function handlePositionDecision(
 }
 
 // ── Format scan summary for Telegram ─────────────────────────────────────────
+const SCORE_THRESHOLD = 65;
+
 function formatScanSummary(
   outcomes:      SignalOutcome[],
   signalCount:   number,
@@ -776,6 +778,7 @@ function formatScanSummary(
   openPositions:  number,
   maxPositions:   number,
   signalsPassed:  number,
+  opps:           ScanOpportunity[],
 ): string {
   const regimeEmoji: Record<string, string> = {
     STRONG_TREND: "🚀", TRENDING_UP: "📈", TRENDING_DOWN: "📉",
@@ -793,6 +796,24 @@ function formatScanSummary(
     `🔍 <b>Scan complete</b> — ${re}`,
     ``,
   ];
+
+  // Top 5 scores (executed symbols shown separately below)
+  const executedSyms = new Set(newEntries.map(o => o.symbol));
+  const top5 = [...opps]
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .filter(o => !executedSyms.has(bybitSym(o.symbol)))
+    .slice(0, 5);
+  if (top5.length) {
+    lines.push(`📊 <b>Top scores:</b>`);
+    for (const o of top5) {
+      const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
+      const nearTag = o.score >= SCORE_THRESHOLD - 5 && o.score < SCORE_THRESHOLD
+        ? ` ⚠️ close (need ${SCORE_THRESHOLD})`
+        : "";
+      lines.push(`  ${dir} ${o.symbol} — ${o.score}${nearTag}`);
+    }
+    lines.push(``);
+  }
 
   // Position review section — always shown when there are holds or cuts
   const positionOutcomes = [...holds, ...cuts];
@@ -879,9 +900,6 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     await checkHoldTimers(livePositions, regime).catch(e =>
       console.error("[cronScanner] holdTimers:", e)
     );
-
-    // Notify Telegram of scan result
-    await notifyFn?.(result, triggered).catch(e => console.error("[cronScanner] notify failed:", e));
 
     const outcomes: SignalOutcome[] = [];
 
@@ -1018,7 +1036,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     // Telegram summary
     const dailyPnl = await getDailyPnl().catch(() => 0);
-    const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, maxPositions, filteredSignals.length);
+    const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, maxPositions, filteredSignals.length, result.opportunities);
     await alertFn?.(summary).catch(() => {});
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);

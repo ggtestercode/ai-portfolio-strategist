@@ -10,7 +10,7 @@ import {
   type AssistantContext,
 } from "../lib/aiResponder";
 import { getPortfolioSnapshot }            from "../lib/portfolio";
-import { runScan, type Recommendation, type ScanResult } from "../lib/marketScanner";
+import { runScan, type ScanResult } from "../lib/marketScanner";
 import { rebalanceNow }                    from "../lib/rebalancer";
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from "../lib/watchlist";
 import { getPortfolio, getOrders as etoroGetOrders, getPositionsWithSymbols as etoroGetPositions } from "../brokers/etoro";
@@ -35,7 +35,6 @@ import {
 } from "../brokers/bybit";
 import { okxPaperMode } from "../lib/startup";
 import {
-  registerScanNotifier,
   registerAlertNotifier,
   setCronEnabled,
   resumeTrading,
@@ -82,26 +81,6 @@ function displaySymbol(symbol: string): string {
   return symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
 }
 
-const REC_EMOJI: Record<Recommendation, string> = {
-  "STRONG BUY": "🟢",
-  "BUY":        "🟡",
-  "WATCH":      "🔵",
-  "AVOID":      "🔴",
-};
-
-function signalLabel(o: ScanOpportunity): string {
-  if (o.direction === "short") {
-    const tag = o.score >= 80 ? "STRONG SHORT" : o.score >= 60 ? "SHORT" : o.recommendation;
-    return `🔻 ${tag} (${o.score})`;
-  }
-  if (o.direction === "long") {
-    const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
-    return `${emoji} ${o.recommendation} (${o.score})`;
-  }
-  // neutral / avoid
-  const emoji = REC_EMOJI[o.recommendation as Recommendation] ?? "⚪";
-  return `${emoji} ${o.recommendation} (${o.score})`;
-}
 
 async function buildContext(): Promise<AssistantContext> {
   return getCachedContext(async () => {
@@ -232,35 +211,6 @@ export const sendApprovalRequest = async (approval: PendingApproval): Promise<vo
 
 // ── Cron scanner notification ────────────────────────────────────────────────
 
-async function notifyScanComplete(result: ScanResult, triggered: "cron" | "manual"): Promise<void> {
-  const label = triggered === "manual" ? "Manual Scan" : "Auto Scan";
-  const top   = result.opportunities.slice(0, 5);
-
-  if (!top.length) {
-    await send(
-      `🔍 <b>${label}</b> — No signals found\n<i>${utcNow()}</i>`,
-      { parse_mode: "HTML" }
-    );
-    return;
-  }
-
-  const lines = top.map((o, i) => {
-    return [
-      `${i + 1}. ${signalLabel(o)} <b>${escapeHtml(o.symbol)}</b>`,
-      `$${o.price.toLocaleString("en-US", { maximumFractionDigits: 4 })} · <i>${new Date(o.dataTimestamp).toUTCString()}</i>`,
-      escapeHtml(o.reasoning),
-    ].join("\n");
-  }).join("\n\n");
-
-  await send([
-    `🔍 <b>${label} Results</b>`,
-    `<i>${new Date(result.scanTimestamp).toUTCString()}</i>`,
-    ``,
-    lines,
-    ``,
-    `<i>${escapeHtml(result.summary)}</i>`,
-  ].join("\n"), { parse_mode: "HTML" });
-}
 
 export function startPolling(): void {
   const b = getBot();
@@ -290,7 +240,6 @@ export function startPolling(): void {
   ]).catch(e => console.warn("[telegram] setMyCommands failed:", e));
 
   // Register all callbacks
-  registerScanNotifier(notifyScanComplete);
   const alertHandler: (msg: string) => Promise<void> = async (msg) => send(msg, { parse_mode: "HTML" });
   registerAlertNotifier(alertHandler);
   registerLeverageAlert(alertHandler);
@@ -452,20 +401,31 @@ export function startPolling(): void {
         return;
       }
 
+      const THRESHOLD = 65;
       const top5 = result.opportunities.slice(0, 5);
-      const lines = top5.map((o, i) => {
-        return [
-          `${i + 1}. ${signalLabel(o)} <b>${escapeHtml(o.symbol)}</b>`,
-          `$${o.price.toLocaleString("en-US", { maximumFractionDigits: 4 })} | data: <i>${new Date(o.dataTimestamp).toUTCString()}</i>`,
-          escapeHtml(o.reasoning),
-        ].join("\n");
-      }).join("\n\n");
+      const scoreLines = top5.map(o => {
+        const dir     = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "  ";
+        const nearTag = o.score >= THRESHOLD - 5 && o.score < THRESHOLD
+          ? ` ⚠️ close (need ${THRESHOLD})`
+          : "";
+        return `  ${dir} ${escapeHtml(o.symbol)} — ${o.score}${nearTag}`;
+      });
+
+      const regime = result.regime;
+      const regimeEmoji: Record<string, string> = {
+        STRONG_TREND: "🚀", TRENDING_UP: "📈", TRENDING_DOWN: "📉",
+        RANGING: "↕️", CHOPPY: "↔️", EXHAUSTION: "⚠️", VOLATILE: "⚡",
+      };
+      const re = regime
+        ? `${regimeEmoji[regime.regime] ?? "?"} ${regime.regime} | ADX:${regime.adx.toFixed(0)}`
+        : "? Unknown";
 
       await b.sendMessage(chatId, [
-        `🔍 <b>Market Scan — Top 5 Picks</b>`,
-        `<i>${new Date(result.scanTimestamp).toUTCString()}</i>`,
+        `🔍 <b>Scan complete</b> — ${re}`,
+        `<i>${utcNow()}</i>`,
         ``,
-        lines,
+        `📊 <b>Top scores:</b>`,
+        ...scoreLines,
         ``,
         `<i>${escapeHtml(result.summary)}</i>`,
       ].join("\n"), { parse_mode: "HTML" });
