@@ -185,30 +185,37 @@ export async function openPosition(
   leverage = 10,
   opts?: { stopLoss?: number; takeProfit?: number },
 ): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number }> {
-  if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
-
-  // ── Available-balance guard ────────────────────────────────────────────────
+  // ── Position sizing ───────────────────────────────────────────────────────
   const { totalEquity, availableBalance } = await getBalance();
-  const maxMargin    = availableBalance * 0.30;          // max margin for this trade
-  const maxNotional  = maxMargin * leverage;             // equivalent notional cap
-  const marginNeeded = amountUsd / leverage;
+  const bybitBalance   = availableBalance;
+  const riskAmount     = bybitBalance * 0.05;
+  const minimumMargin  = 5;                    // Bybit minimum
+  const maximumMargin  = bybitBalance * 0.30;
 
-  console.log("[Bybit] Balance check:", {
-    totalEquity:    totalEquity.toFixed(2),
-    availableBalance: availableBalance.toFixed(2),
-    requestedSize:  amountUsd.toFixed(2),
-    maxAllowed:     maxNotional.toFixed(2),
+  const finalMargin = Math.max(
+    minimumMargin,
+    Math.min(riskAmount, maximumMargin),
+  );
+
+  console.log("Position sizing:", {
+    riskAmount,
+    minimumMargin,
+    maximumMargin,
+    finalMargin,
   });
 
-  if (marginNeeded > maxMargin) {
-    const capped = maxNotional;
-    if (capped < 5) {
-      throw new Error(
-        `❌ Insufficient available margin\nAvailable: $${availableBalance.toFixed(2)} | Minimum needed: $5`,
-      );
-    }
-    console.warn(`[Bybit] Order capped from $${amountUsd.toFixed(2)} to $${capped.toFixed(2)} notional (30% of available margin)`);
-    amountUsd = capped;
+  // amountUsd arrives as notional; derive requested margin then apply limits
+  const requestedMargin = amountUsd / leverage;
+  const clampedMargin   = Math.max(minimumMargin, Math.min(requestedMargin, maximumMargin));
+  if (clampedMargin !== requestedMargin) {
+    console.warn(`[Bybit] Margin clamped: requested $${requestedMargin.toFixed(2)} → $${clampedMargin.toFixed(2)}`);
+  }
+  amountUsd = clampedMargin * leverage;   // convert back to notional
+
+  if (amountUsd < 5) {
+    throw new Error(
+      `❌ Insufficient available margin\nAvailable: $${availableBalance.toFixed(2)} (30% cap = $${maximumMargin.toFixed(2)}) | Minimum notional: $5`,
+    );
   }
 
   const sym = normalise(symbol);
