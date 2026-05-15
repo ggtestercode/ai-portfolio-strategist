@@ -113,6 +113,12 @@ async function applyAtrSlTp(
   ].join("\n")).catch(() => {});
 }
 
+async function logPositionMetadata(): Promise<void> {
+  const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
+    .from(botStateTable).limit(1).catch(() => [{ positionMetadata: {} }]);
+  console.log("[startup] Position metadata:", JSON.stringify(row?.positionMetadata ?? {}, null, 2));
+}
+
 export async function initBrokers(): Promise<void> {
   approvalGate.registerExecutor("etoro", async (p) => {
     const symbol = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
@@ -170,6 +176,9 @@ export async function initBrokers(): Promise<void> {
   // Set SL/TP for any existing positions that don't have them
   setSlTpForExistingPositions().catch(e => console.error("[startup] SL/TP setup failed:", e));
 
+  // Always log current position metadata for debugging
+  logPositionMetadata().catch(() => {});
+
   console.log("[startup] Broker executors registered: etoro, bybit, okx");
   console.log("[startup] Telegram notifier registered");
 }
@@ -182,8 +191,6 @@ async function setSlTpForExistingPositions(): Promise<void> {
   const [stateRow] = await db.select({ positionMetadata: botStateTable.positionMetadata })
     .from(botStateTable).limit(1).catch(() => [{ positionMetadata: {} }]);
   const existingMeta = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
-
-  console.log("[startup] Position metadata:", JSON.stringify(existingMeta, null, 2));
 
   for (const pos of positions) {
     const hasSl  = pos.stopLoss   && pos.stopLoss   > 0;
