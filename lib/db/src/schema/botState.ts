@@ -7,14 +7,16 @@ export interface CoinPenalty {
 }
 
 export interface PositionMeta {
-  originalQty:  number;
-  entryPrice:   number;
-  sl:           number;
-  atr:          number;
-  tp1:          number;
-  tp2:          number;
-  openedAt:     number; // epoch ms
-  entrySource?: "manual_nl" | "auto_scan";
+  originalQty:      number;
+  entryPrice:       number;
+  sl:               number;
+  atr:              number;
+  tp1:              number;
+  tp2:              number;
+  openedAt:         number; // epoch ms
+  entrySource?:     "manual_nl" | "auto_scan";
+  trailingActive?:  boolean; // trailing SL has been activated
+  lastTrailPrice?:  number;  // price at which trail was last updated
 }
 
 export interface PositionMonitorState {

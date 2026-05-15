@@ -38,7 +38,12 @@ async function storePositionMeta(symbol: string, meta: PositionMeta): Promise<vo
   const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
     .from(botStateTable).limit(1);
   const existing = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
-  existing[symbol] = { entrySource: existing[symbol]?.entrySource, ...meta };
+  existing[symbol] = {
+    entrySource:    existing[symbol]?.entrySource,
+    trailingActive: existing[symbol]?.trailingActive,
+    lastTrailPrice: existing[symbol]?.lastTrailPrice,
+    ...meta,
+  };
   await db.update(botStateTable)
     .set({ positionMetadata: existing, lastUpdated: new Date() })
     .where(eq(botStateTable.id, 1));
@@ -66,12 +71,12 @@ async function applyAtrSlTp(
   const tp2  = entryPrice + mult * atr * 2.0;
 
   // Defensive: ensure SL is on the correct side of entry regardless of formula bugs
-  if (direction === "long" && sl >= entryPrice) {
-    console.error(`[startup] BUG: LONG SL $${sl.toFixed(4)} >= entry $${entryPrice.toFixed(4)} — recalculating`);
+  if (direction === "long" && sl > entryPrice) {
+    console.error(`[startup] SL above entry for long — recalculating: SL=$${sl.toFixed(4)} entry=$${entryPrice.toFixed(4)}`);
     sl = entryPrice - atr * 1.5;
   }
-  if (direction === "short" && sl <= entryPrice) {
-    console.error(`[startup] BUG: SHORT SL $${sl.toFixed(4)} <= entry $${entryPrice.toFixed(4)} — recalculating`);
+  if (direction === "short" && sl < entryPrice) {
+    console.error(`[startup] SL below entry for short — recalculating: SL=$${sl.toFixed(4)} entry=$${entryPrice.toFixed(4)}`);
     sl = entryPrice + atr * 1.5;
   }
 
@@ -217,12 +222,12 @@ async function setSlTpForExistingPositions(): Promise<void> {
     const tp1  = pos.entryPrice + mult * atr * 1.0;
     const tp2  = pos.entryPrice + mult * atr * 2.0;
 
-    if (direction === "long" && sl >= pos.entryPrice) {
-      console.error(`[startup] BUG: LONG SL $${sl.toFixed(4)} >= entry $${pos.entryPrice.toFixed(4)} — recalculating`);
+    if (direction === "long" && sl > pos.entryPrice) {
+      console.error(`[startup] SL above entry for long — recalculating: SL=$${sl.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)}`);
       sl = pos.entryPrice - atr * 1.5;
     }
-    if (direction === "short" && sl <= pos.entryPrice) {
-      console.error(`[startup] BUG: SHORT SL $${sl.toFixed(4)} <= entry $${pos.entryPrice.toFixed(4)} — recalculating`);
+    if (direction === "short" && sl < pos.entryPrice) {
+      console.error(`[startup] SL below entry for short — recalculating: SL=$${sl.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)}`);
       sl = pos.entryPrice + atr * 1.5;
     }
 

@@ -16,6 +16,7 @@ import {
   getFundingRate,
   getKlines,
   getOpenInterest,
+  getClosedPnl    as bybitGetClosedPnl,
   type BybitPosition,
   type BybitKline,
 } from "../brokers/bybit";
@@ -169,6 +170,7 @@ async function checkDailyLossLimit(bybitBalance: number): Promise<boolean> {
 }
 
 // ── Layer 4: R-multiple position sizing ──────────────────────────────────────
+// Returns MARGIN amount (not notional). Executor multiplies by leverage to get notional.
 function calcRMultipleSizing(
   balance:      number,
   entry:        number,
@@ -179,7 +181,7 @@ function calcRMultipleSizing(
   timing:       string,
   setupQuality: string,
 ): number {
-  if (entry <= 0 || stopLoss <= 0) return balance * 0.05 * leverage;
+  if (entry <= 0 || stopLoss <= 0) return balance * 0.05; // 5% of balance as margin
 
   let rMult =
     score >= 90 ? 1.2 :
@@ -192,12 +194,14 @@ function calcRMultipleSizing(
   if (setupQuality === "LOW")          rMult *= 0.5;
 
   const stopLossPct = Math.abs(entry - stopLoss) / entry;
-  if (stopLossPct <= 0) return balance * 0.05 * leverage;
+  if (stopLossPct <= 0) return balance * 0.05; // 5% of balance as margin
 
-  const riskAmount   = balance * 0.05 * rMult;
-  const positionSize = (riskAmount / stopLossPct) * leverage;
-  const cap          = balance * 0.30 * leverage;
-  return Math.min(positionSize, cap);
+  // Margin needed so that a SL hit loses exactly riskAmount:
+  //   loss = margin × stopLossPct × leverage  →  margin = riskAmount / (stopLossPct × leverage)
+  const riskAmount = balance * 0.05 * rMult;
+  const marginSize = riskAmount / (stopLossPct * leverage);
+  const cap        = balance * 0.30; // never commit more than 30% of balance as margin
+  return Math.min(marginSize, cap);
 }
 
 // ── Layer 2: Hard filters ─────────────────────────────────────────────────────
@@ -783,6 +787,17 @@ async function handlePositionDecision(
   }
 }
 
+// ── Position metadata patch (merges partial updates) ─────────────────────────
+async function patchPositionMeta(symbol: string, updates: Partial<PositionMeta>): Promise<void> {
+  const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
+    .from(botStateTable).limit(1);
+  const meta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), ...updates };
+  await db.update(botStateTable)
+    .set({ positionMetadata: meta, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1));
+}
+
 // ── Entry source tagging ──────────────────────────────────────────────────────
 async function patchEntrySource(symbol: string, source: "manual_nl" | "auto_scan"): Promise<void> {
   const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
@@ -1133,6 +1148,8 @@ const monitorStateCache: Record<string, PositionMonitorState> = {};
 // Track last time an ADJUST_SL notification was sent per symbol (to avoid spam)
 const lastAdjustSlNotifyAt: Record<string, number> = {};
 const ADJUST_SL_NOTIFY_COOLDOWN_MS = 2 * 3_600_000; // at most once per 2h per position
+// Symbols that had open positions on the previous monitor tick (for close detection)
+const prevPositionSymbols = new Set<string>();
 let monitorRunning = false;
 
 async function checkPositionMonitor(): Promise<void> {
@@ -1162,6 +1179,24 @@ async function checkPositionMonitor(): Promise<void> {
   const monitorState = monitorStateCache;
   const posMeta      = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   const now          = Date.now();
+
+  // ── Trailing SL close detection ────────────────────────────────────────────
+  const currentSymbols = new Set(positions.map(p => p.symbol));
+  for (const sym of prevPositionSymbols) {
+    if (!currentSymbols.has(sym) && posMeta[sym]?.trailingActive) {
+      const closed = await bybitGetClosedPnl(5).catch(() => []);
+      const trade  = closed.find(c => c.symbol === sym);
+      if (trade) {
+        await alertFn?.([
+          `✅ <b>Trailing SL triggered — ${sym}</b>`,
+          `Exited at $${trade.avgExitPrice.toFixed(4)}`,
+          `Profit locked: ${trade.closedPnl >= 0 ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
+        ].join("\n")).catch(() => {});
+      }
+    }
+  }
+  prevPositionSymbols.clear();
+  positions.forEach(p => prevPositionSymbols.add(p.symbol));
 
   for (const pos of positions) {
     const pnlPct = pos.pnlPct ?? 0;
@@ -1237,6 +1272,47 @@ async function checkPositionMonitor(): Promise<void> {
     // Update funding/OI state
     if (fr != null)    monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastFundingRate: fr.rate };
     if (oiVal != null) monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastOI: oiVal };
+
+    // ── Trailing SL (runs every tick) ────────────────────────────────────────
+    const meta     = posMeta[pos.symbol];
+    const isLong   = pos.side === "Buy";
+    const atr      = klines.length >= 15 ? calcATR(klines, 14) : 0;
+    if (atr > 0 && pnlPct >= 3) {
+      const trailDist   = atr * 0.5;
+      // Derive live price from unrealized pnl to avoid an extra API call
+      const livePrice   = pos.size > 0
+        ? pos.entryPrice + (isLong ? 1 : -1) * (pos.pnl / pos.size)
+        : pos.entryPrice;
+      const newSL       = isLong ? livePrice - trailDist : livePrice + trailDist;
+      const currentSL   = meta?.sl ?? pos.stopLoss ?? 0;
+      // Only move SL in the protective direction (ratchet up for longs, down for shorts)
+      const betterSL    = isLong ? newSL > currentSL : (currentSL === 0 || newSL < currentSL);
+
+      if (betterSL) {
+        if (!meta?.trailingActive) {
+          // First activation — notify Telegram
+          await bybitSetStopLoss(pos.symbol, newSL, pos.positionIdx)
+            .catch(e => console.warn(`[posMonitor] trailing SL set ${pos.symbol}:`, (e as Error).message));
+          await patchPositionMeta(pos.symbol, { sl: newSL, trailingActive: true, lastTrailPrice: livePrice });
+          await alertFn?.([
+            `🔄 <b>Trailing SL activated — ${pos.symbol}</b>`,
+            `SL moved to $${newSL.toFixed(4)} (ATR×0.5 trail)`,
+            `Current profit locked: +${pnlPct.toFixed(2)}%`,
+          ].join("\n")).catch(() => {});
+          console.log(`[posMonitor] ${pos.symbol} trailing SL activated: $${newSL.toFixed(4)} live=$${livePrice.toFixed(4)} ATR=$${atr.toFixed(4)}`);
+        } else {
+          // Already trailing — update silently when price moved ≥ 1 trail distance
+          const lastTrail  = meta.lastTrailPrice ?? pos.entryPrice;
+          const priceMoved = Math.abs(livePrice - lastTrail);
+          if (priceMoved >= trailDist) {
+            await bybitSetStopLoss(pos.symbol, newSL, pos.positionIdx)
+              .catch(e => console.warn(`[posMonitor] trailing SL update ${pos.symbol}:`, (e as Error).message));
+            await patchPositionMeta(pos.symbol, { sl: newSL, lastTrailPrice: livePrice });
+            console.log(`[posMonitor] ${pos.symbol} trailing SL → $${newSL.toFixed(4)} (moved $${priceMoved.toFixed(4)})`);
+          }
+        }
+      }
+    }
 
     // Triggers respect a 30-min cooldown — prevents re-firing every tick on a
     // persistent condition (e.g. same high-volume candle, OI still low)
