@@ -852,6 +852,22 @@ function formatScanSummary(
     lines.push(`📈 <b>New signals:</b> none`);
   }
 
+  // Watch: sweep/squeeze detected but below threshold
+  const watched = [...opps]
+    .filter(o => o.score < SCORE_THRESHOLD && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, 3);
+  if (watched.length) {
+    lines.push(``);
+    lines.push(`👀 <b>Watch:</b>`);
+    for (const o of watched) {
+      const reason = o.sweepDetected ? "sweep detected" : o.squeezeDetected ? "squeeze setup" : "setup forming";
+      const adx    = regime?.adx ?? 0;
+      const cond   = adx < 25 ? `enter if ADX > 25` : `confirm on 1h breakout`;
+      lines.push(`  ${o.symbol} — ${reason}, ${cond}`);
+    }
+  }
+
   lines.push(``);
   lines.push(`💰 Daily P/L: ${dailyTag}`);
   lines.push(`💼 Positions: ${openPositions}/${maxPositions} slots | Balance: $${balance.toFixed(2)}`);

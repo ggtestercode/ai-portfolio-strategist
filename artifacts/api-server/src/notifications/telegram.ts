@@ -420,15 +420,33 @@ export function startPolling(): void {
         ? `${regimeEmoji[regime.regime] ?? "?"} ${regime.regime} | ADX:${regime.adx.toFixed(0)}`
         : "? Unknown";
 
+      // Watch candidates: sweep/squeeze detected but below execution threshold
+      const watched = result.opportunities
+        .filter(o => o.score < 65 && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+        .slice(0, 3);
+      const watchLines = watched.map(o => {
+        const reason = o.sweepDetected ? "sweep detected" : o.squeezeDetected ? "squeeze setup" : "setup forming";
+        const adx    = regime?.adx ?? 0;
+        const cond   = adx < 25 ? `enter if ADX > 25` : `confirm on 1h breakout`;
+        return `  👀 ${escapeHtml(o.symbol)} — ${reason}, ${cond}`;
+      });
+
+      // Truncate summary to 3 lines
+      const summaryShort = result.summary.split("\n").filter(Boolean).slice(0, 3).join("\n");
+
       await b.sendMessage(chatId, [
         `🔍 <b>Scan complete</b> — ${re}`,
         `<i>${utcNow()}</i>`,
         ``,
         `📊 <b>Top scores:</b>`,
         ...scoreLines,
+        watchLines.length ? `` : null,
+        watchLines.length ? `<b>Watch:</b>` : null,
+        ...watchLines,
         ``,
-        `<i>${escapeHtml(result.summary)}</i>`,
-      ].join("\n"), { parse_mode: "HTML" });
+        `<i>${escapeHtml(summaryShort)}</i>`,
+      ].filter(l => l !== null).join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ Scan failed: ${escapeHtml(m)}`).catch(() => {});

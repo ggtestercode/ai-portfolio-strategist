@@ -2,9 +2,9 @@ import { llm }                      from "./llmRouter";
 import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
-import { getKlines, getFundingRate, getOpenInterest, getTicker, type BybitKline } from "../brokers/bybit";
+import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, type BybitKline, type BybitPosition } from "../brokers/bybit";
 import { getRecentMemory }                   from "./tradeMemoryLib";
-import { db, profileTable, holdingsTable }   from "@workspace/db";
+import { db, profileTable }                  from "@workspace/db";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
 export type Conviction     = "low" | "medium" | "high" | "strong_buy" | "strong_sell";
@@ -392,10 +392,10 @@ export async function runScan(): Promise<ScanResult> {
     // Detect market regime first (BTC as proxy)
     const regime = await detectMarketRegime();
 
-    const [watchlist, profile, holdings, tradeMemory] = await Promise.all([
+    const [watchlist, profile, bybitPositions, tradeMemory] = await Promise.all([
       getWatchlist(),
       db.select().from(profileTable).limit(1).then(r => r[0]),
-      db.select().from(holdingsTable),
+      bybitGetPositions().catch(() => [] as BybitPosition[]),
       getRecentMemory(20).catch(() => ""),
     ]);
 
@@ -470,14 +470,15 @@ export async function runScan(): Promise<ScanResult> {
     const squeezeContext = squeezeLines.join("\n");
 
     const tableRows      = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
-    const holdingSummary = holdings.map(h => `${h.symbol}:$${(h.quantity * h.price).toFixed(0)}`).join(" ");
-    const totalPortfolio = holdings.reduce((s, h) => s + h.quantity * h.price, 0);
+    const bybitPosSummary = bybitPositions.length
+      ? bybitPositions.map(p => `${p.symbol} ${p.side} size=${p.size} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
+      : "none";
 
     const risk         = (profile?.riskTolerance ?? "medium").toLowerCase();
     const targetReturn = profile?.targetReturnPct ?? 10;
     const capital      = profile?.totalCapital ?? 200;
     const strategyName = profile?.strategyType ?? "Balanced";
-    const maxPosition  = Math.max(10, (totalPortfolio || capital) * 0.5);
+    const maxPosition  = Math.max(10, capital * 0.5);
 
     const riskDirective =
       risk === "extreme" || risk === "high"
@@ -549,7 +550,7 @@ export async function runScan(): Promise<ScanResult> {
     ].join("\n");
 
     const prompt = [
-      `Portfolio: $${totalPortfolio.toFixed(0)} total. Holdings: ${holdingSummary || "none"}.`,
+      `Bybit live positions: ${bybitPosSummary}`,
       `Risk: ${profile?.riskTolerance ?? "high"}. Strategy: ${profile?.strategyType ?? "Momentum"}.`,
       `UTC: ${new Date().toISOString()}`,
       ``,
