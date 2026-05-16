@@ -1,5 +1,6 @@
 import cron, { type ScheduledTask }   from "node-cron";
 import { runScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
+import { runPaperScan, updatePaperTradesPnl, startWeeklyAbReportCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
@@ -1146,6 +1147,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     await alertFn?.(summary).catch(() => {});
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);
+
+    // Run Version B paper scan in parallel — never blocks live trading
+    runPaperScan().catch(err => console.error("[paperScanner] Error:", err));
   } catch (err) {
     console.error("[cronScanner] Scan failed:", err);
   } finally {
@@ -1515,8 +1519,12 @@ async function runPositionReview(
   }
 }
 
-export function startPositionMonitor(): void {
-  setInterval(() => { void checkPositionMonitor().catch(e => console.error("[posMonitor]", e)); }, MONITOR_INTERVAL_MS);
+export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): void {
+  setInterval(() => {
+    void checkPositionMonitor().catch(e => console.error("[posMonitor]", e));
+    void updatePaperTradesPnl().catch(e => console.error("[posMonitor] paperPnl:", e));
+  }, MONITOR_INTERVAL_MS);
+  if (alertFn) startWeeklyAbReportCron(alertFn);
   console.log("[posMonitor] Started — checks every 5 min");
 }
 

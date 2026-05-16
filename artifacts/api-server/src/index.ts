@@ -2,13 +2,13 @@ import "dotenv/config";
 import app from "./app";
 import { logger } from "./lib/logger";
 import { initBrokers } from "./lib/startup";
-import { startPolling } from "./notifications/telegram";
+import { startPolling, sendAlert } from "./notifications/telegram";
 import { startCronScanner, startPositionMonitor } from "./lib/cronScanner";
 
 void initBrokers();
 startPolling();     // registers Telegram notifiers (must be before cronScanner)
 startCronScanner();       // starts cron after Telegram is ready; first scan in 10s
-startPositionMonitor();   // starts 5-min position monitor
+startPositionMonitor(sendAlert);   // starts 5-min position monitor + weekly A/B cron
 
 const rawPort = process.env["PORT"];
 

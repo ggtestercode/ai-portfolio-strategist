@@ -56,8 +56,10 @@ import {
   profileTable,
   targetAllocationsTable,
   botStateTable,
+  paperTradesTable,
   type PositionMeta,
 } from "@workspace/db";
+import { desc, gt, and, eq } from "drizzle-orm";
 
 let _bot: TelegramBot | null = null;
 
@@ -229,7 +231,8 @@ export function startPolling(): void {
     { command: "cancelorders", description: "Cancel orders: list / 1 / all" },
     { command: "status",     description: "Full bot status overview" },
     { command: "history",    description: "Last 10 closed trades" },
-    { command: "memory",     description: "Last 5 trade reflections (AI journal)" },
+    { command: "memory",          description: "Last 5 trade reflections (AI journal)" },
+    { command: "paperhistory",    description: "Version B paper trade signals (A/B test)" },
     { command: "pending",    description: "Pending trade approvals" },
     { command: "mode",       description: "Operation mode: autonomous | approval" },
     { command: "capital",    description: "View or set total capital (/capital 500)" },
@@ -1205,6 +1208,60 @@ export function startPolling(): void {
         ``,
         `<i>${utcNow()}</i>`,
       ].join("\n"), { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /paperhistory — Version B paper trade signals (last 14d) ────────────
+  b.onText(/^\/paperhistory(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const cutoff = new Date(Date.now() - 14 * 24 * 3600_000);
+      const trades = await db
+        .select()
+        .from(paperTradesTable)
+        .where(gt(paperTradesTable.signalTime, cutoff))
+        .orderBy(desc(paperTradesTable.signalTime));
+
+      const open   = trades.filter(t => t.status === "open");
+      const closed = trades.filter(t => t.status !== "open");
+      const wins   = closed.filter(t => (t.wouldHavePnlPct ?? 0) > 0);
+      const losses = closed.filter(t => (t.wouldHavePnlPct ?? 0) <= 0);
+
+      const winRate  = closed.length ? Math.round(wins.length / closed.length * 100) : 0;
+      const avgWin   = wins.length   ? wins.reduce((s, t) => s + (t.wouldHavePnlPct ?? 0), 0) / wins.length : 0;
+      const avgLoss  = losses.length ? losses.reduce((s, t) => s + (t.wouldHavePnlPct ?? 0), 0) / losses.length : 0;
+      const totalPnl = closed.reduce((s, t) => s + (t.wouldHavePnl ?? 0), 0);
+
+      const fmt = (t: typeof trades[number]) => {
+        const pct  = t.wouldHavePnlPct;
+        const sign = (pct ?? 0) >= 0 ? "✅" : "❌";
+        const dir  = t.direction.toUpperCase();
+        const stat = t.status === "stopped_out" ? "SL" : t.status === "tp1_hit" ? "TP1" : t.status === "tp2_hit" ? "TP2" : "→";
+        if (t.status === "open") {
+          return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(2)} [open] ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : "pending"}`;
+        }
+        return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(2)} ${stat} $${(t.exitPrice ?? 0).toFixed(2)} ${sign} ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : ""}`;
+      };
+
+      const lines = [
+        `📋 <b>Paper Trading (Version B) — Last 14 days</b>`,
+        ``,
+        open.length ? [`<b>Open (${open.length}):</b>`, ...open.slice(0, 5).map(fmt)].join("\n") : "",
+        open.length && closed.length ? "" : "",
+        closed.length ? [`<b>Closed (${closed.length}):</b>`, ...closed.slice(0, 8).map(fmt)].join("\n") : "",
+        ``,
+        `📊 <b>Version B Summary:</b>`,
+        closed.length
+          ? `Win rate: ${winRate}% (${wins.length}/${closed.length})\nAvg winner: +${avgWin.toFixed(2)}%\nAvg loser: ${avgLoss.toFixed(2)}%\nTotal would-have P/L: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`
+          : "No closed trades yet",
+        ``,
+        `<i>${utcNow()}</i>`,
+      ].filter(Boolean).join("\n");
+
+      await b.sendMessage(chatId, lines, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});

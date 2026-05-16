@@ -13,3 +13,4 @@ export * from "./scanSignals";
 export * from "./botState";
 export * from "./tradeLog";
 export * from "./tradeMemory";
+export * from "./paperTrades";
