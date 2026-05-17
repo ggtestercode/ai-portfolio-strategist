@@ -404,7 +404,7 @@ function formatRow(d: AssetData, assetClass: string): string {
 
 export async function runScan(): Promise<ScanResult> {
   return cache.get(CacheKey.marketScan(), TTL.MARKET_SCAN, async () => {
-    // Detect market regime first (BTC as proxy)
+    // ── Phase 0: Regime + basic data ─────────────────────────────────────────
     const regime = await detectMarketRegime();
 
     const [watchlist, profile, bybitPositions, tradeMemory, perfSummary] = await Promise.all([
@@ -415,46 +415,73 @@ export async function runScan(): Promise<ScanResult> {
       getPerformanceSummary().catch(() => ""),
     ]);
 
-    const classMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
+    const classMap  = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
     const assetData = await fetchAllData(watchlist);
     if (assetData.length < 3) { console.warn("[scanner] Insufficient data"); return { ...FALLBACK_RESULT, regime }; }
 
-    // Multi-timeframe data + funding rates + open interest for top crypto symbols
-    const cryptoSyms = watchlist.filter(e => e.assetClass === "Crypto").slice(0, 5).map(e => e.symbol);
+    const bybitPosSummary = bybitPositions.length
+      ? bybitPositions.map(p => `${p.symbol} ${p.side} size=${p.size} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
+      : "none";
+
+    // ── Phase 1: Call 1 — Haiku selects top 10 symbols by RS vs BTC ──────────
+    const btcChange7d = Number(assetData.find(d => d.symbol === "BTCUSDT")?.change7d ?? 0);
+    const cryptoData  = assetData.filter(d => classMap[d.symbol] === "Crypto");
+
+    const rsRows = cryptoData.map(d => {
+      const chg7d = Number(d.change7d);
+      const rs    = (chg7d - btcChange7d).toFixed(1);
+      const sign  = Number(rs) > 0 ? "+" : "";
+      return `${d.symbol}|$${d.price.toFixed(2)}|7d${chg7d >= 0 ? "+" : ""}${chg7d.toFixed(1)}%|RS${sign}${rs}%|RSI${Number(d.rsi).toFixed(0)}`;
+    });
+
+    const rsCallResult = await llm.json<{ top10: string[] }>({
+      taskType:      "market_scan_rs",
+      systemContext: 'Select the top 10 crypto symbols for detailed signal generation. Respond ONLY with valid JSON: {"top10":["SYM1","SYM2",...10 items]}. Mix long candidates (positive RS vs BTC) and short candidates (negative RS). Skip RSI >85 or <15.',
+      prompt: [
+        `Regime: ${regime.regime} | ADX=${regime.adx.toFixed(1)} DI+=${regime.diPlus.toFixed(1)} DI-=${regime.diMinus.toFixed(1)}`,
+        `BTC 7d: ${btcChange7d >= 0 ? "+" : ""}${btcChange7d.toFixed(1)}% | Positions: ${bybitPosSummary}`,
+        ``,
+        `Crypto (Symbol|Price|7d%|RS_vs_BTC|RSI):`,
+        rsRows.join("\n"),
+      ].join("\n"),
+      schema:   { type: "object", properties: { top10: { type: "array", items: { type: "string" } } }, required: ["top10"] },
+      fallback: { top10: cryptoData.slice(0, 10).map(d => d.symbol) },
+    });
+
+    const rawSelected = rsCallResult.data.top10.slice(0, 10).filter(s => classMap[s] !== undefined);
+    const selectedSymbols = rawSelected.length >= 5
+      ? rawSelected
+      : cryptoData.slice(0, 10).map(d => d.symbol);
+    console.log(`[scanner] Phase 1 → ${selectedSymbols.join(", ")}`);
+
+    // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
     const mtfLines:     string[] = [];
     const fundingLines: string[] = [];
-    for (const sym of cryptoSyms) {
+    const sweepMap     = new Map<string, SweepResult>();
+    const squeezeMap   = new Map<string, string>();
+
+    await Promise.allSettled(selectedSymbols.map(async sym => {
       try {
-        const [mtf, fr, oi] = await Promise.all([
+        const [mtf, fr, oi, klines] = await Promise.all([
           fetchMTFData(sym),
           getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 })),
           getOpenInterest(sym).catch(() => 0),
+          getKlines(sym, "60", 25).catch(() => [] as BybitKline[]),
         ]);
-        mtfLines.push(`${sym} MTF: ${mtf}`);
         const rSign = fr.rate >= 0 ? "+" : "";
+        mtfLines.push(`${sym} MTF: ${mtf}`);
         fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
+        sweepMap.set(sym, detectLiquiditySweep(klines));
+        const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
+        const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
+        const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
+        squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
       } catch { /* skip */ }
-    }
-
-    // ── Relative strength vs BTC ──────────────────────────────────────────────
-    const symbolList = cryptoSyms;
-    const rsMap = await fetchRelativeStrength(symbolList).catch(() => new Map<string, RSData>());
-
-    // ── Liquidity sweep + squeeze detection (1h klines) ──────────────────────
-    const sweepMap   = new Map<string, SweepResult>();
-    const squeezeMap = new Map<string, string>();
-    await Promise.allSettled(symbolList.map(async sym => {
-      const klines = await getKlines(sym, "60", 25).catch(() => [] as BybitKline[]);
-      sweepMap.set(sym, detectLiquiditySweep(klines));
-      const fr     = await getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 }));
-      const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
-      const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
-      const price  = klines.length > 0 ? (klines[klines.length - 1]!.close) : 0;
-      squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
     }));
 
-    // Build RS context string
-    const rsLines = symbolList.map(sym => {
+    const rsMap = await fetchRelativeStrength(selectedSymbols).catch(() => new Map<string, RSData>());
+
+    const rsLines = selectedSymbols.map(sym => {
       const rs = rsMap.get(sym);
       if (!rs) return null;
       const sign = rs.rsAvg > 0 ? "+" : "";
@@ -466,7 +493,6 @@ export async function runScan(): Promise<ScanResult> {
       ? `Relative strength vs BTC (avg 4h/1D/7D):\n${rsLines.join("\n")}`
       : "";
 
-    // Build sweep/squeeze context
     const sweepLines: string[] = [];
     for (const [sym, sw] of sweepMap) {
       if (!sw.detected) continue;
@@ -485,11 +511,11 @@ export async function runScan(): Promise<ScanResult> {
     const sweepContext   = sweepLines.join("\n\n");
     const squeezeContext = squeezeLines.join("\n");
 
-    const tableRows      = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
-    const bybitPosSummary = bybitPositions.length
-      ? bybitPositions.map(p => `${p.symbol} ${p.side} size=${p.size} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
-      : "none";
+    // Table: selected crypto + all non-crypto for context
+    const tableData = assetData.filter(d => selectedSymbols.includes(d.symbol) || classMap[d.symbol] !== "Crypto");
+    const tableRows = tableData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
 
+    // ── Phase 2: Call 2 — Sonnet generates signals for top 10 only ───────────
     const risk         = (profile?.riskTolerance ?? "medium").toLowerCase();
     const targetReturn = profile?.targetReturnPct ?? 10;
     const capital      = profile?.totalCapital ?? 200;
@@ -503,7 +529,6 @@ export async function runScan(): Promise<ScanResult> {
           ? `LOW risk: prefer defensive, low-volatility assets. Avoid leverage >3x. Target: ${targetReturn}%/period.`
           : `MEDIUM risk: balanced approach. Leverage max 10x. Target: ${targetReturn}%/period.`;
 
-    // ── Regime-aware scoring weights ─────────────────────────────────────────
     const strongTrendDir = regime.diPlus >= regime.diMinus ? "bullish" : "bearish";
     const regimeScoring =
       regime.regime === "CHOPPY"
@@ -581,7 +606,7 @@ export async function runScan(): Promise<ScanResult> {
       rsContext ? `\n${rsContext}\n` : "",
       sweepContext   ? `\n${sweepContext}` : "",
       squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",
-      `Market snapshot (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
+      `Market snapshot — top 10 selected (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
       tableRows.join("\n"),
       ``,
       tradeMemory ? `Trade memory (last reflections):\n${tradeMemory}` : "",

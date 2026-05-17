@@ -17,7 +17,7 @@ const MODELS = {
 type ModelTier = keyof typeof MODELS;
 
 const TASK_CONFIG = {
-  assistant_reply:      { model: "haiku"  as ModelTier, maxTokens: 1024, cache: true  },
+  assistant_reply:      { model: "haiku"  as ModelTier, maxTokens: 400,  cache: true  },
   approval_summary:     { model: "haiku"  as ModelTier, maxTokens: 150,  cache: false },
   risk_alert:           { model: "haiku"  as ModelTier, maxTokens: 250,  cache: true  },
   portfolio_summary:    { model: "haiku"  as ModelTier, maxTokens: 400,  cache: true  },
@@ -27,7 +27,8 @@ const TASK_CONFIG = {
   strategy_generation:  { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },
   trade_decision:       { model: "sonnet" as ModelTier, maxTokens: 200,  cache: true  },
   rebalance_plan:       { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },
-  market_scan:          { model: "sonnet" as ModelTier, maxTokens: 10000, cache: true  },
+  market_scan_rs:       { model: "haiku"  as ModelTier, maxTokens: 1000, cache: true  },
+  market_scan:          { model: "sonnet" as ModelTier, maxTokens: 5000, cache: true  },
   performance_analysis: { model: "sonnet" as ModelTier, maxTokens: 600,  cache: true  },
   deep_research:        { model: "opus"   as ModelTier, maxTokens: 2000, cache: true  },
 } as const;
