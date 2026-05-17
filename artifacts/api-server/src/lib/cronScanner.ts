@@ -53,7 +53,7 @@ export let lastScanTime: Date | null = null;
 
 let cronTask:        ScheduledTask | null = null;
 let isScanning:      boolean              = false;
-let currentInterval: string               = SCAN_INTERVAL;
+let currentInterval: string               = SCAN_INTERVAL ?? "0 */4 * * *";
 
 type ScanNotifier   = (result: ScanResult, triggered: "cron" | "manual") => Promise<void>;
 type AlertNotifier  = (message: string) => Promise<void>;
@@ -90,6 +90,7 @@ const EQUITY_CLASSES    = new Set(["Equity", "US Equity", "equity", "Stock", "st
 const STARTING_BALANCE  = 50;     // initial deposit for profit protection calc
 
 function humanInterval(crontab: string): string {
+  if (!crontab) return "unknown";
   if (crontab === "disabled")      return "disabled (manual only)";
   if (crontab === "*/30 * * * *")  return "every 30 minutes";
   if (crontab === "*/15 * * * *")  return "every 15 minutes";
@@ -1627,13 +1628,14 @@ export function resumeTrading(): void {
 export async function triggerNow(): Promise<void> { return runCronScan("manual"); }
 
 export function getStatus() {
+  const interval = currentInterval || "0 */4 * * *";
   return {
     enabled:      cronEnabled,
     paused:       tradingPaused,
     pausedReason,
     lastScan:     lastScanTime,
-    interval:     currentInterval,
-    schedule:     humanInterval(currentInterval),
+    interval,
+    schedule:     humanInterval(interval),
   };
 }
 
