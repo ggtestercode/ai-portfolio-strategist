@@ -224,20 +224,26 @@ export async function detectMarketRegime(): Promise<MarketRegime> {
 }
 
 async function fetchMTFData(symbol: string): Promise<string> {
-  const intervals: Array<[string, string]> = [["1","1m"],["15","15m"],["60","1h"],["240","4h"],["D","1D"]];
+  const intervals: Array<[string, string, boolean]> = [
+    ["1","1m",false], ["15","15m",false], ["60","1h",true], ["240","4h",true], ["D","1D",false],
+  ];
   const parts: string[] = [];
-  for (const [iv, label] of intervals) {
+  for (const [iv, label, withEma] of intervals) {
     try {
       const klines = await getKlines(symbol, iv, 50);
       const closes = klines.map(k => k.close);
-      const rsi    = calcRSI(closes, 14).toFixed(1);
-      const ema20  = calcEMA(closes, 20).toFixed(2);
-      const ema50  = calcEMA(closes, 50).toFixed(2);
+      const rsi    = Math.round(calcRSI(closes, 14));
       const last   = closes[closes.length - 1]?.toFixed(2) ?? "N/A";
-      parts.push(`${label}: price=$${last} RSI=${rsi} EMA20=$${ema20} EMA50=$${ema50}`);
-    } catch { parts.push(`${label}: unavailable`); }
+      if (withEma) {
+        const ema20 = calcEMA(closes, 20).toFixed(2);
+        const ema50 = calcEMA(closes, 50).toFixed(2);
+        parts.push(`${label}:$${last} RSI${rsi} E20=$${ema20} E50=$${ema50}`);
+      } else {
+        parts.push(`${label}:$${last} RSI${rsi}`);
+      }
+    } catch { parts.push(`${label}:N/A`); }
   }
-  return parts.join(" | ");
+  return parts.join("|");
 }
 
 // ── Relative strength helpers ─────────────────────────────────────────────────
@@ -564,30 +570,17 @@ export async function runScan(): Promise<ScanResult> {
 
     const systemContext = [
       "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|STRONG SELL|SELL|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"timeframeAlignment":"","orderType":"market|limit","limitPrice":0,"timeInForce":"IOC|GTC","orderReasoning":"","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","stopLossReasoning":"","takeProfitReasoning":"","rrReasoning":"","fundingRateContext":"","openInterestContext":"","regimeAlignment":"","rejectReasons":[],"scoreBreakdown":{},"setupType":"REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP","setupQuality":"HIGH|MEDIUM|LOW","timing":"EARLY|MIDDLE|LATE","timingReasoning":"","whyNow":"","edgeType":"LIQUIDITY_TRAP|SQUEEZE_SETUP|RELATIVE_WEAKNESS|SWEEP_REVERSAL|TREND_CONTINUATION|MEAN_REVERSION","conflicts":[],"conflictResolution":"NO_CONFLICT|MINOR_REDUCED|MAJOR_SKIP","conflictReasoning":"","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":0,"rMultiple":0}],"scanTimestamp":"","summary":""}`,
-      "Rules: rank exactly 5 opportunities. For LONGS: 80-100=STRONG BUY(strong_buy), 60-79=BUY(high). For SHORTS: 80-100=STRONG SELL(strong_sell), 60-79=SELL(high). Both: 40-59=WATCH(medium), <40=AVOID.",
-      "DIRECTION BIAS: MANDATORY — include at least 1-2 short signals per scan if any coins show bearish setups. Do not return all longs. Actively look for coins lagging the market, rejecting resistance, or with bearish divergence.",
-      "FUNDING RATE (nonlinear): |rate|<0.03% neutral. 0.03-0.07% positive=mild long +3pts. >0.07% positive=crowded long -5pts. 0.03-0.07% negative=mild short +3pts. >0.07% negative=panic -5pts.",
-      "OI CONTEXT: price up+OI up=new longs bullish +5pts. price up+OI down=short covering weaker +2pts. price down+OI up=new shorts bearish +5pts. price down+OI down=capitulation -3pts.",
-      "Multi-timeframe: confirm trend across 1h, 4h, 1D. Higher conviction = more TF alignment.",
-      "RSI <30 oversold (bullish bias), RSI >70 overbought (bearish bias). EMA20>EMA50=uptrend.",
-      `User profile: Strategy=${strategyName}, Risk=${risk}, Target=${targetReturn}%/period, Capital=$${capital}.`,
+      `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","riskRewardRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
+      `Rank exactly 5. LONGS: ≥80=STRONG BUY(strong_buy), 60-79=BUY(high). SHORTS: ≥80=STRONG SELL(strong_sell), 60-79=SELL(high). 40-59=WATCH, <40=AVOID. Include ≥1 short per scan — look for coins rejecting resistance or lagging BTC.`,
+      `Funding: |rate|<0.03% neutral; 0.03-0.07% directional +3pts; >0.07% crowded -5pts. OI up+price up=bullish +5pts; OI down+price up=weak +2pts; OI up+price down=bearish +5pts; OI down+price down=-3pts.`,
       riskDirective,
       regimeScoring,
       scoringWeights,
-      "ATR-based targets: TP1=entry±(ATR×1.0), TP2=entry±(ATR×2.0). SL=entry±(ATR×1.5). Include atr, tp1, tp2 in output.",
-      "For LONGS: stopLoss below entry, takeProfit above entry, tp1 above entry, tp2 above tp1.",
-      "For SHORTS: stopLoss above entry, takeProfit below entry, tp1 below entry, tp2 below tp1.",
-      "riskRewardRatio: longs=(takeProfit-entry)/(entry-stopLoss); shorts=(entry-takeProfit)/(stopLoss-entry). Must be ≥1.5.",
-      "Order type: MARKET(IOC) only on confirmed breakout with volume. LIMIT(GTC) when mid-range — set limitPrice at nearest support/resistance. NEVER market order mid-range.",
-      `Max position: $${maxPosition.toFixed(0)} (50% of capital). Never exceed.`,
-      "SETUP CLASSIFICATION: Set setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP based on primary pattern. Set setupQuality=HIGH|MEDIUM|LOW.",
-      "TIMING: EARLY=just broke/rejected level, RSI not extreme. MIDDLE=1-2 ATR into move. LATE=3+ ATR moved or RSI extreme. Omit signal (set direction=neutral) if timing=LATE UNLESS setupType=LIQUIDITY_SWEEP.",
-      "WHY NOW: whyNow must name a specific edge. Bad: 'RSI overbought'. Good: 'Funding +0.089% longs trapped, failed breakout $96.50'. If you cannot write a specific whyNow, set direction=neutral.",
-      "CONFLICTS: List conflicting signals in conflicts[]. NO_CONFLICT=all indicators agree. MINOR_REDUCED=majority agree. MAJOR_SKIP=split — set direction=neutral for MAJOR_SKIP.",
-      "RELATIVE STRENGTH: Use provided RS vs BTC data. rsScore<-5%=strong short candidate (score+5pts). rsScore>+5%=strong long candidate (score+5pts). Set relativeStrengthVsBtc field.",
-      "SWEEP: If liquidity sweep detected for this symbol, strongly consider it as primary signal. sweepDetected=true. setupType=LIQUIDITY_SWEEP preferred.",
-      "SQUEEZE: If squeeze setup detected, squeezeDetected=true. Funding-rate crowding is the edge.",
+      `ATR targets: TP1=entry±ATR, TP2=entry±2ATR, SL=entry±1.5ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
+      `Orders: LIMIT(GTC) mid-range at nearest S/R; MARKET(IOC) only on confirmed volume breakout. Max position: $${maxPosition.toFixed(0)}.`,
+      `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
+      `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
+      `RS data: >+5% vs BTC=long candidate +5pts; <-5%=short candidate +5pts; set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
     ].join("\n");
 
     const prompt = [
