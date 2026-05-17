@@ -41,6 +41,7 @@ import {
   setCronEnabled,
   resumeTrading,
   triggerNow,
+  restartCron,
   getStatus as getCronStatus,
 } from "../lib/cronScanner";
 import {
@@ -225,7 +226,8 @@ export function startPolling(): void {
     { command: "orders",     description: "View pending orders" },
     { command: "balance",    description: "Account balance across brokers" },
     { command: "scan",       description: "Run live market scan (Claude)" },
-    { command: "autoscan",   description: "Auto-scanner: on | off | now | status" },
+    { command: "autoscan",      description: "Auto-scanner: on | off | now | status" },
+    { command: "scaninterval",  description: "Scan frequency: 1h | 2h | 4h | 6h" },
     { command: "sync",       description: "Sync all brokers to local DB" },
     { command: "closedust",    description: "Close all dust positions (value < $1)" },
     { command: "cancelorders", description: "Cancel orders: list / 1 / all" },
@@ -991,6 +993,62 @@ export function startPolling(): void {
         triggerNow().catch(e => console.error("[telegram] /autoscan now:", e));
         return;
       }
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /scaninterval — change scan frequency from Telegram ─────────────────
+  const INTERVAL_COSTS: Record<string, string> = {
+    "1h": "~$1.74/day", "2h": "~$0.87/day", "4h": "~$0.44/day", "6h": "~$0.29/day",
+  };
+  const INTERVAL_HOURS: Record<string, number> = {
+    "1h": 1, "2h": 2, "4h": 4, "6h": 6,
+  };
+  b.onText(/^\/scaninterval(?:@\w+)?(?:\s+(\S+))?$/i, async (msg, match) => {
+    const chatId = String(msg.chat.id);
+    const arg    = match?.[1]?.toLowerCase();
+    try {
+      if (!arg || arg === "status") {
+        const s = getCronStatus();
+        const lines = [
+          `🕐 <b>Scan Interval</b>`,
+          ``,
+          `Current: <b>${escapeHtml(s.schedule)}</b>  (<code>${escapeHtml(s.interval)}</code>)`,
+          ``,
+          `Options:`,
+          `  /scaninterval 1h  — every hour      (${INTERVAL_COSTS["1h"]})`,
+          `  /scaninterval 2h  — every 2 hours   (${INTERVAL_COSTS["2h"]})`,
+          `  /scaninterval 4h  — every 4 hours   (${INTERVAL_COSTS["4h"]})`,
+          `  /scaninterval 6h  — every 6 hours   (${INTERVAL_COSTS["6h"]})`,
+          ``,
+          `<i>⚠️ In-memory only — resets to .env on restart</i>`,
+        ];
+        await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
+        return;
+      }
+      if (!["1h","2h","4h","6h"].includes(arg)) {
+        await b.sendMessage(chatId, `❌ Unknown interval <code>${escapeHtml(arg)}</code>. Use: 1h · 2h · 4h · 6h`, { parse_mode: "HTML" });
+        return;
+      }
+      const { schedule } = restartCron(arg);
+      const hours  = INTERVAL_HOURS[arg]!;
+      const now    = new Date();
+      const nextH  = new Date(now);
+      nextH.setMinutes(0, 0, 0);
+      nextH.setHours(Math.ceil(now.getHours() / hours) * hours);
+      const nextStr = nextH.toUTCString().replace(" GMT", " UTC");
+      const lines = [
+        `✅ <b>Scan interval changed to ${escapeHtml(arg)}</b>`,
+        ``,
+        `Schedule: <b>${escapeHtml(schedule)}</b>`,
+        `Next scan: ${nextStr}`,
+        `Est. cost: <b>${INTERVAL_COSTS[arg]}</b>`,
+        ``,
+        `<i>⚠️ In-memory only — resets to .env on restart</i>`,
+      ];
+      await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});

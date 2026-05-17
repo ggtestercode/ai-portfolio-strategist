@@ -51,8 +51,9 @@ export let tradingPaused = false;
 export let pausedReason  = "";
 export let lastScanTime: Date | null = null;
 
-let cronTask:   ScheduledTask | null = null;
-let isScanning: boolean              = false;
+let cronTask:        ScheduledTask | null = null;
+let isScanning:      boolean              = false;
+let currentInterval: string               = SCAN_INTERVAL;
 
 type ScanNotifier   = (result: ScanResult, triggered: "cron" | "manual") => Promise<void>;
 type AlertNotifier  = (message: string) => Promise<void>;
@@ -92,11 +93,20 @@ function humanInterval(crontab: string): string {
   if (crontab === "disabled")      return "disabled (manual only)";
   if (crontab === "*/30 * * * *")  return "every 30 minutes";
   if (crontab === "*/15 * * * *")  return "every 15 minutes";
-  if (crontab === "0 */4 * * *")   return "every 4 hours";
-  if (crontab === "0 */1 * * *")   return "every hour";
   if (crontab === "0 * * * *")     return "every hour";
+  if (crontab === "0 */1 * * *")   return "every hour";
+  if (crontab === "0 */2 * * *")   return "every 2 hours";
+  if (crontab === "0 */4 * * *")   return "every 4 hours";
+  if (crontab === "0 */6 * * *")   return "every 6 hours";
   return crontab;
 }
+
+const CRON_SHORTHANDS: Record<string, string> = {
+  "1h": "0 * * * *",
+  "2h": "0 */2 * * *",
+  "4h": "0 */4 * * *",
+  "6h": "0 */6 * * *",
+};
 
 type ScalingAction = "NEW" | "ADD" | "HOLD" | "CUT" | "TIER1" | "TIER2";
 
@@ -1622,7 +1632,20 @@ export function getStatus() {
     paused:       tradingPaused,
     pausedReason,
     lastScan:     lastScanTime,
-    interval:     SCAN_INTERVAL,
-    schedule:     humanInterval(SCAN_INTERVAL),
+    interval:     currentInterval,
+    schedule:     humanInterval(currentInterval),
   };
+}
+
+export function restartCron(shorthandOrExpr: string): { schedule: string; expr: string } {
+  const expr = CRON_SHORTHANDS[shorthandOrExpr] ?? shorthandOrExpr;
+  if (!cron.validate(expr)) throw new Error(`Invalid interval: ${shorthandOrExpr}`);
+  cronTask?.stop();
+  cronTask = null;
+  currentInterval = expr;
+  if (cronEnabled) {
+    cronTask = cron.schedule(expr, () => { void runCronScan("cron").catch(e => console.error("[cronScanner] unhandled:", e)); });
+  }
+  console.log(`[cronScanner] Interval changed → ${humanInterval(expr)}`);
+  return { schedule: humanInterval(expr), expr };
 }
