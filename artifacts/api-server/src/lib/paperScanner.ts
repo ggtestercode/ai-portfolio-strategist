@@ -15,7 +15,7 @@ import {
   getPositions as bybitGetPositions,
   type BybitKline,
 } from "../brokers/bybit";
-import { getRecentMemory }       from "./tradeMemoryLib";
+import { getRecentMemory, getPerformanceSummary } from "./tradeMemoryLib";
 import { llm }                   from "./llmRouter";
 import { db, profileTable, paperTradesTable } from "@workspace/db";
 import { eq, gt, and } from "drizzle-orm";
@@ -60,12 +60,13 @@ async function fetchMTFSummary(symbol: string): Promise<string> {
 export async function runPaperScan(): Promise<void> {
   console.log("[paperScanner] Version B scan starting…");
   try {
-    const [regime, watchlist, profile, bybitPositions, tradeMemory] = await Promise.all([
+    const [regime, watchlist, profile, bybitPositions, tradeMemory, perfSummary] = await Promise.all([
       detectMarketRegime(),
       getWatchlist(),
       db.select().from(profileTable).limit(1).then(r => r[0]),
       bybitGetPositions().catch(() => []),
       getRecentMemory(20).catch(() => ""),
+      getPerformanceSummary().catch(() => ""),
     ]);
 
     const classMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
@@ -110,20 +111,23 @@ export async function runPaperScan(): Promise<void> {
 
     // ── Version B system prompt — no regime/score blocks ────────────────────
     const systemContext = [
-      "You are an autonomous trading bot — Version B (A/B test). Respond with ONLY valid JSON — no markdown, no prose.",
+      "You are an experimental trading bot — Version B. Respond with ONLY valid JSON — no markdown, no prose.",
       `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|STRONG SELL|SELL|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"orderType":"market|limit","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","setupType":"REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP","setupQuality":"HIGH|MEDIUM|LOW","timing":"EARLY|MIDDLE|LATE","whyNow":"","edgeType":"LIQUIDITY_TRAP|SQUEEZE_SETUP|RELATIVE_WEAKNESS|SWEEP_REVERSAL|TREND_CONTINUATION|MEAN_REVERSION","conflicts":[],"conflictResolution":"NO_CONFLICT|MINOR_REDUCED|MAJOR_SKIP","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":0,"rMultiple":0}],"scanTimestamp":"","summary":""}`,
-      "You have NO mandatory filters or blocks.",
-      "Hard limits (only these apply):",
+      "You have access to all market data: RSI, EMA, ADX, funding, OI, volume, relative strength, all timeframes.",
+      "You are NOT told which signals to use. Discover your own signal combinations.",
+      "Document which signals you chose and why in the 'reasoning' field.",
+      "Hard limits only:",
       "  - Max stop loss: 40% from entry",
       "  - Max per trade: 50% of capital ($" + (capital * 0.5).toFixed(0) + ")",
-      "  - Daily loss limit: -30%",
-      "Everything else is your judgment. Regime is informational only — not a block.",
+      "  - Max 3 positions",
+      "  - $5 minimum per trade",
+      "Everything else is your judgment. Experiment freely — this is paper trading.",
+      "Regime is informational only — not a block.",
       "Score is informational only — no threshold. Rank 5 opportunities freely.",
-      "CHOPPY regime? Still trade if you see clear edge. Be aggressive in finding early moves.",
       "Include at least 1-2 short signals if bearish setups exist.",
       "For LONGS: stopLoss below entry, tp1/tp2 above. For SHORTS: stopLoss above entry, tp1/tp2 below.",
       "riskRewardRatio must be ≥1.0. ATR-based: TP1=entry±(ATR×1.0), TP2=entry±(ATR×2.0), SL=entry±(ATR×1.5).",
-      "whyNow: name a specific edge. If no specific edge — set direction=neutral.",
+      "whyNow: name the specific signals you chose to use and why you preferred them over others. If no edge — set direction=neutral.",
     ].join("\n");
 
     const prompt = [
@@ -141,6 +145,7 @@ export async function runPaperScan(): Promise<void> {
       tableRows.join("\n"),
       ``,
       tradeMemory ? `Trade memory (last 20 reflections):\n${tradeMemory}` : "",
+      perfSummary ? `\n${perfSummary}` : "",
     ].filter(Boolean).join("\n");
 
     const res = await llm.json<ScanResult>({

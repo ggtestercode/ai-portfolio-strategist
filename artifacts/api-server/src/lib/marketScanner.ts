@@ -3,7 +3,7 @@ import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
 import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, type BybitKline, type BybitPosition } from "../brokers/bybit";
-import { getRecentMemory }                   from "./tradeMemoryLib";
+import { getRecentMemory, getPerformanceSummary } from "./tradeMemoryLib";
 import { db, profileTable }                  from "@workspace/db";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
@@ -407,11 +407,12 @@ export async function runScan(): Promise<ScanResult> {
     // Detect market regime first (BTC as proxy)
     const regime = await detectMarketRegime();
 
-    const [watchlist, profile, bybitPositions, tradeMemory] = await Promise.all([
+    const [watchlist, profile, bybitPositions, tradeMemory, perfSummary] = await Promise.all([
       getWatchlist(),
       db.select().from(profileTable).limit(1).then(r => r[0]),
       bybitGetPositions().catch(() => [] as BybitPosition[]),
       getRecentMemory(20).catch(() => ""),
+      getPerformanceSummary().catch(() => ""),
     ]);
 
     const classMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
@@ -584,6 +585,7 @@ export async function runScan(): Promise<ScanResult> {
       tableRows.join("\n"),
       ``,
       tradeMemory ? `Trade memory (last reflections):\n${tradeMemory}` : "",
+      perfSummary ? `\n${perfSummary}` : "",
     ].filter(Boolean).join("\n");
 
     const res = await llm.json<ScanResult>({

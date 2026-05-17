@@ -15,6 +15,13 @@ export const tradeLogTable = pgTable("trade_log", {
   entryAt:    timestamp("entry_at",  { withTimezone: true }).notNull().defaultNow(),
   exitAt:     timestamp("exit_at",   { withTimezone: true }),
   reflection: text("reflection"),
+  tp1:       numeric("tp1",       { precision: 20, scale: 8 }),
+  tp2:       numeric("tp2",       { precision: 20, scale: 8 }),
+  sl:        numeric("sl",        { precision: 20, scale: 8 }),
+  atr:       numeric("atr",       { precision: 20, scale: 8 }),
+  setupType: text("setup_type"),
+  score:     numeric("score",     { precision: 8,  scale: 2 }),
+  whyNow:    text("why_now"),
 });
 
 export type TradeLog       = typeof tradeLogTable.$inferSelect;

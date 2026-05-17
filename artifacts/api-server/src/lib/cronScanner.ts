@@ -21,8 +21,8 @@ import {
   type BybitPosition,
   type BybitKline,
 } from "../brokers/bybit";
-import { db, profileTable, botStateTable, tradeMemoryTable, type PositionMeta, type PositionMonitorState } from "@workspace/db";
-import { eq, and, desc } from "drizzle-orm";
+import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, type PositionMeta, type PositionMonitorState } from "@workspace/db";
+import { eq, and, desc, isNull } from "drizzle-orm";
 
 // ── Technical helpers ─────────────────────────────────────────────────────────
 function calcEMA(closes: number[], period: number): number {
@@ -94,6 +94,7 @@ function humanInterval(crontab: string): string {
   if (crontab === "*/15 * * * *")  return "every 15 minutes";
   if (crontab === "0 */4 * * *")   return "every 4 hours";
   if (crontab === "0 */1 * * *")   return "every hour";
+  if (crontab === "0 * * * *")     return "every hour";
   return crontab;
 }
 
@@ -478,6 +479,19 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
     const pm = meta[pos.symbol];
     if (!pm) continue; // no metadata — skip until next open stores it
 
+    // Read TP1/TP2 from trade_log as durable fallback (survives restarts)
+    const tradeRows = await db
+      .select({ tp1: tradeLogTable.tp1, tp2: tradeLogTable.tp2 })
+      .from(tradeLogTable)
+      .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt)))
+      .orderBy(desc(tradeLogTable.entryAt))
+      .limit(1)
+      .catch(() => [] as Array<{ tp1: string | null; tp2: string | null }>);
+    const dbTp1 = tradeRows[0]?.tp1 ? parseFloat(tradeRows[0].tp1) : 0;
+    const dbTp2 = tradeRows[0]?.tp2 ? parseFloat(tradeRows[0].tp2) : 0;
+    const resolvedTp1 = (pm.tp1 && pm.tp1 > 0) ? pm.tp1 : dbTp1;
+    const resolvedTp2 = (pm.tp2 && pm.tp2 > 0) ? pm.tp2 : dbTp2;
+
     const origQty = pm.originalQty;
     if (!origQty || origQty <= 0) continue;
 
@@ -491,8 +505,8 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
       : pos.entryPrice - (pos.pnl / Math.max(pos.size, 0.00001));
 
     // Tier 1: price reached TP1 and no partial yet
-    if (currentTier === 0 && pm.tp1 > 0) {
-      const tp1Reached = pos.side === "Buy" ? currentPrice >= pm.tp1 : currentPrice <= pm.tp1;
+    if (currentTier === 0 && resolvedTp1 > 0) {
+      const tp1Reached = pos.side === "Buy" ? currentPrice >= resolvedTp1 : currentPrice <= resolvedTp1;
       if (tp1Reached) {
         console.log(`[cronScanner] Tier 1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${pm.tp1}`);
         try {
@@ -516,8 +530,8 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
     }
 
     // Tier 2: price reached TP2 and tier 1 already done
-    if (currentTier === 1 && pm.tp2 > 0) {
-      const tp2Reached = pos.side === "Buy" ? currentPrice >= pm.tp2 : currentPrice <= pm.tp2;
+    if (currentTier === 1 && resolvedTp2 > 0) {
+      const tp2Reached = pos.side === "Buy" ? currentPrice >= resolvedTp2 : currentPrice <= resolvedTp2;
       if (tp2Reached) {
         console.log(`[cronScanner] Tier 2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${pm.tp2}`);
         try {
@@ -840,7 +854,7 @@ async function gateManualReview(
     const timer = setTimeout(() => {
       pendingReviews.delete(reviewId);
       resolve(false); // timeout → HOLD
-    }, 10 * 60 * 1000);
+    }, 15 * 60 * 1000);
 
     pendingReviews.set(reviewId, { resolve, timer });
 
@@ -1111,6 +1125,20 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           stopLossMethod:  opp.stopLossMethod,
         }).catch(e => console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message));
 
+        // Patch trade_log row with signal TP1/TP2/SL for durable partial-exit tracking
+        await db.update(tradeLogTable)
+          .set({
+            tp1:       opp.tp1      ? String(opp.tp1)      : null,
+            tp2:       opp.tp2      ? String(opp.tp2)      : null,
+            sl:        opp.stopLoss ? String(opp.stopLoss) : null,
+            atr:       opp.atr      ? String(opp.atr)      : null,
+            setupType: opp.setupType ?? null,
+            score:     opp.score    ? String(opp.score)    : null,
+            whyNow:    opp.whyNow   ?? null,
+          })
+          .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+          .catch(e => console.warn(`[cronScanner] trade_log tp patch ${sym}:`, e.message));
+
         const rMult = (opp.score ?? 65) >= 90 ? 1.2 : (opp.score ?? 65) >= 75 ? 1.0 : 0.5;
         const entryLines = [
           `✅ <b>NEW ENTRY — ${sym} ${(opp.direction ?? "?").toUpperCase()}</b>`,
@@ -1255,16 +1283,21 @@ async function checkPositionMonitor(): Promise<void> {
 
     let trigger: string | null = null;
 
-    // Trigger 1: Funding flip
+    // Trigger 1: Funding flip — only if magnitude significant (>0.05% change AND >0.05% new rate)
     if (fr && state.lastFundingRate !== 0) {
+      const oldPct = state.lastFundingRate * 100;
+      const newPct = fr.rate * 100;
+      const change = Math.abs(newPct - oldPct);
       const flipped = (state.lastFundingRate > 0 && fr.rate < 0) || (state.lastFundingRate < 0 && fr.rate > 0);
-      if (flipped) trigger = `Funding rate flipped: ${(state.lastFundingRate*100).toFixed(4)}% → ${(fr.rate*100).toFixed(4)}%`;
+      const significant = change > 0.05 && Math.abs(newPct) > 0.05;
+      console.log(`[trigger] ${pos.symbol} funding change: ${change.toFixed(4)}% threshold: 0.05% → ${flipped && significant ? "TRIGGERED" : "ignored"}`);
+      if (flipped && significant) trigger = `Funding rate flipped: ${oldPct.toFixed(4)}% → ${newPct.toFixed(4)}%`;
     }
 
-    // Trigger 2: OI drop >10%
+    // Trigger 2: OI drop >20%
     if (!trigger && oiVal != null && state.lastOI > 0) {
       const drop = (state.lastOI - oiVal) / state.lastOI;
-      if (drop > 0.10) trigger = `OI dropped ${(drop*100).toFixed(1)}% since last check`;
+      if (drop > 0.20) trigger = `OI dropped ${(drop*100).toFixed(1)}% since last check`;
     }
 
     // Trigger 3 & 4: RSI cross + volume spike
@@ -1272,8 +1305,8 @@ async function checkPositionMonitor(): Promise<void> {
       const closes  = klines.map(k => k.close);
       const rsi     = calcRSI(closes, 14);
       if (state.lastRSI1h > 0) {
-        if (state.lastRSI1h < 70 && rsi >= 70) trigger = `1h RSI crossed above 70 (${rsi.toFixed(1)}) — overbought`;
-        if (state.lastRSI1h > 30 && rsi <= 30) trigger = `1h RSI crossed below 30 (${rsi.toFixed(1)}) — oversold`;
+        if (state.lastRSI1h < 75 && rsi >= 75) trigger = `1h RSI crossed above 75 (${rsi.toFixed(1)}) — overbought`;
+        if (state.lastRSI1h > 25 && rsi <= 25) trigger = `1h RSI crossed below 25 (${rsi.toFixed(1)}) — oversold`;
       }
       // Use second-to-last candle (last COMPLETE 1h bar) — avoids re-firing every 5 min
       // on the same in-progress candle
@@ -1281,7 +1314,7 @@ async function checkPositionMonitor(): Promise<void> {
         const completedCandles = klines.slice(0, -1); // drop the forming candle
         const volAvg = completedCandles.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
         const lastVol = completedCandles[completedCandles.length - 1]!.volume;
-        if (volAvg > 0 && lastVol > volAvg * 3)
+        if (volAvg > 0 && lastVol > volAvg * 5)
           trigger = `Volume spike ${(lastVol/volAvg).toFixed(1)}× on last completed 1h candle`;
       }
       monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastRSI1h: rsi };
@@ -1418,7 +1451,7 @@ async function runPositionReview(
   ];
 
   const rangingNote = isRanging
-    ? `\nREGIME NOTE — Market is RANGING. Act one tier more aggressively than normal: if conviction is mixed, choose PARTIAL_CLOSE instead of HOLD; if conviction is weak, choose PARTIAL_CLOSE 50%+ or ADJUST_SL very tight. Chop erodes both sides — do not overstay.`
+    ? `\nREGIME NOTE — Market is RANGING: treat same as TRENDING. No aggression modifier. Claude decides based on signals only, not regime pressure.`
     : "";
 
   const prompt = [
@@ -1470,36 +1503,8 @@ async function runPositionReview(
     ? `⚡ <b>Immediate review — ${pos.symbol}</b>\nTrigger: ${trigger}`
     : `🔄 <b>Position review — ${pos.symbol} ${dir}</b>`;
 
-  // Gate non-HOLD decisions for manually-entered positions
-  if (!upper.startsWith("HOLD") && meta?.entrySource === "manual_nl") {
-    const approved = await gateManualReview(pos.symbol, lines[0] ?? text, reason, pnlPct);
-    if (!approved) {
-      console.log(`[posMonitor] Manual gate: ${pos.symbol} ${lines[0] ?? "?"} → HOLD (no approval)`);
-      await alertFn?.([
-        `${prefix}`,
-        `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
-        ``,
-        `[manual] Claude suggested: ${lines[0] ?? "?"}`,
-        `No approval received — HOLD maintained`,
-      ].join("\n")).catch(() => {});
-      return;
-    }
-  }
-
-  if (upper.startsWith("CLOSE")) {
-    await bybitClose(pos.symbol)
-      .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
-    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE\n${reason}`).catch(() => {});
-
-  } else if (upper.startsWith("PARTIAL_CLOSE")) {
-    const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
-    const pct = Math.min(99, Math.max(1, parseInt(m?.[1] ?? "50", 10)));
-    await closePercentPosition(pos.symbol, pct)
-      .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}%\n${reason}`).catch(() => {});
-
-  } else if (upper.startsWith("ADJUST_SL")) {
+  // ADJUST_SL: execute immediately — protective action, no human gate needed
+  if (upper.startsWith("ADJUST_SL")) {
     const m    = text.match(/ADJUST_SL\s+\$?([\d.]+)/i);
     const newSl = m ? parseFloat(m[1]!) : NaN;
     if (!isNaN(newSl) && newSl > 0) {
@@ -1513,9 +1518,44 @@ async function runPositionReview(
         console.log(`[posMonitor] ADJUST_SL ${pos.symbol} → $${newSl.toFixed(4)} (notify suppressed — cooldown)`);
       }
     }
-  } else {
-    // HOLD — log to console only, no Telegram (avoid notification spam for routine holds)
+    return;
+  }
+
+  // HOLD: log only, no action
+  if (upper.startsWith("HOLD")) {
     console.log(`[posMonitor] HOLD ${pos.symbol} ${dir} P/L:${pnlPct.toFixed(2)}% — ${reason}`);
+    return;
+  }
+
+  // CLOSE or PARTIAL_CLOSE: always gate via Telegram — advisory only, human must approve
+  const reviewDecision = lines[0] ?? text;
+  const approved = await gateManualReview(pos.symbol, reviewDecision, reason, pnlPct);
+  if (!approved) {
+    console.log(`[posMonitor] Review gate: ${pos.symbol} ${reviewDecision} → HOLD (no approval within 15 min)`);
+    await alertFn?.([
+      `${prefix}`,
+      `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
+      ``,
+      `🔍 Claude suggests: ${reviewDecision}`,
+      `Reason: ${reason.slice(0, 200)}`,
+      ``,
+      `No approval received — HOLD maintained`,
+    ].join("\n")).catch(() => {});
+    return;
+  }
+
+  if (upper.startsWith("CLOSE")) {
+    await bybitClose(pos.symbol)
+      .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
+    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ approved\n${reason}`).catch(() => {});
+
+  } else if (upper.startsWith("PARTIAL_CLOSE")) {
+    const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
+    const pct = Math.min(99, Math.max(1, parseInt(m?.[1] ?? "50", 10)));
+    await closePercentPosition(pos.symbol, pct)
+      .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ approved\n${reason}`).catch(() => {});
   }
 }
 
