@@ -15,7 +15,7 @@ function creds() {
   return { key, secret };
 }
 
-const RW = "5000";
+const RW = "10000";
 
 function sign(secret: string, ts: string, key: string, payload: string): string {
   return createHmac("sha256", secret).update(ts + key + RW + payload).digest("hex");
