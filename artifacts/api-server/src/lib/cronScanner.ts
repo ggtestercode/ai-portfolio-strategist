@@ -1477,6 +1477,7 @@ async function runPositionReview(
     `  • ADJUST_SL to a key level first; market will stop you out at a rational price`,
     `  • CLOSE immediately only when: loss is accelerating AND no nearby level to hide behind`,
     `  • PARTIAL_CLOSE to take some off while keeping a runner`,
+    `  • IMPORTANT: Never suggest PARTIAL_CLOSE if the remaining position after close would be < $5 USD. Either HOLD fully or CLOSE fully. Dust positions waste slots.`,
     `  • ADJUST_SL to trail tighter when in profit — lock in gains without rushing out`,
     `\nReply with EXACTLY one of these on the FIRST LINE:`,
     `  HOLD`,
@@ -1553,9 +1554,27 @@ async function runPositionReview(
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
     const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
     const pct = Math.min(99, Math.max(1, parseInt(m?.[1] ?? "50", 10)));
-    await closePercentPosition(pos.symbol, pct)
-      .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ approved\n${reason}`).catch(() => {});
+
+    const currentSizeUsd  = pos.size * (pos.markPrice ?? pos.entryPrice);
+    const afterPartialUsd = currentSizeUsd * (1 - pct / 100);
+
+    if (afterPartialUsd < 5) {
+      if (currentSizeUsd < 5) {
+        // Position already dust — close fully
+        await bybitClose(pos.symbol)
+          .catch(e => console.error(`[posMonitor] CLOSE (dust) ${pos.symbol}:`, (e as Error).message));
+        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(() => {});
+      } else {
+        // Partial would leave dust — skip and hold
+        console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} skipped — would leave dust ($${afterPartialUsd.toFixed(2)})`);
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial close skipped — would leave dust ($${afterPartialUsd.toFixed(2)})\nHOLDING\n${reason}`).catch(() => {});
+      }
+    } else {
+      await closePercentPosition(pos.symbol, pct)
+        .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ approved\n${reason}`).catch(() => {});
+    }
   }
 }
 
