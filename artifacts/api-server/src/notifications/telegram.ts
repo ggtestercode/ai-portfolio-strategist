@@ -750,9 +750,9 @@ export function startPolling(): void {
         let stopsStr: string;
         if (meta) {
           stopsStr = [
-            `\n  SL:  $${fmt(meta.sl)} (ATR×1.5)`,
-            `\n  TP1: $${fmt(meta.tp1)} (ATR×1.0) → close 30%`,
-            `\n  TP2: $${fmt(meta.tp2)} (ATR×2.0) → close 30% | runner: 40%`,
+            meta.sl  ? `\n  SL:  $${fmt(meta.sl)}  (ATR×1.5)` : "",
+            meta.tp1 ? `\n  TP1: $${fmt(meta.tp1)} (ATR×1.0) → close 30%` : "",
+            meta.tp2 ? `\n  TP2: $${fmt(meta.tp2)} (ATR×2.0) → close 30% | runner: 40%` : "",
           ].join("");
         } else {
           const slStr = p.stopLoss   ? `\n  SL $${fmt(p.stopLoss)}`  : "";
@@ -763,7 +763,7 @@ export function startPolling(): void {
         const sourceTag = meta?.entrySource === "manual_nl" ? " <i>[manual]</i>"
                         : meta?.entrySource === "auto_scan"  ? " <i>[auto]</i>"
                         : "";
-        out.push(`• <b>${escapeHtml(p.symbol)}</b>${sourceTag} — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${fmt(p.entryPrice)}${pnlStr}${stopsStr}`);
+        out.push(`• <b>${escapeHtml(p.symbol)}</b>${sourceTag} — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice != null ? fmt(p.entryPrice) : "?"}${pnlStr}${stopsStr}`);
       }
 
       if (localPending.length) {
