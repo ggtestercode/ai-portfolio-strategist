@@ -148,12 +148,20 @@ class LlmRouter {
     let data = req.fallback;
     let parseSuccess = false;
     try {
+      const { jsonrepair } = await import("jsonrepair");
       // Strip markdown fences, then extract the outermost JSON object/array
       const stripped = base.text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/m, "").trim();
       const start    = stripped.indexOf("{") !== -1 ? stripped.indexOf("{") : stripped.indexOf("[");
       const end      = stripped.lastIndexOf("}") !== -1 ? stripped.lastIndexOf("}") : stripped.lastIndexOf("]");
       const jsonStr  = start !== -1 && end > start ? stripped.slice(start, end + 1) : stripped;
-      data = JSON.parse(jsonStr) as T;
+      try {
+        data = JSON.parse(jsonStr) as T;
+      } catch {
+        // Attempt repair (handles unescaped quotes, literal newlines in strings, etc.)
+        const repaired = jsonrepair(jsonStr);
+        data = JSON.parse(repaired) as T;
+        console.log(`[LlmRouter] JSON repaired for ${req.taskType}`);
+      }
       parseSuccess = true;
     } catch {
       console.warn(`[LlmRouter] JSON parse failed for ${req.taskType} — raw response snippet: ${base.text.slice(0, 200)}`);
