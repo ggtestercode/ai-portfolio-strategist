@@ -41,6 +41,7 @@ export const botStateTable = pgTable("bot_state", {
   dailyLossStartEquity: real("daily_loss_start_equity"),
   positionMetadata:     jsonb("position_metadata").$type<Record<string, PositionMeta>>().notNull().default({}),
   positionMonitorState: jsonb("position_monitor_state").$type<Record<string, PositionMonitorState>>().notNull().default({}),
+  paperBalance:         real("paper_balance").notNull().default(40.0),
 });
 
 export type BotState       = typeof botStateTable.$inferSelect;

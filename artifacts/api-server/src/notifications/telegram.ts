@@ -1312,21 +1312,21 @@ export function startPolling(): void {
   b.onText(/^\/paperhistory(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const cutoff = new Date(Date.now() - 14 * 24 * 3600_000);
-      const trades = await db
-        .select()
-        .from(paperTradesTable)
-        .where(gt(paperTradesTable.signalTime, cutoff))
-        .orderBy(desc(paperTradesTable.signalTime));
+      const [balRow, trades] = await Promise.all([
+        db.select({ paperBalance: botStateTable.paperBalance }).from(botStateTable).limit(1),
+        db.select().from(paperTradesTable)
+          .where(gt(paperTradesTable.signalTime, new Date(Date.now() - 14 * 24 * 3600_000)))
+          .orderBy(desc(paperTradesTable.signalTime)),
+      ]);
+
+      const paperBalance = balRow[0]?.paperBalance ?? 40;
+      const returnPct    = ((paperBalance - 40) / 40 * 100);
 
       const open   = trades.filter(t => t.status === "open");
       const closed = trades.filter(t => t.status !== "open");
       const wins   = closed.filter(t => (t.wouldHavePnlPct ?? 0) > 0);
       const losses = closed.filter(t => (t.wouldHavePnlPct ?? 0) <= 0);
-
-      const winRate  = closed.length ? Math.round(wins.length / closed.length * 100) : 0;
-      const avgWin   = wins.length   ? wins.reduce((s, t) => s + (t.wouldHavePnlPct ?? 0), 0) / wins.length : 0;
-      const avgLoss  = losses.length ? losses.reduce((s, t) => s + (t.wouldHavePnlPct ?? 0), 0) / losses.length : 0;
+      const winRate = closed.length ? Math.round(wins.length / closed.length * 100) : 0;
       const totalPnl = closed.reduce((s, t) => s + (t.wouldHavePnl ?? 0), 0);
 
       const fmt = (t: typeof trades[number]) => {
@@ -1335,23 +1335,27 @@ export function startPolling(): void {
         const dir  = t.direction.toUpperCase();
         const stat = t.status === "stopped_out" ? "SL" : t.status === "tp1_hit" ? "TP1" : t.status === "tp2_hit" ? "TP2" : "→";
         if (t.status === "open") {
-          return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(2)} [open] ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : "pending"}`;
+          return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(4)} [open] ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : "pending"}`;
         }
-        return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(2)} ${stat} $${(t.exitPrice ?? 0).toFixed(2)} ${sign} ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : ""}`;
+        return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(4)} ${stat} $${(t.exitPrice ?? 0).toFixed(4)} ${sign} ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : ""}`;
       };
 
       const lines = [
-        `📋 <b>Paper Trading (Version B) — Last 14 days</b>`,
+        `📋 <b>Paper Trading (Version B)</b>`,
+        `💰 Paper Balance: $${paperBalance.toFixed(2)} <i>(started $40)</i>`,
+        `📈 Return: ${returnPct >= 0 ? "+" : ""}${returnPct.toFixed(1)}%`,
         ``,
-        open.length ? [`<b>Open (${open.length}):</b>`, ...open.slice(0, 5).map(fmt)].join("\n") : "",
-        open.length && closed.length ? "" : "",
-        closed.length ? [`<b>Closed (${closed.length}):</b>`, ...closed.slice(0, 8).map(fmt)].join("\n") : "",
+        open.length
+          ? [`<b>Open (${open.length} positions):</b>`, ...open.slice(0, 8).map(fmt)].join("\n")
+          : "<b>Open (0 positions)</b>",
         ``,
-        `📊 <b>Version B Summary:</b>`,
         closed.length
-          ? `Win rate: ${winRate}% (${wins.length}/${closed.length})\nAvg winner: +${avgWin.toFixed(2)}%\nAvg loser: ${avgLoss.toFixed(2)}%\nTotal would-have P/L: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`
-          : "No closed trades yet",
+          ? [`<b>Closed (${closed.length}):</b>`, ...closed.slice(0, 8).map(fmt)].join("\n")
+          : "<b>Closed (0)</b>",
         ``,
+        closed.length
+          ? `Win rate: ${winRate}% (${wins.length}W / ${losses.length}L) | Total P/L: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`
+          : "",
         `<i>${utcNow()}</i>`,
       ].filter(Boolean).join("\n");
 

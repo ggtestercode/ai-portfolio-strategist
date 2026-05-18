@@ -20,6 +20,7 @@ export const paperTradesTable = pgTable("paper_trades", {
   wouldHavePnlPct: real("would_have_pnl_pct"),
   status:          text("status").notNull().default("open"),
   version:         text("version").notNull().default("B"),
+  marginUsed:      real("margin_used"),
 });
 
 export type PaperTrade       = typeof paperTradesTable.$inferSelect;

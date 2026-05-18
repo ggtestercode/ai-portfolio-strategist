@@ -17,8 +17,22 @@ import {
 } from "../brokers/bybit";
 import { getRecentMemory, getPerformanceSummary } from "./tradeMemoryLib";
 import { llm }                   from "./llmRouter";
-import { db, profileTable, paperTradesTable } from "@workspace/db";
+import { db, profileTable, paperTradesTable, botStateTable } from "@workspace/db";
 import { eq, gt, and } from "drizzle-orm";
+
+const PAPER_STARTING_BALANCE = 40.0;
+
+async function getPaperBalance(): Promise<number> {
+  const [row] = await db.select({ paperBalance: botStateTable.paperBalance })
+    .from(botStateTable).limit(1);
+  return row?.paperBalance ?? PAPER_STARTING_BALANCE;
+}
+
+async function setPaperBalance(balance: number): Promise<void> {
+  await db.update(botStateTable)
+    .set({ paperBalance: balance, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1));
+}
 import cron from "node-cron";
 
 // ── Market data helpers (mirror of marketScanner internals) ──────────────────
@@ -106,7 +120,14 @@ export async function runPaperScan(): Promise<void> {
       ? bybitPositions.map(p => `${p.symbol} ${p.side} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
       : "none";
 
-    const capital    = profile?.totalCapital ?? 200;
+    const paperBalance = await getPaperBalance();
+
+    if (paperBalance < 5) {
+      console.log(`[paperTrade] Paper balance $${paperBalance.toFixed(2)} below $5 minimum — stopped`);
+      return;
+    }
+
+    const marginSize = Math.max(5, paperBalance * 0.05);
     const tableRows  = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Crypto"));
 
     // ── Version B system prompt — no regime/score blocks ────────────────────
@@ -118,10 +139,8 @@ export async function runPaperScan(): Promise<void> {
       "Document which signals you chose and why in the 'reasoning' field.",
       "Hard limits only:",
       "  - Max stop loss: 40% from entry",
-      "  - Max per trade: 50% of capital ($" + (capital * 0.5).toFixed(0) + ")",
-      "  - Max 3 positions",
       "  - $5 minimum per trade",
-      "Everything else is your judgment. Experiment freely — this is paper trading.",
+      `Everything else is your judgment. Experiment freely — this is paper trading with $${paperBalance.toFixed(2)} balance.`,
       "Regime is informational only — not a block.",
       "Score is informational only — no threshold. Rank 5 opportunities freely.",
       "Include at least 1-2 short signals if bearish setups exist.",
@@ -171,9 +190,19 @@ export async function runPaperScan(): Promise<void> {
 
     // ── Log non-neutral signals to paper_trades (never execute) ─────────────
     let logged = 0;
+    let runningBalance = paperBalance;
+
     for (const sig of res.data.opportunities as ScanOpportunity[]) {
       if (!sig.direction || sig.direction === "neutral") continue;
       if (!sig.entry || sig.entry <= 0) continue;
+
+      if (runningBalance < 5) {
+        console.log(`[paperTrade] Paper balance $${runningBalance.toFixed(2)} below $5 minimum — stopped`);
+        break;
+      }
+
+      const tradeMargin = Math.max(5, runningBalance * 0.05);
+      runningBalance -= tradeMargin;
 
       await db.insert(paperTradesTable).values({
         symbol:    sig.symbol,
@@ -190,16 +219,21 @@ export async function runPaperScan(): Promise<void> {
         signalTime: new Date(),
         status:    "open",
         version:   "B",
+        marginUsed: tradeMargin,
       }).catch(e => console.warn(`[paperScanner] DB insert ${sig.symbol}:`, e.message));
 
       console.log(
         `[paperTrade] Version B would enter: ${sig.symbol} ${sig.direction} ` +
-        `at $${sig.entry} score=${sig.score} regime=${regime.regime} (no threshold)`
+        `at $${sig.entry} margin=$${tradeMargin.toFixed(2)} balance=$${runningBalance.toFixed(2)} score=${sig.score} regime=${regime.regime}`
       );
       logged++;
     }
 
-    console.log(`[paperScanner] Version B complete — ${logged} signals logged (${res.data.opportunities.length} total)`);
+    if (runningBalance !== paperBalance) {
+      await setPaperBalance(runningBalance).catch(e => console.warn("[paperScanner] balance update:", e.message));
+    }
+
+    console.log(`[paperScanner] Version B complete — ${logged} signals logged, balance=$${runningBalance.toFixed(2)} (${res.data.opportunities.length} total)`);
   } catch (err) {
     console.error("[paperScanner] Scan failed:", err);
   }
@@ -252,11 +286,23 @@ export async function updatePaperTradesPnl(): Promise<void> {
           ? (isLong ? (exitPrice - entry) / entry : (entry - exitPrice) / entry) * 100
           : pnlPct;
 
+        const realizedPnl = exitPrice
+          ? (trade.marginUsed ?? 5) * 10 * (finalPct / 100)  // 10x leverage
+          : null;
+
         await db.update(paperTradesTable).set({
-          wouldHavePnl:    finalPct * entry / 100,
+          wouldHavePnl:    finalPct * (trade.marginUsed ?? 5) * 10 / 100,
           wouldHavePnlPct: finalPct,
           ...(newStatus !== "open" ? { status: newStatus, exitPrice, exitTime: now } : {}),
         }).where(eq(paperTradesTable.id, trade.id));
+
+        // Return margin + realized PnL to paper balance on close
+        if (newStatus !== "open" && trade.marginUsed) {
+          const bal = await getPaperBalance();
+          const returned = trade.marginUsed + (realizedPnl ?? 0);
+          await setPaperBalance(Math.max(0, bal + returned))
+            .catch(e => console.warn("[paperScanner] balance return:", e.message));
+        }
       } catch { /* skip individual trade errors */ }
     }
   } catch (err) {
