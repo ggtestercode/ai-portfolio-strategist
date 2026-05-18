@@ -138,15 +138,33 @@ export async function initBrokers(): Promise<void> {
     const bSide    = p.side === "buy" ? "Buy" : "Sell";
     const isShort  = bSide === "Sell";
 
+    // Treat 0 as missing — Claude schema default can produce 0
+    const sl = (p.stopLossPrice  && p.stopLossPrice  > 0) ? p.stopLossPrice  : undefined;
+    const tp = (p.takeProfitPrice && p.takeProfitPrice > 0) ? p.takeProfitPrice : undefined;
+
+    console.log(`[startup] Opening position with SL/TP: ${p.symbol} ${bSide}`, { sl: sl ?? "none", tp: tp ?? "none" });
+
     const result = await bybitOpen(p.symbol, bSide, p.amountUsd * leverage, leverage, {
-      stopLoss:   p.stopLossPrice,
-      takeProfit: p.takeProfitPrice,
+      stopLoss:   sl,
+      takeProfit: tp,
     });
 
-    // Set ATR-based SL/TP when caller didn't provide them
-    if (!p.stopLossPrice || !p.takeProfitPrice) {
+    // Set ATR-based SL/TP only when Claude didn't provide valid levels
+    if (!sl || !tp) {
+      console.log(`[startup] ${p.symbol} missing Claude SL/TP — applying ATR fallback`);
       applyAtrSlTp(p.symbol, isShort ? "short" : "long", result.entryPrice, result.positionIdx, result.qty)
         .catch(e2 => console.warn(`[startup] applyAtrSlTp ${p.symbol}:`, e2.message));
+    } else {
+      // Claude provided SL/TP — store metadata so /positions can display them
+      storePositionMeta(p.symbol, {
+        originalQty: result.qty,
+        entryPrice:  result.entryPrice,
+        sl,
+        tp1: tp,
+        tp2: tp,
+        atr:         0,
+        openedAt:    Date.now(),
+      }).catch(e => console.warn(`[startup] storePositionMeta ${p.symbol}:`, e.message));
     }
 
     return { orderId: result.orderId };
@@ -203,8 +221,9 @@ async function setSlTpForExistingPositions(): Promise<void> {
     const hasMeta = !!existingMeta[pos.symbol];
 
     if (hasSl && hasTp && hasMeta) {
-      // Metadata already set from this run — still sync exchange values to ATR
-      // (fall through — don't skip)
+      // Claude already set levels — preserve them, don't overwrite with ATR
+      console.log(`[startup] ${pos.symbol} already has SL/TP from Claude — skipping ATR override`);
+      continue;
     }
 
     const direction = pos.side === "Buy" ? "long" : "short" as "long" | "short";
