@@ -503,13 +503,6 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
     const resolvedTp1 = (pm.tp1 && pm.tp1 > 0) ? pm.tp1 : dbTp1;
     const resolvedTp2 = (pm.tp2 && pm.tp2 > 0) ? pm.tp2 : dbTp2;
 
-    const origQty = pm.originalQty;
-    if (!origQty || origQty <= 0) continue;
-
-    const qtyRatio = pos.size / origQty;
-    // Infer current tier from qty ratio
-    const currentTier = qtyRatio > 0.85 ? 0 : qtyRatio > 0.55 ? 1 : qtyRatio > 0.25 ? 2 : 3;
-
     // Use markPrice when available; fall back to PnL-derived estimate
     const markPx = (pos as any).markPrice as number | undefined;
     const currentPrice = (markPx && markPx > 0)
@@ -518,13 +511,35 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
         ? pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.00001))
         : pos.entryPrice - (pos.pnl / Math.max(pos.size, 0.00001));
 
-    console.log(`[partialExit] ${pos.symbol} ${pos.side} | current: $${currentPrice.toFixed(4)} | TP1: $${resolvedTp1 || "none"} | TP2: $${resolvedTp2 || "none"} | tier: ${currentTier} | triggered: tp1=${resolvedTp1 > 0 && (pos.side === "Buy" ? currentPrice >= resolvedTp1 : currentPrice <= resolvedTp1)} tp2=${resolvedTp2 > 0 && (pos.side === "Buy" ? currentPrice >= resolvedTp2 : currentPrice <= resolvedTp2)}`);
+    // Detect stale originalQty (off by >10× current size — stale from old session)
+    let origQty = pm.originalQty;
+    if (!origQty || origQty <= 0 || origQty > pos.size * 10 || origQty < pos.size * 0.1) {
+      console.log(`[partialExit] ${pos.symbol} — stale originalQty (${origQty} vs current ${pos.size}) → resetting to current size`);
+      origQty = pos.size;
+      await patchPositionMeta(pos.symbol, { originalQty: pos.size }).catch(() => {});
+    }
+
+    const qtyRatio = pos.size / origQty;
+    // Infer current tier from qty ratio
+    const currentTier = qtyRatio > 0.85 ? 0 : qtyRatio > 0.55 ? 1 : qtyRatio > 0.25 ? 2 : 3;
+
+    // TP1 plausibility: must be within 50% of current price, otherwise metadata is stale
+    const tp1Valid = resolvedTp1 > 0 && Math.abs(resolvedTp1 / currentPrice - 1) < 0.50;
+    const tp2Valid = resolvedTp2 > 0 && Math.abs(resolvedTp2 / currentPrice - 1) < 0.50;
+    const effectiveTp1 = tp1Valid ? resolvedTp1 : 0;
+    const effectiveTp2 = tp2Valid ? resolvedTp2 : 0;
+
+    if (resolvedTp1 > 0 && !tp1Valid) {
+      console.log(`[partialExit] ${pos.symbol} — TP1 $${resolvedTp1} implausible vs price $${currentPrice.toFixed(4)} → skipping TP1 check`);
+    }
+
+    console.log(`[partialExit] ${pos.symbol} ${pos.side} | current: $${currentPrice.toFixed(4)} | TP1: $${effectiveTp1 || "none"} | TP2: $${effectiveTp2 || "none"} | tier: ${currentTier} | triggered: tp1=${effectiveTp1 > 0 && (pos.side === "Buy" ? currentPrice >= effectiveTp1 : currentPrice <= effectiveTp1)} tp2=${effectiveTp2 > 0 && (pos.side === "Buy" ? currentPrice >= effectiveTp2 : currentPrice <= effectiveTp2)}`);
 
     // Tier 1: price reached TP1 and no partial yet
-    if (currentTier === 0 && resolvedTp1 > 0) {
-      const tp1Reached = pos.side === "Buy" ? currentPrice >= resolvedTp1 : currentPrice <= resolvedTp1;
+    if (currentTier === 0 && effectiveTp1 > 0) {
+      const tp1Reached = pos.side === "Buy" ? currentPrice >= effectiveTp1 : currentPrice <= effectiveTp1;
       if (tp1Reached) {
-        console.log(`[cronScanner] Tier 1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${pm.tp1}`);
+        console.log(`[cronScanner] Tier 1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${effectiveTp1}`);
         try {
           await closePercentPosition(pos.symbol, 30);
           // Move SL to breakeven
@@ -546,10 +561,10 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
     }
 
     // Tier 2: price reached TP2 and tier 1 already done
-    if (currentTier === 1 && resolvedTp2 > 0) {
-      const tp2Reached = pos.side === "Buy" ? currentPrice >= resolvedTp2 : currentPrice <= resolvedTp2;
+    if (currentTier === 1 && effectiveTp2 > 0) {
+      const tp2Reached = pos.side === "Buy" ? currentPrice >= effectiveTp2 : currentPrice <= effectiveTp2;
       if (tp2Reached) {
-        console.log(`[cronScanner] Tier 2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${pm.tp2}`);
+        console.log(`[cronScanner] Tier 2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${effectiveTp2}`);
         try {
           // Close 30% of original qty (another 30%, total 60% out)
           const qty30pctOfOrig = origQty * 0.30;

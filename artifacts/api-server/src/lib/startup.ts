@@ -221,9 +221,21 @@ async function setSlTpForExistingPositions(): Promise<void> {
     const hasMeta = !!existingMeta[pos.symbol];
 
     if (hasSl && hasTp && hasMeta) {
-      // Claude already set levels — preserve them, don't overwrite with ATR
-      console.log(`[startup] ${pos.symbol} already has SL/TP from Claude — skipping ATR override`);
-      continue;
+      const pm = existingMeta[pos.symbol]!;
+      // Validate stored metadata is plausible for the current position.
+      // If qty or TP1 is wildly off (stale from an old session), fall through and refresh.
+      const liveMarkPrice = (pos as any).markPrice as number | undefined;
+      const refPrice = liveMarkPrice ?? pos.entryPrice;
+      const metaQtyValid = pm.originalQty != null &&
+        Math.abs(pm.originalQty / pos.size - 1) < 2.0;        // within 3× current size
+      const metaTp1Valid = !pm.tp1 ||                           // no tp1 stored = ok (won't block)
+        Math.abs(pm.tp1 / refPrice - 1) < 0.50;               // tp1 within 50% of current price
+
+      if (metaQtyValid && metaTp1Valid) {
+        console.log(`[startup] ${pos.symbol} — metadata valid, preserving Claude SL/TP`);
+        continue;
+      }
+      console.log(`[startup] ${pos.symbol} — stale metadata detected (qty=${pm.originalQty} vs pos.size=${pos.size}, tp1=${pm.tp1}, refPrice=${refPrice.toFixed(4)}) → refreshing with ATR`);
     }
 
     const direction = pos.side === "Buy" ? "long" : "short" as "long" | "short";
