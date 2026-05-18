@@ -510,10 +510,15 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
     // Infer current tier from qty ratio
     const currentTier = qtyRatio > 0.85 ? 0 : qtyRatio > 0.55 ? 1 : qtyRatio > 0.25 ? 2 : 3;
 
-    // Current price inferred from P/L
-    const currentPrice = pos.side === "Buy"
-      ? pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.00001))
-      : pos.entryPrice - (pos.pnl / Math.max(pos.size, 0.00001));
+    // Use markPrice when available; fall back to PnL-derived estimate
+    const markPx = (pos as any).markPrice as number | undefined;
+    const currentPrice = (markPx && markPx > 0)
+      ? markPx
+      : pos.side === "Buy"
+        ? pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.00001))
+        : pos.entryPrice - (pos.pnl / Math.max(pos.size, 0.00001));
+
+    console.log(`[partialExit] ${pos.symbol} ${pos.side} | current: $${currentPrice.toFixed(4)} | TP1: $${resolvedTp1 || "none"} | TP2: $${resolvedTp2 || "none"} | tier: ${currentTier} | triggered: tp1=${resolvedTp1 > 0 && (pos.side === "Buy" ? currentPrice >= resolvedTp1 : currentPrice <= resolvedTp1)} tp2=${resolvedTp2 > 0 && (pos.side === "Buy" ? currentPrice >= resolvedTp2 : currentPrice <= resolvedTp2)}`);
 
     // Tier 1: price reached TP1 and no partial yet
     if (currentTier === 0 && resolvedTp1 > 0) {
@@ -1389,6 +1394,11 @@ async function checkPositionMonitor(): Promise<void> {
     );
     monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastReviewAt: now };
   }
+
+  // ── Partial exit tier checks (runs every 5 min, not just on cron scan) ──────
+  await checkPartialExits(positions).catch(e =>
+    console.error("[posMonitor] partialExits:", e)
+  );
 
   // Persist monitor state
   await db.update(botStateTable)
