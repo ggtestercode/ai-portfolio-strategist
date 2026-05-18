@@ -42,6 +42,8 @@ import {
   resumeTrading,
   triggerNow,
   restartCron,
+  setProfitThresholds,
+  getProfitThresholds,
   getStatus as getCronStatus,
 } from "../lib/cronScanner";
 import {
@@ -228,6 +230,7 @@ export function startPolling(): void {
     { command: "scan",       description: "Run live market scan (Claude)" },
     { command: "autoscan",      description: "Auto-scanner: on | off | now | status" },
     { command: "scaninterval",  description: "Scan frequency: 1h | 2h | 4h | 6h" },
+    { command: "setprofit",     description: "Profit thresholds: /setprofit 15 20" },
     { command: "sync",       description: "Sync all brokers to local DB" },
     { command: "closedust",    description: "Close all dust positions (value < $1)" },
     { command: "cancelorders", description: "Cancel orders: list / 1 / all" },
@@ -1052,6 +1055,39 @@ export function startPolling(): void {
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /setprofit — set profit auto-close thresholds ────────────────────────
+  b.onText(/^\/setprofit(?:@\w+)?(?:\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?))?$/i, async (msg, match) => {
+    const chatId = msg.chat.id;
+    if (!isAuthorized(chatId)) return;
+    const partialArg = match?.[1] ? parseFloat(match[1]) : null;
+    const fullArg    = match?.[2] ? parseFloat(match[2]) : null;
+    if (partialArg !== null && fullArg !== null) {
+      if (partialArg >= fullArg) {
+        await b.sendMessage(chatId, `❌ Partial threshold (${partialArg}%) must be less than full threshold (${fullArg}%)`).catch(() => {});
+        return;
+      }
+      setProfitThresholds(partialArg, fullArg);
+      await b.sendMessage(chatId, [
+        `✅ <b>Profit thresholds updated</b>`,
+        ``,
+        `Partial close (50%): <b>≥${partialArg}%</b>`,
+        `Full close (100%): <b>≥${fullArg}%</b>`,
+        ``,
+        `<i>⚠️ In-memory only — resets to .env on restart</i>`,
+      ].join("\n"), { parse_mode: "HTML" }).catch(() => {});
+    } else {
+      const { partial, full } = getProfitThresholds();
+      await b.sendMessage(chatId, [
+        `📊 <b>Current profit thresholds</b>`,
+        ``,
+        `Partial close (50%): <b>≥${partial}%</b>`,
+        `Full close (100%): <b>≥${full}%</b>`,
+        ``,
+        `Usage: <code>/setprofit 15 20</code>`,
+      ].join("\n"), { parse_mode: "HTML" }).catch(() => {});
     }
   });
 

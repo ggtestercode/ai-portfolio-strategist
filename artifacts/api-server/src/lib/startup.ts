@@ -144,9 +144,11 @@ export async function initBrokers(): Promise<void> {
 
     console.log(`[startup] Opening position with SL/TP: ${p.symbol} ${bSide}`, { sl: sl ?? "none", tp: tp ?? "none" });
 
+    const tp1 = (p.tp1Price && p.tp1Price > 0) ? p.tp1Price : undefined;
     const result = await bybitOpen(p.symbol, bSide, p.amountUsd * leverage, leverage, {
       stopLoss:   sl,
       takeProfit: tp,
+      tp1:        tp1,
     });
 
     // Set ATR-based SL/TP only when Claude didn't provide valid levels
@@ -160,7 +162,7 @@ export async function initBrokers(): Promise<void> {
         originalQty: result.qty,
         entryPrice:  result.entryPrice,
         sl,
-        tp1: tp,
+        tp1: tp1 ?? tp,
         tp2: tp,
         atr:         0,
         openedAt:    Date.now(),

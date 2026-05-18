@@ -183,7 +183,7 @@ export async function openPosition(
   side: "Buy" | "Sell",
   amountUsd: number,
   leverage = 10,
-  opts?: { stopLoss?: number; takeProfit?: number },
+  opts?: { stopLoss?: number; takeProfit?: number; tp1?: number },
 ): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number }> {
   // ── Position sizing ───────────────────────────────────────────────────────
   const { totalEquity, availableBalance } = await getBalance();
@@ -248,7 +248,22 @@ export async function openPosition(
   if (opts?.takeProfit) orderBody["takeProfit"] = (Math.round(opts.takeProfit / filters.tickSize) * filters.tickSize).toFixed(tickDp);
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", orderBody);
-  console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} → orderId=${r.orderId}`);
+  console.log(`[Bybit] Market ${side} ${sym} qty=${qtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} TP1=${opts?.tp1 ?? "none"} → orderId=${r.orderId}`);
+
+  // Set TP1 as exchange partial TP (30% of position) after order fills
+  if (opts?.tp1 && opts.tp1 > 0) {
+    const tp1Str = (Math.round(opts.tp1 / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+    const tp1Qty = (Math.floor(qty * 0.30 / filters.qtyStep) * filters.qtyStep);
+    const tp1QtyStr = Math.max(tp1Qty, filters.minQty).toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+    await bpost("/v5/position/trading-stop", {
+      category: "linear", symbol: sym,
+      takeProfit: tp1Str, tpSize: tp1QtyStr,
+      tpTriggerBy: "LastPrice", tpslMode: "Partial",
+      positionIdx,
+    }).catch(e => console.warn(`[Bybit] TP1 partial set ${sym}: ${e.message}`));
+    console.log(`[Bybit] TP1 partial set ${sym}: 30% (${tp1QtyStr}) at $${tp1Str}`);
+  }
+
   return { orderId: r.orderId, entryPrice: markPrice, positionIdx, qty };
 }
 

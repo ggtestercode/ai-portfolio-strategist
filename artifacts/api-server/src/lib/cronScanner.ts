@@ -14,6 +14,7 @@ import {
   getOrders       as bybitGetOrders,
   closePercentPosition,
   setStopLoss     as bybitSetStopLoss,
+  setTrailingStop,
   getFundingRate,
   getKlines,
   getOpenInterest,
@@ -83,6 +84,15 @@ export function resolveReview(reviewId: string, approved: boolean): void {
 }
 
 const SCAN_INTERVAL     = process.env["SCAN_INTERVAL"] ?? "*/30 * * * *";
+let LARGE_PROFIT_CLOSE_PCT   = parseFloat(process.env["LARGE_PROFIT_CLOSE_PCT"]   ?? "20");
+let LARGE_PROFIT_PARTIAL_PCT = parseFloat(process.env["LARGE_PROFIT_PARTIAL_PCT"] ?? "15");
+export function setProfitThresholds(partial: number, full: number): void {
+  LARGE_PROFIT_PARTIAL_PCT = partial;
+  LARGE_PROFIT_CLOSE_PCT   = full;
+}
+export function getProfitThresholds(): { partial: number; full: number } {
+  return { partial: LARGE_PROFIT_PARTIAL_PCT, full: LARGE_PROFIT_CLOSE_PCT };
+}
 const MAX_AUTO_TRADES   = parseInt(process.env["MAX_TRADES_PER_SCAN"] ?? "3");
 const DAILY_LOSS_PCT    = 0.15;   // halt at -15% daily loss
 const DRAWDOWN_PCT      = 0.35;   // halt at -35% from peak equity
@@ -534,6 +544,12 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
     }
 
     console.log(`[partialExit] ${pos.symbol} ${pos.side} | current: $${currentPrice.toFixed(4)} | TP1: $${effectiveTp1 || "none"} | TP2: $${effectiveTp2 || "none"} | tier: ${currentTier} | triggered: tp1=${effectiveTp1 > 0 && (pos.side === "Buy" ? currentPrice >= effectiveTp1 : currentPrice <= effectiveTp1)} tp2=${effectiveTp2 > 0 && (pos.side === "Buy" ? currentPrice >= effectiveTp2 : currentPrice <= effectiveTp2)}`);
+
+    // Skip if position already nearly closed (exchange TP may have already fired)
+    if (pos.size < origQty * 0.05) {
+      console.log(`[partialExit] ${pos.symbol} — position nearly closed (${pos.size}/${origQty}) → skipping`);
+      continue;
+    }
 
     // Tier 1: price reached TP1 and no partial yet
     if (currentTier === 0 && effectiveTp1 > 0) {
@@ -1131,7 +1147,8 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         currentPrice:    opp.price,
         dataTimestamp:   opp.dataTimestamp,
         stopLossPrice:   opp.stopLoss,
-        takeProfitPrice: opp.takeProfit,
+        takeProfitPrice: opp.tp2 ?? opp.takeProfit,
+        tp1Price:        opp.tp1,
       });
       const gateResult = await approvalGate.submit(proposal).catch(e => {
         console.error(`[cronScanner] submit ${sym}:`, e);
@@ -1278,6 +1295,32 @@ async function checkPositionMonitor(): Promise<void> {
   for (const pos of positions) {
     const pnlPct = pos.pnlPct ?? 0;
     const state  = monitorState[pos.symbol] ?? { lastReviewAt: 0, lastFundingRate: 0, lastOI: 0, lastRSI1h: 0 };
+
+    // ── Large profit exits (no Claude needed — zero cost) ─────────────────────
+    if (pnlPct >= LARGE_PROFIT_CLOSE_PCT) {
+      console.log(`[posMonitor] ${pos.symbol} large profit +${pnlPct.toFixed(1)}% ≥ ${LARGE_PROFIT_CLOSE_PCT}% → closing full position`);
+      await bybitClose(pos.symbol).catch(e => console.error(`[posMonitor] largeProfit close ${pos.symbol}:`, e.message));
+      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await alertFn?.([
+        `💰 <b>Large profit exit — ${pos.symbol}</b>`,
+        `P/L: <b>+${pnlPct.toFixed(1)}%</b> (≥${LARGE_PROFIT_CLOSE_PCT}% threshold)`,
+        `Closing full position to lock gains`,
+      ].join("\n")).catch(() => {});
+      continue;
+    }
+    if (pnlPct >= LARGE_PROFIT_PARTIAL_PCT) {
+      console.log(`[posMonitor] ${pos.symbol} large profit +${pnlPct.toFixed(1)}% ≥ ${LARGE_PROFIT_PARTIAL_PCT}% → closing 50%, activating trailing SL`);
+      await closePercentPosition(pos.symbol, 50).catch(e => console.error(`[posMonitor] largeProfit partial ${pos.symbol}:`, e.message));
+      await setTrailingStop(pos.symbol, 0.40).catch(() => {});
+      await patchPositionMeta(pos.symbol, { trailingActive: true }).catch(() => {});
+      await alertFn?.([
+        `💰 <b>Partial profit lock — ${pos.symbol}</b>`,
+        `P/L: <b>+${pnlPct.toFixed(1)}%</b> (≥${LARGE_PROFIT_PARTIAL_PCT}% threshold)`,
+        `Closed 50% to secure gains`,
+        `Remaining 50% with 40% trailing SL activated`,
+      ].join("\n")).catch(() => {});
+      continue;
+    }
 
     // Hard stop: -40%
     if (pnlPct <= -40) {
