@@ -1,5 +1,5 @@
 import {
-  pgTable, text, numeric, boolean,
+  pgTable, text, numeric, real, boolean,
   timestamp, integer, uuid
 } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
@@ -43,6 +43,9 @@ export const tradeProposals = pgTable("trade_proposals", {
   orderId:         text("order_id"),
   executionError:  text("execution_error"),
   approvalSummary: text("approval_summary"),
+  stopLossPrice:   real("stop_loss_price"),
+  takeProfitPrice: real("take_profit_price"),
+  tp1Price:        real("tp1_price"),
 });
 
 export const insertTradeProposalSchema = createInsertSchema(tradeProposals);

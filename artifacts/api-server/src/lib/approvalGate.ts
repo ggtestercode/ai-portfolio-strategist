@@ -157,6 +157,9 @@ class ApprovalGate {
       dataTimestamp: proposal.dataTimestamp ?? null,
       status: "pending",
       expiresAt: new Date(Date.now() + EXPIRY_MS),
+      stopLossPrice:   proposal.stopLossPrice   ?? null,
+      takeProfitPrice: proposal.takeProfitPrice ?? null,
+      tp1Price:        proposal.tp1Price        ?? null,
     }).onConflictDoNothing();
 
     const needsApproval = mode === "approval" || proposal.amountUsd >= thresholdUsd;
@@ -184,6 +187,9 @@ class ApprovalGate {
         amountUsd:parseFloat(row.amountUsd), assetClass:row.assetClass,
         broker:row.broker as "etoro"|"bybit"|"mock", rationale:row.rationale,
         proposedAt:row.proposedAt.toISOString(),
+        stopLossPrice:   row.stopLossPrice   ?? undefined,
+        takeProfitPrice: row.takeProfitPrice ?? undefined,
+        tp1Price:        row.tp1Price        ?? undefined,
       };
       return this.execute(proposal);
     }

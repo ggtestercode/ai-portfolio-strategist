@@ -139,8 +139,32 @@ export async function initBrokers(): Promise<void> {
     const isShort  = bSide === "Sell";
 
     // Treat 0 as missing — Claude schema default can produce 0
-    const sl = (p.stopLossPrice  && p.stopLossPrice  > 0) ? p.stopLossPrice  : undefined;
-    const tp = (p.takeProfitPrice && p.takeProfitPrice > 0) ? p.takeProfitPrice : undefined;
+    let sl = (p.stopLossPrice  && p.stopLossPrice  > 0) ? p.stopLossPrice  : undefined;
+    let tp = (p.takeProfitPrice && p.takeProfitPrice > 0) ? p.takeProfitPrice : undefined;
+
+    // Plausibility: SL/TP must be on the correct side of entry
+    // We don't have entryPrice yet, so use currentPrice as proxy if available
+    const refPrice = p.currentPrice ?? 0;
+    if (refPrice > 0 && sl) {
+      if (!isShort && sl >= refPrice) {
+        console.warn(`[startup] ${p.symbol} Claude SL $${sl} >= entry ~$${refPrice} for LONG — ATR fallback`);
+        sl = undefined;
+      }
+      if (isShort && sl <= refPrice) {
+        console.warn(`[startup] ${p.symbol} Claude SL $${sl} <= entry ~$${refPrice} for SHORT — ATR fallback`);
+        sl = undefined;
+      }
+    }
+    if (refPrice > 0 && tp) {
+      if (!isShort && tp <= refPrice) {
+        console.warn(`[startup] ${p.symbol} Claude TP $${tp} <= entry ~$${refPrice} for LONG — ATR fallback`);
+        tp = undefined;
+      }
+      if (isShort && tp >= refPrice) {
+        console.warn(`[startup] ${p.symbol} Claude TP $${tp} >= entry ~$${refPrice} for SHORT — ATR fallback`);
+        tp = undefined;
+      }
+    }
 
     console.log(`[startup] Opening position with SL/TP: ${p.symbol} ${bSide}`, { sl: sl ?? "none", tp: tp ?? "none" });
 
