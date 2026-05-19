@@ -22,6 +22,15 @@ import { eq, gt, and } from "drizzle-orm";
 
 const PAPER_STARTING_BALANCE = 40.0;
 
+// ── Profile cache — refreshed once per process lifetime ──────────────────────
+let _profileCache: { totalCapital?: number | null } | null = null;
+async function getCachedProfile() {
+  if (_profileCache) return _profileCache;
+  const rows = await db.select().from(profileTable).limit(1);
+  _profileCache = rows[0] ?? {};
+  return _profileCache;
+}
+
 async function getPaperBalance(): Promise<number> {
   const [row] = await db.select({ paperBalance: botStateTable.paperBalance })
     .from(botStateTable).limit(1);
@@ -77,7 +86,7 @@ export async function runPaperScan(): Promise<void> {
     const [regime, watchlist, profile, bybitPositions, tradeMemory, perfSummary] = await Promise.all([
       detectMarketRegime(),
       getWatchlist(),
-      db.select().from(profileTable).limit(1).then(r => r[0]),
+      getCachedProfile(),
       bybitGetPositions().catch(() => []),
       getRecentMemory(20).catch(() => ""),
       getPerformanceSummary().catch(() => ""),
@@ -244,52 +253,46 @@ export async function runPaperScan(): Promise<void> {
 
 export async function updatePaperTradesPnl(): Promise<void> {
   try {
-    const cutoff = new Date(Date.now() - 14 * 24 * 3600_000); // 14 days
+    const cutoff = new Date(Date.now() - 14 * 24 * 3600_000);
     const open   = await db
       .select()
       .from(paperTradesTable)
-      .where(and(
-        eq(paperTradesTable.status, "open"),
-        gt(paperTradesTable.signalTime, cutoff),
-      ));
+      .where(and(eq(paperTradesTable.status, "open"), gt(paperTradesTable.signalTime, cutoff)));
 
     if (!open.length) return;
 
+    // Fetch each unique symbol's price once (deduplicated)
+    const uniqueSyms = [...new Set(open.map(t => `${t.symbol}USDT`.replace(/USDTUSDT$/, "USDT")))];
+    const priceMap = new Map<string, number>();
+    await Promise.allSettled(uniqueSyms.map(async sym => {
+      const klines  = await getKlines(sym, "60", 1).catch(() => [] as BybitKline[]);
+      const current = klines.at(-1)?.close ?? 0;
+      if (current) priceMap.set(sym, current);
+    }));
+
+    // Process all trades, accumulate balance returns for one final DB write
+    const now = new Date();
+    let totalBalanceReturn = 0;
+
     for (const trade of open) {
       try {
-        const sym      = `${trade.symbol}USDT`.replace(/USDTUSDT$/, "USDT");
-        const klines   = await getKlines(sym, "60", 1).catch(() => [] as BybitKline[]);
-        const current  = klines.at(-1)?.close ?? 0;
+        const sym     = `${trade.symbol}USDT`.replace(/USDTUSDT$/, "USDT");
+        const current = priceMap.get(sym);
         if (!current) continue;
 
-        const entry    = trade.entryPrice;
-        const isLong   = trade.direction === "long";
-        const pnlPct   = isLong
-          ? (current - entry) / entry * 100
-          : (entry - current) / entry * 100;
+        const entry   = trade.entryPrice;
+        const isLong  = trade.direction === "long";
+        const pnlPct  = isLong ? (current - entry) / entry * 100 : (entry - current) / entry * 100;
 
         let newStatus = "open";
         let exitPrice: number | null = null;
-        const now = new Date();
 
-        if (trade.stopLoss && (isLong ? current <= trade.stopLoss : current >= trade.stopLoss)) {
-          newStatus = "stopped_out";
-          exitPrice = trade.stopLoss;
-        } else if (trade.tp2 && (isLong ? current >= trade.tp2 : current <= trade.tp2)) {
-          newStatus = "tp2_hit";
-          exitPrice = trade.tp2;
-        } else if (trade.tp1 && (isLong ? current >= trade.tp1 : current <= trade.tp1)) {
-          newStatus = "tp1_hit";
-          exitPrice = trade.tp1;
-        }
+        if      (trade.stopLoss && (isLong ? current <= trade.stopLoss : current >= trade.stopLoss)) { newStatus = "stopped_out"; exitPrice = trade.stopLoss; }
+        else if (trade.tp2      && (isLong ? current >= trade.tp2      : current <= trade.tp2))      { newStatus = "tp2_hit";    exitPrice = trade.tp2; }
+        else if (trade.tp1      && (isLong ? current >= trade.tp1      : current <= trade.tp1))      { newStatus = "tp1_hit";    exitPrice = trade.tp1; }
 
-        const finalPct = exitPrice
-          ? (isLong ? (exitPrice - entry) / entry : (entry - exitPrice) / entry) * 100
-          : pnlPct;
-
-        const realizedPnl = exitPrice
-          ? (trade.marginUsed ?? 5) * 10 * (finalPct / 100)  // 10x leverage
-          : null;
+        const finalPct     = exitPrice ? (isLong ? (exitPrice - entry) / entry : (entry - exitPrice) / entry) * 100 : pnlPct;
+        const realizedPnl  = exitPrice ? (trade.marginUsed ?? 5) * 10 * (finalPct / 100) : null;
 
         await db.update(paperTradesTable).set({
           wouldHavePnl:    finalPct * (trade.marginUsed ?? 5) * 10 / 100,
@@ -297,14 +300,18 @@ export async function updatePaperTradesPnl(): Promise<void> {
           ...(newStatus !== "open" ? { status: newStatus, exitPrice, exitTime: now } : {}),
         }).where(eq(paperTradesTable.id, trade.id));
 
-        // Return margin + realized PnL to paper balance on close
+        // Accumulate balance return — write once after loop
         if (newStatus !== "open" && trade.marginUsed) {
-          const bal = await getPaperBalance();
-          const returned = trade.marginUsed + (realizedPnl ?? 0);
-          await setPaperBalance(Math.max(0, bal + returned))
-            .catch(e => console.warn("[paperScanner] balance return:", e.message));
+          totalBalanceReturn += trade.marginUsed + (realizedPnl ?? 0);
         }
       } catch { /* skip individual trade errors */ }
+    }
+
+    // Single balance update for all closed trades this cycle
+    if (totalBalanceReturn !== 0) {
+      const bal = await getPaperBalance();
+      await setPaperBalance(Math.max(0, bal + totalBalanceReturn))
+        .catch(e => console.warn("[paperScanner] balance return:", e.message));
     }
   } catch (err) {
     console.error("[paperScanner] P/L update failed:", err);

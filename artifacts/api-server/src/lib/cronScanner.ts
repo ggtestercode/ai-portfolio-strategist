@@ -129,8 +129,11 @@ interface SignalOutcome {
   pnlPct?:  number;
 }
 
-// ── bot_state helpers ─────────────────────────────────────────────────────────
-async function loadBotState() {
+// ── bot_state in-memory cache ─────────────────────────────────────────────────
+// Eliminates repeated DB reads. Write-through on all mutations.
+let _botStateCache: Awaited<ReturnType<typeof _loadBotStateFromDb>> | null = null;
+
+async function _loadBotStateFromDb() {
   const [row] = await db.select().from(botStateTable).limit(1);
   if (row) return row;
   await db.insert(botStateTable).values({ id: 1 }).onConflictDoNothing();
@@ -138,8 +141,19 @@ async function loadBotState() {
   return fresh!;
 }
 
+async function loadBotState() {
+  if (_botStateCache) return _botStateCache;
+  _botStateCache = await _loadBotStateFromDb();
+  return _botStateCache;
+}
+
 async function saveBotState(patch: Partial<typeof botStateTable.$inferInsert>): Promise<void> {
+  if (_botStateCache) _botStateCache = { ..._botStateCache, ...patch } as typeof _botStateCache;
   await db.update(botStateTable).set({ ...patch, lastUpdated: new Date() }).where(eq(botStateTable.id, 1));
+}
+
+export function invalidateBotStateCache(): void {
+  _botStateCache = null;
 }
 
 // ── Layer 5: Peak drawdown + daily loss halt ──────────────────────────────────
@@ -865,10 +879,10 @@ async function handlePositionDecision(
 
 // ── Position metadata patch (merges partial updates) ─────────────────────────
 async function patchPositionMeta(symbol: string, updates: Partial<PositionMeta>): Promise<void> {
-  const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
-    .from(botStateTable).limit(1);
-  const meta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  const state = await loadBotState();  // uses cache — no DB read
+  const meta  = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), ...updates };
+  if (_botStateCache) _botStateCache = { ..._botStateCache, positionMetadata: meta } as typeof _botStateCache;
   await db.update(botStateTable)
     .set({ positionMetadata: meta, lastUpdated: new Date() })
     .where(eq(botStateTable.id, 1));
@@ -876,10 +890,10 @@ async function patchPositionMeta(symbol: string, updates: Partial<PositionMeta>)
 
 // ── Entry source tagging ──────────────────────────────────────────────────────
 async function patchEntrySource(symbol: string, source: "manual_nl" | "auto_scan"): Promise<void> {
-  const [row] = await db.select({ positionMetadata: botStateTable.positionMetadata })
-    .from(botStateTable).limit(1);
-  const meta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  const state = await loadBotState();  // uses cache — no DB read
+  const meta  = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), entrySource: source };
+  if (_botStateCache) _botStateCache = { ..._botStateCache, positionMetadata: meta } as typeof _botStateCache;
   await db.update(botStateTable)
     .set({ positionMetadata: meta, lastUpdated: new Date() })
     .where(eq(botStateTable.id, 1));
@@ -1253,25 +1267,18 @@ async function checkPositionMonitor(): Promise<void> {
   const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
   if (!positions.length) return;
 
-  const [stateRow] = await db.select({
-    positionMonitorState: botStateTable.positionMonitorState,
-    positionMetadata:     botStateTable.positionMetadata,
-    currentRegime:        botStateTable.currentRegime,
-  }).from(botStateTable).limit(1).catch(() => [{
-    positionMonitorState: null as Record<string, PositionMonitorState> | null,
-    positionMetadata:     {} as Record<string, PositionMeta>,
-    currentRegime:        null as string | null,
-  }]);
+  // Use in-memory cache for all bot_state reads — no DB call per tick
+  const stateRow = await loadBotState().catch(() => null);
 
-  // Seed in-memory cache from DB on first successful read, otherwise use cache
   if (stateRow?.positionMonitorState) {
     for (const [sym, s] of Object.entries(stateRow.positionMonitorState)) {
       if (!monitorStateCache[sym]) monitorStateCache[sym] = s;
     }
   }
 
-  const monitorState = monitorStateCache;
-  const posMeta      = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  const monitorState        = monitorStateCache;
+  const monitorStateBefore  = JSON.stringify(monitorState);
+  const posMeta             = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   const now          = Date.now();
 
   // ── Trailing SL close detection ────────────────────────────────────────────
@@ -1458,11 +1465,14 @@ async function checkPositionMonitor(): Promise<void> {
     console.error("[posMonitor] partialExits:", e)
   );
 
-  // Persist monitor state
-  await db.update(botStateTable)
-    .set({ positionMonitorState: monitorState, lastUpdated: new Date() })
-    .where(eq(botStateTable.id, 1))
-    .catch(e => console.warn("[posMonitor] state save:", (e as Error).message));
+  // Persist monitor state only if it changed this tick
+  if (JSON.stringify(monitorState) !== monitorStateBefore) {
+    if (_botStateCache) _botStateCache = { ..._botStateCache, positionMonitorState: monitorState } as typeof _botStateCache;
+    await db.update(botStateTable)
+      .set({ positionMonitorState: monitorState, lastUpdated: new Date() })
+      .where(eq(botStateTable.id, 1))
+      .catch(e => console.warn("[posMonitor] state save:", (e as Error).message));
+  }
 
   } finally {
     monitorRunning = false;
