@@ -477,6 +477,7 @@ async function checkHoldTimers(
           exitPrice: currentPrice, amountUsd: pos.size * pos.entryPrice,
           entryPriceOverride: pos.entryPrice,
         }).catch(() => {});
+        await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.([
           `⏱️ 48h review — ${pos.symbol}`,
           `Decision: CLOSE`,
@@ -513,6 +514,11 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
   for (const pos of livePositions) {
     const pm = meta[pos.symbol];
     if (!pm) continue; // no metadata — skip until next open stores it
+
+    if (pm.entrySource && pm.entrySource !== "auto_scan") {
+      console.log(`[partialExit] ${pos.symbol} is manual trade (${pm.entrySource}) — skipping auto partial close`);
+      continue;
+    }
 
     // Read TP1/TP2 from trade_log as durable fallback (survives restarts)
     const tradeRows = await db
@@ -852,6 +858,7 @@ async function handlePositionDecision(
       await bybitClose(sym);
       const exitPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
       await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await clearPositionMeta(sym).catch(() => {});
       await logScalingDecision(sym, "CUT", decision.reason, pos.pnlPct);
       outcomes.push({ symbol: sym, action: "CUT", reason: decision.reason, pnlPct: pos.pnlPct });
       const sign = pos.pnl >= 0 ? "+" : "";
@@ -892,6 +899,18 @@ async function handlePositionDecision(
     }
     outcomes.push({ symbol: sym, action: gateResult.action === "executed" ? "ADD" : "HOLD", reason: gateResult.message, pnlPct: pos.pnlPct });
   }
+}
+
+// ── Position metadata clear (call on every full close) ───────────────────────
+async function clearPositionMeta(symbol: string): Promise<void> {
+  const state = await loadBotState();
+  const meta  = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  delete meta[symbol];
+  if (_botStateCache) _botStateCache = { ..._botStateCache, positionMetadata: meta } as typeof _botStateCache;
+  await db.update(botStateTable)
+    .set({ positionMetadata: meta, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1));
+  console.log(`[metadata] Cleared ${symbol} on close`);
 }
 
 // ── Position metadata patch (merges partial updates) ─────────────────────────
@@ -1302,15 +1321,18 @@ async function checkPositionMonitor(): Promise<void> {
   // ── Trailing SL close detection ────────────────────────────────────────────
   const currentSymbols = new Set(positions.map(p => p.symbol));
   for (const sym of prevPositionSymbols) {
-    if (!currentSymbols.has(sym) && posMeta[sym]?.trailingActive) {
-      const closed = await bybitGetClosedPnl(5).catch(() => []);
-      const trade  = closed.find(c => c.symbol === sym);
-      if (trade) {
-        await alertFn?.([
-          `✅ <b>Trailing SL triggered — ${sym}</b>`,
-          `Exited at $${trade.avgExitPrice.toFixed(4)}`,
-          `Profit locked: ${trade.closedPnl >= 0 ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
-        ].join("\n")).catch(() => {});
+    if (!currentSymbols.has(sym)) {
+      await clearPositionMeta(sym).catch(() => {});
+      if (posMeta[sym]?.trailingActive) {
+        const closed = await bybitGetClosedPnl(5).catch(() => []);
+        const trade  = closed.find(c => c.symbol === sym);
+        if (trade) {
+          await alertFn?.([
+            `✅ <b>Trailing SL triggered — ${sym}</b>`,
+            `Exited at $${trade.avgExitPrice.toFixed(4)}`,
+            `Profit locked: ${trade.closedPnl >= 0 ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
+          ].join("\n")).catch(() => {});
+        }
       }
     }
   }
@@ -1326,6 +1348,7 @@ async function checkPositionMonitor(): Promise<void> {
       console.log(`[posMonitor] ${pos.symbol} large profit +${pnlPct.toFixed(1)}% ≥ ${LARGE_PROFIT_CLOSE_PCT}% → closing full position`);
       await bybitClose(pos.symbol).catch(e => console.error(`[posMonitor] largeProfit close ${pos.symbol}:`, e.message));
       await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await clearPositionMeta(pos.symbol).catch(() => {});
       await alertFn?.([
         `💰 <b>Large profit exit — ${pos.symbol}</b>`,
         `P/L: <b>+${pnlPct.toFixed(1)}%</b> (≥${LARGE_PROFIT_CLOSE_PCT}% threshold)`,
@@ -1355,6 +1378,7 @@ async function checkPositionMonitor(): Promise<void> {
         console.error(`[posMonitor] close ${pos.symbol}:`, (e as Error).message)
       );
       await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await clearPositionMeta(pos.symbol).catch(() => {});
       await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(() => {});
       void closeSide; // suppress unused variable warning
       continue;
@@ -1656,6 +1680,7 @@ async function runPositionReview(
     await bybitClose(pos.symbol)
       .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
     await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+    await clearPositionMeta(pos.symbol).catch(() => {});
     await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ approved\n${reason}`).catch(() => {});
 
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
@@ -1671,6 +1696,7 @@ async function runPositionReview(
         await bybitClose(pos.symbol)
           .catch(e => console.error(`[posMonitor] CLOSE (dust) ${pos.symbol}:`, (e as Error).message));
         await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+        await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(() => {});
       } else {
         // Partial would leave dust — skip and hold

@@ -156,7 +156,7 @@ export async function runPaperScan(): Promise<void> {
       "For LONGS: stopLoss below entry, tp1/tp2 above. For SHORTS: stopLoss above entry, tp1/tp2 below.",
       "riskRewardRatio must be ≥1.0. ATR-based: TP1=entry±(ATR×1.0), TP2=entry±(ATR×2.0), SL=entry±(ATR×1.5).",
       "whyNow: name the specific signals you chose to use and why you preferred them over others. If no edge — set direction=neutral.",
-      "IMPORTANT: All JSON string values must be valid JSON. No unescaped double quotes inside strings — use single quotes if quoting within text. No literal newlines inside strings. Keep reasoning under 80 words.",
+      "CRITICAL JSON RULES: reasoning max 60 chars. whyNow max 40 chars. summary max 80 chars. NEVER use double-quote characters inside any string value. NEVER use backslash characters. Use only plain ASCII letters, digits, spaces, and these safe chars: . , - + % : / ( ). No newlines inside strings.",
     ].join("\n");
 
     const prompt = [

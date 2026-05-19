@@ -160,15 +160,21 @@ class LlmRouter {
       const jsonStr = start !== -1 && end > start ? stripped.slice(start, end + 1) : stripped;
       try {
         data = JSON.parse(jsonStr) as T;
-      } catch {
-        // Repair unescaped quotes, literal newlines in strings, truncated JSON, etc.
-        const repaired = jsonrepair(jsonStr);
-        data = JSON.parse(repaired) as T;
-        console.log(`[LlmRouter] JSON repaired for ${req.taskType}`);
+      } catch (parseErr) {
+        try {
+          // Repair unescaped quotes, literal newlines in strings, truncated JSON, etc.
+          const repaired = jsonrepair(jsonStr);
+          data = JSON.parse(repaired) as T;
+          console.log(`[LlmRouter] JSON repaired for ${req.taskType}`);
+        } catch (repairErr) {
+          const repairMsg = repairErr instanceof Error ? repairErr.message : String(repairErr);
+          console.warn(`[LlmRouter] jsonrepair also failed for ${req.taskType} — ${repairMsg} — response(1000): ${base.text.slice(0, 1000)}`);
+          throw parseErr; // rethrow to hit outer catch
+        }
       }
       parseSuccess = true;
     } catch {
-      console.warn(`[LlmRouter] JSON parse failed for ${req.taskType} — raw response snippet: ${base.text.slice(0, 200)}`);
+      console.warn(`[LlmRouter] JSON parse failed for ${req.taskType} — length: ${base.text.length}`);
     }
     return { ...base, data, parseSuccess };
   }
