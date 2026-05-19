@@ -241,6 +241,17 @@ async function setSlTpForExistingPositions(): Promise<void> {
     .from(botStateTable).limit(1).catch(() => [{ positionMetadata: {} }]);
   const existingMeta = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
 
+  // Purge metadata for symbols no longer on Bybit (accumulated stale entries)
+  const liveSymbols = new Set(positions.map(p => p.symbol));
+  const staleKeys   = Object.keys(existingMeta).filter(k => !liveSymbols.has(k));
+  if (staleKeys.length) {
+    staleKeys.forEach(k => delete existingMeta[k]);
+    await db.update(botStateTable)
+      .set({ positionMetadata: existingMeta, lastUpdated: new Date() })
+      .where(eq(botStateTable.id, 1)).catch(() => {});
+    console.log(`[startup] Cleared stale metadata for: ${staleKeys.join(", ")}`);
+  }
+
   for (const pos of positions) {
     const hasSl  = pos.stopLoss   && pos.stopLoss   > 0;
     const hasTp  = pos.takeProfit && pos.takeProfit > 0;
