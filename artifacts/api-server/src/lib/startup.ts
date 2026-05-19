@@ -1,4 +1,5 @@
 import { approvalGate }           from "./approvalGate";
+import { backfillStructuredReflections } from "./tradeMemoryLib";
 import { openPosition }            from "../brokers/etoro";
 import {
   openPosition    as bybitOpen,
@@ -227,6 +228,10 @@ export async function initBrokers(): Promise<void> {
 
   // Always log current position metadata for debugging
   logPositionMetadata().catch(() => {});
+
+  // Backfill any closed trades missing structured reflections (non-blocking, rate-limited)
+  backfillStructuredReflections(20)
+    .catch(e => console.error("[startup] backfill failed:", e));
 
   console.log("[startup] Broker executors registered: etoro, bybit, okx");
   console.log("[startup] Telegram notifier registered");

@@ -398,20 +398,22 @@ export async function placeOrder(symbol: string, side: "Buy" | "Sell", amountUsd
 }
 
 export interface BybitClosedPnl {
-  symbol: string;
-  side: "Buy" | "Sell";
-  closedSize: number;
+  symbol:        string;
+  side:          "Buy" | "Sell";
+  closedSize:    number;
   avgEntryPrice: number;
-  avgExitPrice: number;
-  closedPnl: number;
-  leverage: number;
-  closedAt: number;
+  avgExitPrice:  number;
+  closedPnl:     number;
+  leverage:      number;
+  closedAt:      number; // epoch ms (updatedTime)
+  openedAt:      number; // epoch ms (createdTime)
 }
 
-export async function getClosedPnl(limit = 20, startTime?: number): Promise<BybitClosedPnl[]> {
-  type Raw = { symbol: string; side: string; closedSize: string; avgEntryPrice: string; avgExitPrice: string; closedPnl: string; leverage: string; updatedTime: string };
+export async function getClosedPnl(limit = 20, startTime?: number, symbol?: string): Promise<BybitClosedPnl[]> {
+  type Raw = { symbol: string; side: string; closedSize: string; avgEntryPrice: string; avgExitPrice: string; closedPnl: string; leverage: string; updatedTime: string; createdTime: string };
   const params: Record<string, string> = { category: "linear", limit: String(limit) };
   if (startTime !== undefined) params.startTime = String(startTime);
+  if (symbol   !== undefined) params.symbol    = symbol;
   const r = await get<{ list: Raw[] }>("/v5/position/closed-pnl", params);
   return r.list.map(p => ({
     symbol:        p.symbol,
@@ -422,5 +424,6 @@ export async function getClosedPnl(limit = 20, startTime?: number): Promise<Bybi
     closedPnl:     parseFloat(p.closedPnl),
     leverage:      parseFloat(p.leverage),
     closedAt:      parseInt(p.updatedTime),
+    openedAt:      parseInt(p.createdTime),
   }));
 }
