@@ -21,21 +21,22 @@ export interface ClosedTradeParams {
 }
 
 interface ReflectionInput {
-  symbol:      string;
-  direction:   string;
-  entryPrice:  number;
-  exitPrice:   number;
-  pnl:         number;
-  pnlPct:      number;
-  reasoning?:  string;
-  entryAt?:    Date | null;
-  exitAt?:     Date | null;
-  setupType?:  string | null;
-  score?:      string | null;
-  whyNow?:     string | null;
-  sl?:         string | null;
-  tp1?:        string | null;
-  tp2?:        string | null;
+  symbol:        string;
+  direction:     string;
+  entryPrice:    number;
+  exitPrice:     number;
+  pnl:           number;
+  pnlPct:        number;
+  reasoning?:    string;
+  entryAt?:      Date | null;
+  exitAt?:       Date | null;
+  setupType?:    string | null;
+  score?:        string | null;
+  whyNow?:       string | null;
+  sl?:           string | null;
+  tp1?:          string | null;
+  tp2?:          string | null;
+  sourceTradeId?: string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -252,6 +253,7 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     symbol:               input.symbol,
     action:               "TRADE_CLOSE",
     pnlPct:               String(input.pnlPct.toFixed(4)),
+    sourceTradeId:        input.sourceTradeId ?? null,
     reflection,
     entryQuality:         String(d.entryQuality),
     directionCorrect:     String(d.directionCorrect),
@@ -403,39 +405,51 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
   for (const trade of closedTrades) {
     if (processed >= max) break;
 
-    // Check if a structured reflection already exists within ±2h of this trade's exit time
-    // (match by exit time, not just symbol — handles multiple trades per symbol)
-    const exitMs        = trade.exitAt ? new Date(trade.exitAt).getTime() : 0;
-    const windowStart   = new Date(exitMs - 2 * 60 * 60 * 1000);
-    const windowEnd     = new Date(exitMs + 2 * 60 * 60 * 1000);
-    const existing = exitMs > 0
-      ? await db.select({ id: tradeMemoryTable.id, createdAt: tradeMemoryTable.createdAt })
-          .from(tradeMemoryTable)
-          .where(and(
-            eq(tradeMemoryTable.symbol, trade.symbol),
-            eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-            isNotNull(tradeMemoryTable.entryTiming),
-            gte(tradeMemoryTable.createdAt, windowStart),
-            lte(tradeMemoryTable.createdAt, windowEnd),
-          ))
-          .limit(1)
-          .catch(() => [] as Array<{ id: string; createdAt: Date }>)
-      : [];
+    // Deduplicate: prefer sourceTradeId match (exact), fall back to pnlPct for old records
+    const existingById = await db.select({ id: tradeMemoryTable.id })
+      .from(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.sourceTradeId, trade.id),
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNotNull(tradeMemoryTable.entryTiming),
+      ))
+      .limit(1)
+      .catch(() => [] as Array<{ id: string }>);
 
-    if (existing.length > 0) continue;
+    if (existingById.length > 0) continue;
 
-    // Delete any old-format reflection in the same window (missing entryTiming)
-    if (exitMs > 0) {
-      await db.delete(tradeMemoryTable)
-        .where(and(
-          eq(tradeMemoryTable.symbol, trade.symbol),
-          eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-          isNull(tradeMemoryTable.entryTiming),
-          gte(tradeMemoryTable.createdAt, windowStart),
-          lte(tradeMemoryTable.createdAt, windowEnd),
-        ))
+    // Fall back to pnlPct match for reflections created before sourceTradeId was added
+    const pnlPctStr = parseFloat(trade.pnlPct ?? "0").toFixed(4);
+    const existingByPnl = await db.select({ id: tradeMemoryTable.id, sourceTradeId: tradeMemoryTable.sourceTradeId })
+      .from(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.symbol, trade.symbol),
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNotNull(tradeMemoryTable.entryTiming),
+        isNull(tradeMemoryTable.sourceTradeId),   // only match old records without sourceTradeId
+        eq(tradeMemoryTable.pnlPct, pnlPctStr),
+      ))
+      .limit(1)
+      .catch(() => [] as Array<{ id: string; sourceTradeId: string | null }>);
+
+    if (existingByPnl.length > 0) {
+      // Backfill sourceTradeId on the legacy reflection so future runs skip cleanly
+      await db.update(tradeMemoryTable)
+        .set({ sourceTradeId: trade.id })
+        .where(eq(tradeMemoryTable.id, existingByPnl[0]!.id))
         .catch(() => {});
+      continue;
     }
+
+    // Delete any old-format reflection with same pnlPct (missing entryTiming)
+    await db.delete(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.symbol, trade.symbol),
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNull(tradeMemoryTable.entryTiming),
+        eq(tradeMemoryTable.pnlPct, pnlPctStr),
+      ))
+      .catch(() => {});
 
     const entryPrice = parseFloat(trade.entryPrice ?? "0");
     const exitPrice  = parseFloat(trade.exitPrice  ?? "0");
@@ -450,21 +464,22 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
     console.log(`[backfill] Generating reflection for ${trade.symbol} ${trade.direction} ${pnlPct >= 0 ? "WIN" : "LOSS"} ${pnlPct.toFixed(2)}%`);
 
     await generateReflection({
-      symbol:    trade.symbol,
-      direction: trade.direction,
+      symbol:        trade.symbol,
+      direction:     trade.direction,
       entryPrice,
       exitPrice,
       pnl,
       pnlPct,
-      reasoning: trade.reasoning ?? undefined,
-      entryAt:   trade.entryAt,
-      exitAt:    trade.exitAt,
-      setupType: trade.setupType,
-      score:     trade.score,
-      whyNow:    trade.whyNow,
-      sl:        trade.sl,
-      tp1:       trade.tp1,
-      tp2:       trade.tp2,
+      reasoning:     trade.reasoning ?? undefined,
+      entryAt:       trade.entryAt,
+      exitAt:        trade.exitAt,
+      setupType:     trade.setupType,
+      score:         trade.score,
+      whyNow:        trade.whyNow,
+      sl:            trade.sl,
+      tp1:           trade.tp1,
+      tp2:           trade.tp2,
+      sourceTradeId: trade.id,
     }).catch(e => console.error(`[backfill] ${trade.symbol} reflection failed:`, (e as Error).message));
 
     processed++;

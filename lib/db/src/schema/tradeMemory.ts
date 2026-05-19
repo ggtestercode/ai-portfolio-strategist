@@ -30,6 +30,7 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   signalsThatFailed:    text("signals_that_failed"),   // JSON array string
   versionBLesson:       text("version_b_lesson"),
   pnlPct:               text("pnl_pct"),               // stored for display without joining trade_log
+  sourceTradeId:        text("source_trade_id"),        // trade_log.id for exact deduplication
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;
