@@ -403,27 +403,39 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
   for (const trade of closedTrades) {
     if (processed >= max) break;
 
-    // Only backfill trades that don't have the new structured format (entry_timing IS NULL marker)
-    const existing = await db.select({ id: tradeMemoryTable.id })
-      .from(tradeMemoryTable)
-      .where(and(
-        eq(tradeMemoryTable.symbol, trade.symbol),
-        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-        isNotNull(tradeMemoryTable.entryTiming),
-      ))
-      .limit(1)
-      .catch(() => [] as Array<{ id: string }>);
+    // Check if a structured reflection already exists within ±2h of this trade's exit time
+    // (match by exit time, not just symbol — handles multiple trades per symbol)
+    const exitMs        = trade.exitAt ? new Date(trade.exitAt).getTime() : 0;
+    const windowStart   = new Date(exitMs - 2 * 60 * 60 * 1000);
+    const windowEnd     = new Date(exitMs + 2 * 60 * 60 * 1000);
+    const existing = exitMs > 0
+      ? await db.select({ id: tradeMemoryTable.id, createdAt: tradeMemoryTable.createdAt })
+          .from(tradeMemoryTable)
+          .where(and(
+            eq(tradeMemoryTable.symbol, trade.symbol),
+            eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+            isNotNull(tradeMemoryTable.entryTiming),
+            gte(tradeMemoryTable.createdAt, windowStart),
+            lte(tradeMemoryTable.createdAt, windowEnd),
+          ))
+          .limit(1)
+          .catch(() => [] as Array<{ id: string; createdAt: Date }>)
+      : [];
 
     if (existing.length > 0) continue;
 
-    // Delete any old-format reflection (missing entryTiming) to replace with new
-    await db.delete(tradeMemoryTable)
-      .where(and(
-        eq(tradeMemoryTable.symbol, trade.symbol),
-        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-        isNull(tradeMemoryTable.entryTiming),
-      ))
-      .catch(() => {});
+    // Delete any old-format reflection in the same window (missing entryTiming)
+    if (exitMs > 0) {
+      await db.delete(tradeMemoryTable)
+        .where(and(
+          eq(tradeMemoryTable.symbol, trade.symbol),
+          eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+          isNull(tradeMemoryTable.entryTiming),
+          gte(tradeMemoryTable.createdAt, windowStart),
+          lte(tradeMemoryTable.createdAt, windowEnd),
+        ))
+        .catch(() => {});
+    }
 
     const entryPrice = parseFloat(trade.entryPrice ?? "0");
     const exitPrice  = parseFloat(trade.exitPrice  ?? "0");
