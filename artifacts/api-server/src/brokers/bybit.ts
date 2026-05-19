@@ -408,9 +408,11 @@ export interface BybitClosedPnl {
   closedAt: number;
 }
 
-export async function getClosedPnl(limit = 20): Promise<BybitClosedPnl[]> {
+export async function getClosedPnl(limit = 20, startTime?: number): Promise<BybitClosedPnl[]> {
   type Raw = { symbol: string; side: string; closedSize: string; avgEntryPrice: string; avgExitPrice: string; closedPnl: string; leverage: string; updatedTime: string };
-  const r = await get<{ list: Raw[] }>("/v5/position/closed-pnl", { category: "linear", limit: String(limit) });
+  const params: Record<string, string> = { category: "linear", limit: String(limit) };
+  if (startTime !== undefined) params.startTime = String(startTime);
+  const r = await get<{ list: Raw[] }>("/v5/position/closed-pnl", params);
   return r.list.map(p => ({
     symbol:        p.symbol,
     side:          p.side as "Buy" | "Sell",

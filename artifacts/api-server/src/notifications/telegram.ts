@@ -235,7 +235,7 @@ export function startPolling(): void {
     { command: "closedust",    description: "Close all dust positions (value < $1)" },
     { command: "cancelorders", description: "Cancel orders: list / 1 / all" },
     { command: "status",     description: "Full bot status overview" },
-    { command: "history",    description: "Last 10 closed trades" },
+    { command: "history",    description: "Last 7 days of trades" },
     { command: "memory",          description: "Last 5 trade reflections (AI journal)" },
     { command: "paperhistory",    description: "Version B paper trade signals (A/B test)" },
     { command: "pending",    description: "Pending trade approvals" },
@@ -1161,9 +1161,10 @@ export function startPolling(): void {
   b.onText(/^\/history(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
       const [openPositions, closedPnl] = await Promise.all([
         bybitGetPositions(),
-        bybitGetClosedPnl(20),
+        bybitGetClosedPnl(50, sevenDaysAgo),
       ]);
 
       if (!openPositions.length && !closedPnl.length) {
@@ -1180,7 +1181,7 @@ export function startPolling(): void {
         return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}, ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} SGT`;
       };
 
-      const out: string[] = [`📋 <b>Trade History (Bybit)</b>`, ``];
+      const out: string[] = [`📋 <b>Trade History — Last 7 Days (Bybit)</b>`, ``];
 
       if (openPositions.length) {
         out.push(`<b>Open (${openPositions.length}):</b>`);
