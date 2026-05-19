@@ -476,6 +476,7 @@ async function checkHoldTimers(
           symbol: pos.symbol, broker: "bybit",
           exitPrice: currentPrice, amountUsd: pos.size * pos.entryPrice,
           entryPriceOverride: pos.entryPrice,
+          directionOverride: pos.side === "Buy" ? "long" : "short",
         }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.([
@@ -857,7 +858,7 @@ async function handlePositionDecision(
     try {
       await bybitClose(sym);
       const exitPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
-      await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
       await clearPositionMeta(sym).catch(() => {});
       await logScalingDecision(sym, "CUT", decision.reason, pos.pnlPct);
       outcomes.push({ symbol: sym, action: "CUT", reason: decision.reason, pnlPct: pos.pnlPct });
@@ -1209,11 +1210,25 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         // Tag as auto_scan so position review gating knows its origin
         patchEntrySource(sym, "auto_scan").catch(e => console.warn(`[cronScanner] patchEntrySource ${sym}:`, e.message));
 
+        // Verify actual direction from live Bybit position — signal direction can differ from what Bybit opened
+        const signalDirection = opp.direction === "short" ? "short" : "long";
+        let actualDirection: "long" | "short" = signalDirection;
+        try {
+          const liveAfterOpen = await bybitGetPositions();
+          const livePos = liveAfterOpen.find(p => p.symbol === sym);
+          if (livePos) {
+            actualDirection = livePos.side === "Buy" ? "long" : "short";
+            if (actualDirection !== signalDirection) {
+              console.warn(`[cronScanner] ⚠️ Direction mismatch: signal=${signalDirection} but Bybit side=${livePos.side} — using Bybit as truth`);
+            }
+          }
+        } catch { /* non-fatal — fall back to signal direction */ }
+
         // Log to trade memory so history page and future reviews have entry context
         await logOpenTrade({
           symbol:          sym,
           broker:          "bybit",
-          direction:       opp.direction === "short" ? "short" : "long",
+          direction:       actualDirection,
           entryPrice:      opp.entry ?? opp.price,
           leverage:        opp.leverage ?? 10,
           amountUsd,
@@ -1348,7 +1363,7 @@ async function checkPositionMonitor(): Promise<void> {
     if (pnlPct >= LARGE_PROFIT_CLOSE_PCT) {
       console.log(`[posMonitor] ${pos.symbol} large profit +${pnlPct.toFixed(1)}% ≥ ${LARGE_PROFIT_CLOSE_PCT}% → closing full position`);
       await bybitClose(pos.symbol).catch(e => console.error(`[posMonitor] largeProfit close ${pos.symbol}:`, e.message));
-      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
       await clearPositionMeta(pos.symbol).catch(() => {});
       await alertFn?.([
         `💰 <b>Large profit exit — ${pos.symbol}</b>`,
@@ -1378,7 +1393,7 @@ async function checkPositionMonitor(): Promise<void> {
       await bybitClose(pos.symbol).catch(e =>
         console.error(`[posMonitor] close ${pos.symbol}:`, (e as Error).message)
       );
-      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
       await clearPositionMeta(pos.symbol).catch(() => {});
       await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(() => {});
       void closeSide; // suppress unused variable warning
@@ -1688,7 +1703,7 @@ async function runPositionReview(
   if (upper.startsWith("CLOSE")) {
     await bybitClose(pos.symbol)
       .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
-    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
     await clearPositionMeta(pos.symbol).catch(() => {});
     await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ approved\n${reason}`).catch(() => {});
 
@@ -1704,7 +1719,7 @@ async function runPositionReview(
         // Position already dust — close fully
         await bybitClose(pos.symbol)
           .catch(e => console.error(`[posMonitor] CLOSE (dust) ${pos.symbol}:`, (e as Error).message));
-        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice }).catch(() => {});
+        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: pos.markPrice ?? pos.entryPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(() => {});
       } else {

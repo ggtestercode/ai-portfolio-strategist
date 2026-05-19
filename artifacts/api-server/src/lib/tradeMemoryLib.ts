@@ -184,8 +184,9 @@ export async function logOpenTrade(params: {
 
 export async function closeOpenTrade(params: {
   symbol: string; broker: string; exitPrice: number; amountUsd: number;
-  pnlOverride?: number;      // use broker-reported P/L directly (e.g. eToro)
-  entryPriceOverride?: number; // use broker-reported entry price (overrides trade_log)
+  pnlOverride?: number;           // use broker-reported P/L directly (e.g. eToro)
+  entryPriceOverride?: number;    // use broker-reported entry price (overrides trade_log)
+  directionOverride?: "long" | "short"; // use Bybit-confirmed side (overrides trade_log direction)
 }): Promise<void> {
   // Fetch all open entries for this symbol+broker — close the most recent, purge duplicates
   const openTrades = await db.select()
@@ -209,7 +210,7 @@ export async function closeOpenTrade(params: {
   const entryPrice = params.entryPriceOverride
     ? params.entryPriceOverride
     : parseFloat(openTrade.entryPrice ?? "0");
-  const direction  = openTrade.direction as "long" | "short";
+  const direction  = params.directionOverride ?? (openTrade.direction as "long" | "short");
   const qty        = params.amountUsd / (entryPrice || params.exitPrice || 1);
 
   const pnl    = params.pnlOverride !== undefined
