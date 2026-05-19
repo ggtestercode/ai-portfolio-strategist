@@ -1327,10 +1327,11 @@ async function checkPositionMonitor(): Promise<void> {
         const closed = await bybitGetClosedPnl(5).catch(() => []);
         const trade  = closed.find(c => c.symbol === sym);
         if (trade) {
+          const won = trade.closedPnl >= 0;
           await alertFn?.([
-            `✅ <b>Trailing SL triggered — ${sym}</b>`,
+            `${won ? "✅" : "🔴"} <b>Position closed — ${sym}</b>`,
             `Exited at $${trade.avgExitPrice.toFixed(4)}`,
-            `Profit locked: ${trade.closedPnl >= 0 ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
+            `P/L: ${won ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
           ].join("\n")).catch(() => {});
         }
       }
@@ -1640,6 +1641,14 @@ async function runPositionReview(
     const m    = text.match(/ADJUST_SL\s+\$?([\d.]+)/i);
     const newSl = m ? parseFloat(m[1]!) : NaN;
     if (!isNaN(newSl) && newSl > 0) {
+      // Validate SL is on the protective side: SHORT SL must be ABOVE price, LONG SL must be BELOW price
+      const liveRef   = (pos as any).markPrice as number ?? pos.entryPrice;
+      const isLongPos = pos.side === "Buy";
+      const slValid   = isLongPos ? newSl < liveRef : newSl > liveRef;
+      if (!slValid) {
+        console.warn(`[posMonitor] ADJUST_SL ${pos.symbol} rejected — Claude suggested $${newSl.toFixed(4)} but that is on the wrong side of price $${liveRef.toFixed(4)} for a ${isLongPos ? "LONG" : "SHORT"}`);
+        return;
+      }
       await bybitSetStopLoss(pos.symbol, newSl, pos.positionIdx)
         .catch(e => console.error(`[posMonitor] ADJUST_SL ${pos.symbol}:`, (e as Error).message));
       const lastNotify = lastAdjustSlNotifyAt[pos.symbol] ?? 0;
