@@ -5,7 +5,7 @@ import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
-import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades } from "./tradeMemoryLib";
+import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose } from "./tradeMemoryLib";
 import { llm }                         from "./llmRouter";
 import {
   getPositions    as bybitGetPositions,
@@ -590,6 +590,8 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
             `SL moved to breakeven: $${pm.entryPrice.toFixed(4)}`,
             `Remaining: 70% position running`,
           ].join("\n")).catch(() => {});
+          const pnlPctTp1 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
+          logPartialClose({ symbol: pos.symbol, partialType: "tp1", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp1, remainingPct: 70 }).catch(() => {});
         } catch (e) {
           console.error(`[cronScanner] Tier 1 exit ${pos.symbol} failed:`, (e as Error).message);
         }
@@ -605,7 +607,8 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
         try {
           // Close 30% of original qty (another 30%, total 60% out)
           const qty30pctOfOrig = origQty * 0.30;
-          await closePercentPosition(pos.symbol, Math.round((qty30pctOfOrig / pos.size) * 100));
+          const closePctTp2 = Math.round((qty30pctOfOrig / pos.size) * 100);
+          await closePercentPosition(pos.symbol, closePctTp2);
           const banked = pos.pnl * 0.30;
           await alertFn?.([
             `💰 Tier 2 profit banked — ${pos.symbol}`,
@@ -613,6 +616,8 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
             `P/L banked: +$${banked.toFixed(2)}`,
             `Remaining: 40% with trailing SL`,
           ].join("\n")).catch(() => {});
+          const pnlPctTp2 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
+          logPartialClose({ symbol: pos.symbol, partialType: "tp2", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp2, remainingPct: 40 }).catch(() => {});
         } catch (e) {
           console.error(`[cronScanner] Tier 2 exit ${pos.symbol} failed:`, (e as Error).message);
         }
@@ -1384,6 +1389,7 @@ async function checkPositionMonitor(): Promise<void> {
         `Closed 50% to secure gains`,
         `Remaining 50% with 40% trailing SL activated`,
       ].join("\n")).catch(() => {});
+      logPartialClose({ symbol: pos.symbol, partialType: "large_profit", closePct: 50, priceAtClose: pos.markPrice ?? pos.entryPrice, pnlPct, remainingPct: 50 }).catch(() => {});
       continue;
     }
 

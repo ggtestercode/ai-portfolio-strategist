@@ -51,37 +51,104 @@ async function generateReflection(p: {
 }): Promise<void> {
   const sign   = p.pnl >= 0 ? "+" : "";
   const prompt = [
-    `Analyse this closed trade and provide a structured reflection:`,
+    `Analyse this closed trade and return a structured trading journal entry.`,
     `Symbol: ${p.symbol} | Direction: ${p.direction}`,
     `Entry: $${p.entryPrice.toFixed(4)} → Exit: $${p.exitPrice.toFixed(4)}`,
     `P/L: ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)`,
     p.reasoning ? `Original reasoning: ${p.reasoning}` : "",
-    `Reply JSON with: reflection (2 sentences), whatWorked (specific signals that predicted the outcome), whatDidnt (signals that were noise or wrong), lessonsLearned (one actionable insight for next time).`,
+    ``,
+    `Reply with JSON only, all fields required:`,
+    `{`,
+    `  "reflection": "2-sentence overall assessment",`,
+    `  "entryQuality": "good|ok|poor",`,
+    `  "directionCorrect": "true|false",`,
+    `  "slPlacement": "good|too_tight|too_wide",`,
+    `  "tpRealism": "good|too_tight|too_ambitious",`,
+    `  "partialsCorrect": "good|too_early|too_late|na",`,
+    `  "whatWorked": "specific signals or conditions that predicted the outcome",`,
+    `  "whatDidnt": "signals that were noise or wrong",`,
+    `  "lessonsLearned": "one concrete actionable insight for next time",`,
+    `  "nextTimeWouldDo": "one specific change to entry/SL/TP/sizing for a similar setup"`,
+    `}`,
   ].filter(Boolean).join("\n");
 
-  const res = await llm.json<{ reflection: string; whatWorked: string; whatDidnt: string; lessonsLearned?: string }>({
+  type ReflectionResult = {
+    reflection: string;
+    entryQuality: string;
+    directionCorrect: string;
+    slPlacement: string;
+    tpRealism: string;
+    partialsCorrect: string;
+    whatWorked: string;
+    whatDidnt: string;
+    lessonsLearned: string;
+    nextTimeWouldDo: string;
+  };
+
+  const res = await llm.json<ReflectionResult>({
     taskType:      "assistant_reply",
-    systemContext: "You are a trading journal assistant. Reply in JSON only. Be concise and specific.",
+    systemContext: "You are a trading journal assistant. Reply in JSON only. Be specific and concise. No generic advice.",
     prompt,
     schema: {
-      type: "object", required: ["reflection", "whatWorked", "whatDidnt"],
+      type: "object",
+      required: ["reflection", "entryQuality", "directionCorrect", "slPlacement", "tpRealism",
+                 "partialsCorrect", "whatWorked", "whatDidnt", "lessonsLearned", "nextTimeWouldDo"],
       properties: {
-        reflection:     { type: "string" },
-        whatWorked:     { type: "string" },
-        whatDidnt:      { type: "string" },
-        lessonsLearned: { type: "string" },
+        reflection:       { type: "string" },
+        entryQuality:     { type: "string" },
+        directionCorrect: { type: "string" },
+        slPlacement:      { type: "string" },
+        tpRealism:        { type: "string" },
+        partialsCorrect:  { type: "string" },
+        whatWorked:       { type: "string" },
+        whatDidnt:        { type: "string" },
+        lessonsLearned:   { type: "string" },
+        nextTimeWouldDo:  { type: "string" },
       },
     },
-    fallback: { reflection: "No reflection available.", whatWorked: "", whatDidnt: "" },
+    fallback: {
+      reflection: "No reflection available.", entryQuality: "ok", directionCorrect: "true",
+      slPlacement: "good", tpRealism: "good", partialsCorrect: "na",
+      whatWorked: "", whatDidnt: "", lessonsLearned: "", nextTimeWouldDo: "",
+    },
   });
 
-  const lessons = res.data.lessonsLearned ? ` | Lesson: ${res.data.lessonsLearned}` : "";
+  const d = res.data;
   await db.insert(tradeMemoryTable).values({
-    symbol:     p.symbol,
-    reflection: res.data.reflection + lessons,
-    whatWorked: res.data.whatWorked || null,
-    whatDidnt:  res.data.whatDidnt  || null,
+    symbol:           p.symbol,
+    action:           "TRADE_CLOSE",
+    reflection:       d.reflection,
+    entryQuality:     d.entryQuality     || null,
+    directionCorrect: d.directionCorrect || null,
+    slPlacement:      d.slPlacement      || null,
+    tpRealism:        d.tpRealism        || null,
+    partialsCorrect:  d.partialsCorrect  || null,
+    whatWorked:       d.whatWorked       || null,
+    whatDidnt:        d.whatDidnt        || null,
+    lessonsLearned:   d.lessonsLearned   || null,
+    nextTimeWouldDo:  d.nextTimeWouldDo  || null,
   });
+}
+
+export async function logPartialClose(params: {
+  symbol:       string;
+  partialType:  "tp1" | "tp2" | "large_profit" | "review";
+  closePct:     number;
+  priceAtClose: number;
+  pnlPct:       number;
+  remainingPct: number;
+}): Promise<void> {
+  const { symbol, partialType, closePct, priceAtClose, pnlPct, remainingPct } = params;
+  const sign = pnlPct >= 0 ? "+" : "";
+  await db.insert(tradeMemoryTable).values({
+    symbol,
+    action:       "PARTIAL",
+    partialType,
+    closePct:     String(closePct),
+    priceAtClose: String(priceAtClose.toFixed(4)),
+    remainingPct: String(remainingPct),
+    reflection:   `PARTIAL ${partialType.toUpperCase()}: closed ${closePct}% at $${priceAtClose.toFixed(4)} (${sign}${pnlPct.toFixed(2)}%), ${remainingPct}% remaining`,
+  }).catch(e => console.error("[tradeMemory] logPartialClose failed:", e));
 }
 
 export async function getRecentMemory(limit = 20): Promise<string> {
@@ -90,7 +157,19 @@ export async function getRecentMemory(limit = 20): Promise<string> {
     .orderBy(desc(tradeMemoryTable.createdAt))
     .limit(limit);
   if (!rows.length) return "No trade memory available yet.";
-  return rows.map((r, i) => `${i + 1}. ${r.symbol}: ${r.reflection}`).join("\n");
+
+  return rows.map((r, i) => {
+    if (r.action === "PARTIAL") {
+      return `${i + 1}. ${r.symbol} [PARTIAL]: ${r.reflection}`;
+    }
+    const parts = [`${i + 1}. ${r.symbol}: ${r.reflection}`];
+    if (r.entryQuality)     parts.push(`  entry=${r.entryQuality} dir_correct=${r.directionCorrect} sl=${r.slPlacement} tp=${r.tpRealism}`);
+    if (r.whatWorked)       parts.push(`  worked: ${r.whatWorked}`);
+    if (r.whatDidnt)        parts.push(`  failed: ${r.whatDidnt}`);
+    if (r.lessonsLearned)   parts.push(`  lesson: ${r.lessonsLearned}`);
+    if (r.nextTimeWouldDo)  parts.push(`  next: ${r.nextTimeWouldDo}`);
+    return parts.join("\n");
+  }).join("\n");
 }
 
 export async function getRecentTrades(limit = 10): Promise<typeof tradeLogTable.$inferSelect[]> {
