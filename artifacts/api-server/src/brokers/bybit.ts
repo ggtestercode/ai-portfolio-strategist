@@ -66,9 +66,9 @@ function normalise(symbol: string): string {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface BybitTicker  { symbol: string; lastPrice: number; bid: number; ask: number; change24h: number }
-export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; leverage: number; pnl: number; pnlPct: number; stopLoss?: number; takeProfit?: number; positionIdx: number; openTime: number }
+export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; markPrice: number; leverage: number; pnl: number; pnlPct: number; margin: number; stopLoss?: number; takeProfit?: number; positionIdx: number; openTime: number }
 export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string }
-export interface BybitBalance { totalEquity: number; availableBalance: number; currency: string }
+export interface BybitBalance { totalEquity: number; availableBalance: number; usedMargin: number; currency: string }
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
 
 // ── Market ────────────────────────────────────────────────────────────────────
@@ -112,19 +112,26 @@ export async function getAllSymbols(): Promise<string[]> {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 export async function getPositions(): Promise<BybitPosition[]> {
-  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; positionIdx: number };
+  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; markPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; positionIdx: number; createdTime?: string };
   const r = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear", settleCoin: "USDT" });
   console.log("[Bybit] Raw positions (settleCoin=USDT):", JSON.stringify(r.list));
 
   const list = r.list.filter(p => parseFloat(p.size) > 0);
 
   return list.map(p => {
-    const entry     = parseFloat(p.avgPrice);
-    const pnl       = parseFloat(p.unrealisedPnl);
-    const cost      = parseFloat(p.size) * entry;
-    const sl        = parseFloat(p.stopLoss)   || undefined;
-    const tp        = parseFloat(p.takeProfit) || undefined;
-    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size: parseFloat(p.size), entryPrice: entry, leverage: parseFloat(p.leverage), pnl, pnlPct: cost > 0 ? (pnl / cost) * 100 : 0, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0, openTime: parseInt((p as any).openTime ?? "0") };
+    const entry    = parseFloat(p.avgPrice);
+    const mark     = parseFloat(p.markPrice) || entry;
+    const lev      = parseFloat(p.leverage);
+    const size     = parseFloat(p.size);
+    const pnl      = parseFloat(p.unrealisedPnl);
+    const sl       = parseFloat(p.stopLoss)   || undefined;
+    const tp       = parseFloat(p.takeProfit) || undefined;
+    const margin   = entry > 0 && lev > 0 ? (size * entry) / lev : 0;
+    // pnlPct as % price move (direction-aware)
+    const pnlPct   = p.side === "Buy"
+      ? (mark - entry) / entry * 100
+      : (entry - mark) / entry * 100;
+    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size, entryPrice: entry, markPrice: mark, leverage: lev, pnl, pnlPct, margin, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0, openTime: parseInt(p.createdTime ?? "0") };
   });
 }
 
@@ -142,14 +149,15 @@ export async function cancelOrder(symbol: string, orderId: string): Promise<void
 }
 
 export async function getBalance(): Promise<BybitBalance> {
-  const r = await get<{ list: Array<{ totalEquity: string; totalAvailableBalance: string }> }>(
+  const r = await get<{ list: Array<{ totalEquity: string; totalAvailableBalance: string; totalInitialMargin: string }> }>(
     "/v5/account/wallet-balance", { accountType: "UNIFIED" }
   );
   const d = r.list[0];
   if (!d) throw new Error("Bybit: no balance data");
-  const equity    = parseFloat(d.totalEquity)    || 0;
-  const available = parseFloat(d.totalAvailableBalance) || equity;
-  return { totalEquity: equity, availableBalance: available, currency: "USDT" };
+  const equity    = parseFloat(d.totalEquity)             || 0;
+  const available = parseFloat(d.totalAvailableBalance)   || equity;
+  const usedMargin = parseFloat(d.totalInitialMargin)     || Math.max(0, equity - available);
+  return { totalEquity: equity, availableBalance: available, usedMargin, currency: "USDT" };
 }
 
 // ── Trading ───────────────────────────────────────────────────────────────────

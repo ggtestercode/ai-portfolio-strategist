@@ -745,28 +745,37 @@ export function startPolling(): void {
       const out: string[] = [`📊 <b>Positions — Bybit Live (${bybitPos.length})</b>`, ``];
 
       for (const p of bybitPos) {
-        const sign   = p.pnl >= 0 ? "+" : "";
-        const pnlStr = p.pnl !== 0 ? ` · P/L ${sign}$${p.pnl.toFixed(2)} (${sign}${p.pnlPct.toFixed(2)}%)` : "";
-        const fmt    = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 4 });
-        const meta   = posMeta[p.symbol];
-
-        let stopsStr: string;
-        if (meta) {
-          stopsStr = [
-            meta.sl  ? `\n  SL:  $${fmt(meta.sl)}  (ATR×1.5)` : "",
-            meta.tp1 ? `\n  TP1: $${fmt(meta.tp1)} (ATR×1.0) → close 30%` : "",
-            meta.tp2 ? `\n  TP2: $${fmt(meta.tp2)} (ATR×2.0) → close 30% | runner: 40%` : "",
-          ].join("");
-        } else {
-          const slStr = p.stopLoss   ? `\n  SL $${fmt(p.stopLoss)}`  : "";
-          const tpStr = p.takeProfit ? ` · TP $${fmt(p.takeProfit)}` : "";
-          stopsStr = slStr + tpStr;
-        }
-
+        const fmt     = (n: number) => n.toLocaleString("en-US", { maximumFractionDigits: 4 });
+        // Direction from Bybit side field: Buy=LONG, Sell=SHORT (position/list endpoint)
+        const dirLabel = p.side === "Buy" ? "▲ long" : "▼ short";
+        const sign     = p.pnl >= 0 ? "+" : "";
+        const pnlPctSign = p.pnlPct >= 0 ? "+" : "";
+        const pnlStr   = `P/L: ${sign}$${p.pnl.toFixed(2)} (${pnlPctSign}${p.pnlPct.toFixed(2)}%)`;
+        const meta     = posMeta[p.symbol];
         const sourceTag = meta?.entrySource === "manual_nl" ? " <i>[manual]</i>"
                         : meta?.entrySource === "auto_scan"  ? " <i>[auto]</i>"
                         : "";
-        out.push(`• <b>${escapeHtml(p.symbol)}</b>${sourceTag} — ${p.size} · ${p.side} · ${p.leverage}x\n  Entry $${p.entryPrice != null ? fmt(p.entryPrice) : "?"}${pnlStr}${stopsStr}`);
+
+        // SL/TP: prefer live exchange values; show metadata targets as reference
+        const exchangeSL = p.stopLoss   ? `$${fmt(p.stopLoss)}`  : "—";
+        const exchangeTP = p.takeProfit ? `$${fmt(p.takeProfit)}` : "—";
+        const slLine  = `\n  SL (exchange): ${exchangeSL}`;
+        const tpLine  = `\n  TP (exchange): ${exchangeTP}`;
+        const metaTargets = meta
+          ? [
+              meta.sl  ? `\n  SL target: $${fmt(meta.sl)} (ATR×1.5)` : "",
+              meta.tp1 ? `\n  TP1 target: $${fmt(meta.tp1)} (ATR×1.0)` : "",
+              meta.tp2 ? `\n  TP2 target: $${fmt(meta.tp2)} (ATR×2.0)` : "",
+            ].join("")
+          : "";
+
+        out.push(
+          `• <b>${escapeHtml(p.symbol)}</b>${sourceTag} ${dirLabel} · ${p.leverage}x` +
+          `\n  Entry: $${fmt(p.entryPrice)} → Mark: $${fmt(p.markPrice)}` +
+          `\n  ${pnlStr}` +
+          `\n  Margin: $${p.margin.toFixed(2)}` +
+          slLine + tpLine + metaTargets
+        );
       }
 
       if (localPending.length) {
@@ -776,7 +785,7 @@ export function startPolling(): void {
         }
       }
 
-      out.push(``, `<i>Last synced: ${now}</i>`);
+      out.push(``, `<i>Live Bybit API · ${now}</i>`);
       await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
@@ -917,18 +926,27 @@ export function startPolling(): void {
   b.onText(/^\/balance(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const bal = await bybitGetBalance();
-      const positions = await bybitGetPositions().catch(() => []);
-      const inPositions = positions.reduce((s, p) => s + p.size * p.entryPrice, 0);
+      const [bal, positions] = await Promise.all([
+        bybitGetBalance(),
+        bybitGetPositions().catch(() => []),
+      ]);
+      // Initial margin per position = size * entryPrice / leverage (from exchange)
+      const marginUsed = positions.reduce((s, p) => s + p.margin, 0);
+      // Notional exposure = size * markPrice
+      const notionalExposure = positions.reduce((s, p) => s + p.size * p.markPrice, 0);
+      const freeMargin = bal.availableBalance;
 
       await b.sendMessage(chatId, [
-        `💰 <b>Bybit Live</b>`,
+        `💰 <b>Bybit Live Balance</b>`,
         ``,
-        `Total equity: <b>$${bal.totalEquity.toFixed(2)}</b>`,
-        `Available: <b>$${bal.availableBalance.toFixed(2)}</b>`,
-        `In positions: <b>$${inPositions.toFixed(2)}</b> (${positions.length} open)`,
+        `Total equity:    <b>$${bal.totalEquity.toFixed(2)}</b>`,
+        `Available:       <b>$${bal.availableBalance.toFixed(2)}</b>`,
+        `Margin used:     <b>$${(bal.usedMargin || marginUsed).toFixed(2)}</b> (${positions.length} positions)`,
+        `Free margin:     <b>$${freeMargin.toFixed(2)}</b>`,
         ``,
-        `<i>${utcNow()}</i>`,
+        `Notional exposure: <b>$${notionalExposure.toFixed(2)}</b>`,
+        ``,
+        `<i>Live Bybit API · ${utcNow()}</i>`,
       ].join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
@@ -1112,20 +1130,31 @@ export function startPolling(): void {
   b.onText(/^\/status(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [config, cron, dailyPnl, bybitBal, bybitPos, localPending] =
+      // Midnight SGT (UTC+8) as epoch ms for today's trades
+      const sgtNow = new Date(Date.now() + 8 * 3_600_000);
+      sgtNow.setUTCHours(0, 0, 0, 0);
+      const todayStartMs = sgtNow.getTime() - 8 * 3_600_000;
+
+      const [config, cron, bybitBal, bybitPos, localPending, todayTrades, stateRow] =
         await Promise.all([
           approvalGate.getConfig(),
           Promise.resolve(getCronStatus()),
-          getDailyPnl().catch(() => 0),
           bybitGetBalance().catch(() => null),
           bybitGetPositions().catch(() => []),
           Promise.resolve(getPendingOrders()),
+          // Daily P/L from live Bybit API (not DB cache)
+          bybitGetClosedPnl(50, todayStartMs).catch(() => [] as Awaited<ReturnType<typeof bybitGetClosedPnl>>),
+          db.select({ currentRegime: botStateTable.currentRegime }).from(botStateTable).limit(1).catch(() => [] as Array<{ currentRegime: string | null }>),
         ]);
 
-      const pnlSign    = dailyPnl >= 0 ? "+" : "";
-      const dailyLimit = process.env["DAILY_LOSS_LIMIT_PCT"] ?? "30";
-      const maxTrade   = process.env["MAX_AUTO_TRADE_USD"] ?? "5";
-      const lastScan   = cron.lastScan
+      // P/L formula: closedPnl from Bybit is accurate (exchange-calculated)
+      const dailyPnl  = todayTrades.reduce((s, t) => s + t.closedPnl, 0);
+      const pnlSign   = dailyPnl >= 0 ? "+" : "";
+      const regime    = stateRow[0]?.currentRegime ?? "UNKNOWN";
+
+      const dailyLimit  = process.env["DAILY_LOSS_LIMIT_PCT"] ?? "30";
+      const maxTrade    = process.env["MAX_AUTO_TRADE_USD"] ?? "5";
+      const lastScan    = cron.lastScan
         ? cron.lastScan.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + " SGT"
         : "Never";
       const nextScanNote = cron.enabled && cron.interval !== "disabled"
@@ -1137,11 +1166,12 @@ export function startPolling(): void {
         ``,
         `Mode: <b>${config.mode}</b>`,
         `Trading: <b>${cron.paused ? "🛑 Paused" : "▶️ Active"}</b>`,
+        `Regime: <b>${regime}</b>`,
         ``,
         `💼 <b>Bybit Live</b>`,
         bybitBal ? `Balance: <b>$${bybitBal.totalEquity.toFixed(2)}</b>` : `Balance: ❌ unavailable`,
         `Open positions: <b>${bybitPos.length}</b>`,
-        `Daily P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b>`,
+        `Today's P/L: <b>${pnlSign}$${dailyPnl.toFixed(2)}</b> (${todayTrades.length} trades, live API)`,
         localPending.length ? `Pending approvals: <b>${localPending.length}</b>` : "",
         ``,
         `⚙️ <b>Settings</b>`,
@@ -1210,20 +1240,25 @@ export function startPolling(): void {
 
         interface TradeSummary {
           symbol: string; side: "Buy"|"Sell"; entryPrice: number;
-          closes: ClosedRec[]; totalPnl: number;
+          closes: ClosedRec[]; totalPnl: number; totalSize: number;
           bestExit: number; finalExit: number;
           firstCloseAt: number; lastCloseAt: number;
         }
 
         const trades: TradeSummary[] = [...groupMap.values()].map(closes => {
+          // In closed-pnl: side is the CLOSING order direction
+          // side="Sell" = sold to close → position was LONG
+          // side="Buy"  = bought to cover → position was SHORT
           const side     = closes[0]!.side;
           const totalPnl = closes.reduce((s, c) => s + c.closedPnl, 0);
-          const bestExit = side === "Buy"
-            ? Math.max(...closes.map(c => c.avgExitPrice))
-            : Math.min(...closes.map(c => c.avgExitPrice));
+          const totalSize = closes.reduce((s, c) => s + c.closedSize, 0);
+          // Best exit: for LONG (side=Sell) want highest exit; for SHORT (side=Buy) want lowest exit
+          const bestExit = side === "Sell"
+            ? Math.max(...closes.map(c => c.avgExitPrice))   // LONG: best = highest sell price
+            : Math.min(...closes.map(c => c.avgExitPrice));  // SHORT: best = lowest cover price
           return {
             symbol: closes[0]!.symbol, side, entryPrice: closes[0]!.avgEntryPrice,
-            closes, totalPnl, bestExit,
+            closes, totalPnl, totalSize, bestExit,
             finalExit:    closes[closes.length - 1]!.avgExitPrice,
             firstCloseAt: closes[0]!.closedAt,
             lastCloseAt:  closes[closes.length - 1]!.closedAt,
@@ -1238,18 +1273,35 @@ export function startPolling(): void {
           return `~${(ms / 86_400_000).toFixed(1)}d`;
         };
 
+        // P/L % formula (price-move based, no leverage): direction-aware
+        const calcPnlPct = (side: "Buy" | "Sell", entry: number, exit: number) => {
+          if (entry <= 0) return 0;
+          // side="Sell" = position was LONG: profit when exit > entry
+          // side="Buy"  = position was SHORT: profit when exit < entry (entry-exit)/entry
+          return side === "Sell"
+            ? (exit - entry) / entry * 100
+            : (entry - exit) / entry * 100;
+        };
+
         out.push(`<b>Trades (${trades.length} positions, ${closedPnl.length} closes):</b>`);
         trades.forEach((t, i) => {
-          const dir      = t.side === "Buy" ? "▲" : "▼";
-          const label    = t.side === "Buy" ? "LONG" : "SHORT";
+          // side="Sell" → was LONG; side="Buy" → was SHORT
+          const dir      = t.side === "Sell" ? "▲" : "▼";
+          const label    = t.side === "Sell" ? "LONG"  : "SHORT";
           const sign     = t.totalPnl >= 0 ? "+" : "";
+          // Use weighted average exit for pnlPct (best approximation for multi-close positions)
+          const weightedAvgExit = t.totalSize > 0
+            ? t.closes.reduce((s, c) => s + c.avgExitPrice * c.closedSize, 0) / t.totalSize
+            : t.finalExit;
+          const pnlPct   = calcPnlPct(t.side, t.entryPrice, weightedAvgExit);
+          const pnlPctSign = pnlPct >= 0 ? "+" : "";
           const nPartial = t.closes.length - 1;
           const closeLbl = t.closes.length === 1
             ? "Full close"
             : `${t.closes.length} closes (${nPartial} partial + 1 full)`;
           const durMs    = t.lastCloseAt - t.firstCloseAt;
 
-          out.push(`${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${label} — Total: <b>${sign}$${t.totalPnl.toFixed(2)}</b>`);
+          out.push(`${i + 1}. <b>${escapeHtml(t.symbol)}</b> ${dir} ${label} — <b>${sign}$${t.totalPnl.toFixed(2)} (${pnlPctSign}${pnlPct.toFixed(2)}%)</b>`);
           out.push(`   Entry: $${fmtPrice(t.entryPrice)} | ${closeLbl}`);
           if (t.closes.length > 1) {
             out.push(`   Best exit: $${fmtPrice(t.bestExit)} | Final exit: $${fmtPrice(t.finalExit)}`);
