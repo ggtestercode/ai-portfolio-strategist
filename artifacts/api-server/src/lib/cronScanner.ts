@@ -678,6 +678,7 @@ async function logScalingDecision(
   reasoning: string,
   pnlPct?:   number,
 ): Promise<void> {
+  if (action === "HOLD") return; // HOLD decisions are not trade closes — no journal entry
   _memoryBuffer.push({
     symbol,
     reflection: reasoning,
