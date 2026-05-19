@@ -1320,14 +1320,28 @@ export function startPolling(): void {
       ]);
 
       const paperBalance = balRow[0]?.paperBalance ?? 40;
-      const returnPct    = ((paperBalance - 40) / 40 * 100);
 
       const open   = trades.filter(t => t.status === "open");
       const closed = trades.filter(t => t.status !== "open");
-      const wins   = closed.filter(t => (t.wouldHavePnlPct ?? 0) > 0);
-      const losses = closed.filter(t => (t.wouldHavePnlPct ?? 0) <= 0);
+
+      // Return % = realized P/L only (open margin doesn't count as a loss)
+      const realizedPnl = closed.reduce((s, t) => s + (t.wouldHavePnl ?? 0), 0);
+      const returnPct   = (realizedPnl / 40) * 100;
+
+      const wins    = closed.filter(t => (t.wouldHavePnlPct ?? 0) > 0);
+      const losses  = closed.filter(t => (t.wouldHavePnlPct ?? 0) <= 0);
       const winRate = closed.length ? Math.round(wins.length / closed.length * 100) : 0;
-      const totalPnl = closed.reduce((s, t) => s + (t.wouldHavePnl ?? 0), 0);
+      const totalPnl = realizedPnl;
+
+      // Fetch live prices for open positions
+      const openSymbols = [...new Set(open.map(t => t.symbol))];
+      const livePrices: Record<string, number> = {};
+      await Promise.allSettled(
+        openSymbols.map(async sym => {
+          const ticker = await bybitGetTicker(sym).catch(() => null);
+          if (ticker) livePrices[sym] = ticker.lastPrice;
+        })
+      );
 
       const fmt = (t: typeof trades[number]) => {
         const pct  = t.wouldHavePnlPct;
@@ -1335,7 +1349,16 @@ export function startPolling(): void {
         const dir  = t.direction.toUpperCase();
         const stat = t.status === "stopped_out" ? "SL" : t.status === "tp1_hit" ? "TP1" : t.status === "tp2_hit" ? "TP2" : "→";
         if (t.status === "open") {
-          return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(4)} [open] ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : "pending"}`;
+          const live = livePrices[t.symbol];
+          if (live && live > 0) {
+            const upct = t.direction === "long"
+              ? (live - t.entryPrice) / t.entryPrice * 100
+              : (t.entryPrice - live) / t.entryPrice * 100;
+            const uSign = upct >= 0 ? "+" : "";
+            const uEmoji = upct >= 0 ? "📈" : "📉";
+            return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(2)} → $${live.toFixed(2)} ${uEmoji} ${uSign}${upct.toFixed(1)}%`;
+          }
+          return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(2)} [open]`;
         }
         return `  ${t.symbol} ${dir} @$${t.entryPrice.toFixed(4)} ${stat} $${(t.exitPrice ?? 0).toFixed(4)} ${sign} ${pct != null ? `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%` : ""}`;
       };
