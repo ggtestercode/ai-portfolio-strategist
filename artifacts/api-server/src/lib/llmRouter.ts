@@ -5,6 +5,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { jsonrepair } from "jsonrepair";
 import { db } from "@workspace/db";
 import { llmUsageLogs } from "@workspace/db/schema";
 
@@ -148,16 +149,19 @@ class LlmRouter {
     let data = req.fallback;
     let parseSuccess = false;
     try {
-      const { jsonrepair } = await import("jsonrepair");
-      // Strip markdown fences, then extract the outermost JSON object/array
-      const stripped = base.text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/m, "").trim();
-      const start    = stripped.indexOf("{") !== -1 ? stripped.indexOf("{") : stripped.indexOf("[");
-      const end      = stripped.lastIndexOf("}") !== -1 ? stripped.lastIndexOf("}") : stripped.lastIndexOf("]");
-      const jsonStr  = start !== -1 && end > start ? stripped.slice(start, end + 1) : stripped;
+      // Strip markdown fences (handles ```json ... ``` from any model)
+      const stripped = base.text
+        .replace(/^```(?:json|JSON)?\s*/m, "")
+        .replace(/\s*```\s*$/m, "")
+        .trim();
+      // Extract outermost JSON object or array
+      const start   = stripped.indexOf("{") !== -1 ? stripped.indexOf("{") : stripped.indexOf("[");
+      const end     = stripped.lastIndexOf("}") !== -1 ? stripped.lastIndexOf("}") : stripped.lastIndexOf("]");
+      const jsonStr = start !== -1 && end > start ? stripped.slice(start, end + 1) : stripped;
       try {
         data = JSON.parse(jsonStr) as T;
       } catch {
-        // Attempt repair (handles unescaped quotes, literal newlines in strings, etc.)
+        // Repair unescaped quotes, literal newlines in strings, truncated JSON, etc.
         const repaired = jsonrepair(jsonStr);
         data = JSON.parse(repaired) as T;
         console.log(`[LlmRouter] JSON repaired for ${req.taskType}`);
