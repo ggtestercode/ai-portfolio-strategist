@@ -650,19 +650,36 @@ async function checkRegimeFlattener(
   }
 }
 
-// ── Log scaling decision ──────────────────────────────────────────────────────
+// ── Trade memory batch buffer (flushed once per day) ─────────────────────────
+type MemoryEntry = { symbol: string; reflection: string; whatWorked: string; whatDidnt: string | null };
+const _memoryBuffer: MemoryEntry[] = [];
+let   _memoryLastFlushed = Date.now();
+const MEMORY_FLUSH_INTERVAL_MS = 24 * 3600_000;
+
+async function flushMemoryBuffer(): Promise<void> {
+  if (!_memoryBuffer.length) return;
+  const batch = _memoryBuffer.splice(0);
+  await db.insert(tradeMemoryTable).values(batch)
+    .catch(e => console.error("[cronScanner] memory flush failed:", e));
+  console.log(`[cronScanner] Flushed ${batch.length} memory entries to DB`);
+  _memoryLastFlushed = Date.now();
+}
+
 async function logScalingDecision(
   symbol:    string,
   action:    ScalingAction,
   reasoning: string,
   pnlPct?:   number,
 ): Promise<void> {
-  await db.insert(tradeMemoryTable).values({
+  _memoryBuffer.push({
     symbol,
     reflection: reasoning,
     whatWorked: String(action),
     whatDidnt:  pnlPct != null ? `P/L at decision: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%` : null,
-  }).catch(e => console.error("[cronScanner] logScalingDecision failed:", e));
+  });
+  if (Date.now() - _memoryLastFlushed >= MEMORY_FLUSH_INTERVAL_MS) {
+    await flushMemoryBuffer();
+  }
 }
 
 async function wasAlreadyScaled(symbol: string): Promise<boolean> {
@@ -1240,6 +1257,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     // Run Version B paper scan in parallel — never blocks live trading
     runPaperScan().catch(err => console.error("[paperScanner] Error:", err));
+    updatePaperTradesPnl().catch(err => console.error("[paperScanner] P&L update:", err));
   } catch (err) {
     console.error("[cronScanner] Scan failed:", err);
   } finally {
@@ -1670,7 +1688,6 @@ async function runPositionReview(
 export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): void {
   setInterval(() => {
     void checkPositionMonitor().catch(e => console.error("[posMonitor]", e));
-    void updatePaperTradesPnl().catch(e => console.error("[posMonitor] paperPnl:", e));
   }, MONITOR_INTERVAL_MS);
   if (alertFn) startWeeklyAbReportCron(alertFn);
   console.log("[posMonitor] Started — checks every 5 min");
