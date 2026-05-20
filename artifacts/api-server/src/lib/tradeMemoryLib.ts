@@ -273,7 +273,24 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     nextTimeWouldDo:      d.nextTimeWouldDo      || null,
   });
 
+  // Fix 5: Log reflection quality fields
+  const isComplete = !!(d.lessonsLearned && d.whatWorked && d.whatDidnt && d.nextTimeWouldDo);
+  console.log(
+    `[reflection] ${input.symbol} complete=${isComplete}` +
+    ` entryQuality=${!!d.entryQuality} lessonsLearned=${!!d.lessonsLearned}` +
+    ` whatWorked=${!!d.whatWorked} nextTime=${!!d.nextTimeWouldDo}`
+  );
   console.log(`[tradeMemory] ${input.symbol} reflection stored — ${outcome} ${sign}${input.pnlPct.toFixed(2)}% mistake=${d.mistakeType ?? "none"}`);
+
+  // Fix 2: Retry once after 60s if critical fields are missing
+  if (!isComplete) {
+    console.error(`[reflection] INCOMPLETE — ${input.symbol} missing critical fields. Scheduling retry in 60 seconds.`);
+    setTimeout(() => {
+      generateReflection(input).catch(e =>
+        console.error(`[reflection] retry failed for ${input.symbol}:`, (e as Error).message)
+      );
+    }, 60_000);
+  }
 }
 
 // ─── Partial close logger ─────────────────────────────────────────────────────
@@ -405,35 +422,34 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
   for (const trade of closedTrades) {
     if (processed >= max) break;
 
-    // Deduplicate: prefer sourceTradeId match (exact), fall back to pnlPct for old records
+    // Deduplicate: skip only COMPLETE reflections (have lessonsLearned)
     const existingById = await db.select({ id: tradeMemoryTable.id })
       .from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.sourceTradeId, trade.id),
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-        isNotNull(tradeMemoryTable.entryTiming),
+        isNotNull(tradeMemoryTable.lessonsLearned),   // complete = has lessons
       ))
       .limit(1)
       .catch(() => [] as Array<{ id: string }>);
 
     if (existingById.length > 0) continue;
 
-    // Fall back to pnlPct match for reflections created before sourceTradeId was added
+    // Fall back to pnlPct match for old records without sourceTradeId that are complete
     const pnlPctStr = parseFloat(trade.pnlPct ?? "0").toFixed(4);
     const existingByPnl = await db.select({ id: tradeMemoryTable.id, sourceTradeId: tradeMemoryTable.sourceTradeId })
       .from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.symbol, trade.symbol),
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-        isNotNull(tradeMemoryTable.entryTiming),
-        isNull(tradeMemoryTable.sourceTradeId),   // only match old records without sourceTradeId
+        isNotNull(tradeMemoryTable.lessonsLearned),   // complete = has lessons
+        isNull(tradeMemoryTable.sourceTradeId),
         eq(tradeMemoryTable.pnlPct, pnlPctStr),
       ))
       .limit(1)
       .catch(() => [] as Array<{ id: string; sourceTradeId: string | null }>);
 
     if (existingByPnl.length > 0) {
-      // Backfill sourceTradeId on the legacy reflection so future runs skip cleanly
       await db.update(tradeMemoryTable)
         .set({ sourceTradeId: trade.id })
         .where(eq(tradeMemoryTable.id, existingByPnl[0]!.id))
@@ -441,7 +457,16 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
       continue;
     }
 
-    // Delete any old-format reflection with same pnlPct (missing entryTiming)
+    // Delete any incomplete reflection for this trade (has sourceTradeId but missing lessons)
+    await db.delete(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.sourceTradeId, trade.id),
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNull(tradeMemoryTable.lessonsLearned),
+      ))
+      .catch(() => {});
+
+    // Also delete old-format records (missing entryTiming entirely)
     await db.delete(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.symbol, trade.symbol),

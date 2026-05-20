@@ -229,8 +229,8 @@ export async function initBrokers(): Promise<void> {
   // Always log current position metadata for debugging
   logPositionMetadata().catch(() => {});
 
-  // Backfill any closed trades missing structured reflections (non-blocking, rate-limited)
-  backfillStructuredReflections(20)
+  // Backfill any closed trades missing complete reflections (non-blocking, rate-limited)
+  backfillStructuredReflections(60)
     .catch(e => console.error("[startup] backfill failed:", e));
 
   console.log("[startup] Broker executors registered: etoro, bybit, okx");

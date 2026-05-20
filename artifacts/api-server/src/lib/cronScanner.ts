@@ -1754,7 +1754,7 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
     void checkPositionMonitor().catch(e => console.error("[posMonitor]", e));
   }, MONITOR_INTERVAL_MS);
   if (alertFn) startWeeklyAbReportCron(alertFn);
-  startPaperMonitorCron();
+  startPaperMonitorCron(alertFn);
   console.log("[posMonitor] Started — checks every 5 min");
 }
 

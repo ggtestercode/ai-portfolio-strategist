@@ -18,8 +18,9 @@ import {
 } from "../brokers/bybit";
 import { getRecentMemory, getPerformanceSummary } from "./tradeMemoryLib";
 import { llm }                   from "./llmRouter";
-import { db, profileTable, paperTradesTable, botStateTable } from "@workspace/db";
-import { eq, gt, and } from "drizzle-orm";
+import { db, profileTable, paperTradesTable, botStateTable, tradeMemoryTable } from "@workspace/db";
+import { eq, gt, and, isNull, isNotNull } from "drizzle-orm";
+import { backfillStructuredReflections } from "./tradeMemoryLib";
 
 const PAPER_STARTING_BALANCE = 40.0;
 
@@ -362,6 +363,23 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
       bWinRate < 50 && bAvgLoss < -2 ? "✅ A better — filters adding value" :
                                         "⚖️ Inconclusive — need more data";
 
+    // Learning loop health
+    const allCloses = await db.select({
+      id:             tradeMemoryTable.id,
+      lessonsLearned: tradeMemoryTable.lessonsLearned,
+      createdAt:      tradeMemoryTable.createdAt,
+    }).from(tradeMemoryTable)
+      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+      .catch(() => [] as Array<{ id: string; lessonsLearned: string | null; createdAt: Date }>);
+
+    const totalRef    = allCloses.length;
+    const completeRef = allCloses.filter(r => r.lessonsLearned).length;
+    const incompleteRef = totalRef - completeRef;
+    const completePct = totalRef > 0 ? Math.round(completeRef / totalRef * 100) : 0;
+    const lastRef     = allCloses.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0]?.createdAt;
+    const lastRefStr  = lastRef ? lastRef.toISOString().replace("T", " ").slice(0, 16) + " UTC" : "never";
+    const healthFlag  = incompleteRef > totalRef * 0.10 ? "⚠️ Action needed" : "✅ Healthy";
+
     const lines = [
       `📊 <b>Weekly A/B Test Report</b>`,
       ``,
@@ -377,6 +395,12 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
       ``,
       `<b>Recommendation:</b> ${reco}`,
       ``,
+      `📚 <b>Learning Loop Health:</b>`,
+      `Total reflections: ${totalRef} | Complete: ${completeRef} (${completePct}%)`,
+      `Incomplete (missing fields): ${incompleteRef}`,
+      `Last reflection: ${lastRefStr}`,
+      incompleteRef > 0 ? `${healthFlag} — ${incompleteRef} incomplete reflections` : `${healthFlag}`,
+      ``,
       `<i>Run /paperhistory for full signal log</i>`,
     ].filter(line => line !== undefined).join("\n");
 
@@ -389,12 +413,43 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
 // ── Independent 5-min paper trade monitor ────────────────────────────────────
 // Runs regardless of whether the main scan succeeds
 
-export function startPaperMonitorCron(): void {
+export function startPaperMonitorCron(alertFn?: (msg: string) => Promise<void>): void {
   // every 5 minutes
   cron.schedule("*/5 * * * *", () => {
     void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));
   });
+
+  // Daily midnight SGT (= 16:00 UTC) — learning loop health check
+  cron.schedule("0 16 * * *", async () => {
+    try {
+      const allCloses = await db.select({
+        id:             tradeMemoryTable.id,
+        lessonsLearned: tradeMemoryTable.lessonsLearned,
+      }).from(tradeMemoryTable)
+        .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+        .catch(() => [] as Array<{ id: string; lessonsLearned: string | null }>);
+
+      const total      = allCloses.length;
+      const incomplete = allCloses.filter(r => !r.lessonsLearned).length;
+
+      if (incomplete > 0) {
+        console.warn(`[learningHealth] ${incomplete}/${total} reflections incomplete — triggering re-backfill`);
+        await alertFn?.(
+          `⚠️ <b>Learning loop issue detected</b>\n${incomplete} incomplete reflections found\nTriggering re-backfill…`
+        ).catch(() => {});
+        backfillStructuredReflections(incomplete + 5).catch(e =>
+          console.error("[learningHealth] backfill failed:", e)
+        );
+      } else {
+        console.log(`[learningHealth] All ${total} reflections complete ✅`);
+      }
+    } catch (e) {
+      console.error("[learningHealth] daily check failed:", e);
+    }
+  });
+
   console.log("[paperMonitor] Independent 5-min P/L monitor cron started");
+  console.log("[learningHealth] Daily midnight SGT learning health check cron started");
 }
 
 // ── Sunday 9am SGT = 1am UTC weekly cron ─────────────────────────────────────
