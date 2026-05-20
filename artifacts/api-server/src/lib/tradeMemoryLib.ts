@@ -457,7 +457,8 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
       continue;
     }
 
-    // Delete any incomplete reflection for this trade (has sourceTradeId but missing lessons)
+    // Delete any incomplete reflection for this trade — three possible shapes:
+    // (a) linked by sourceTradeId
     await db.delete(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.sourceTradeId, trade.id),
@@ -465,8 +466,17 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
         isNull(tradeMemoryTable.lessonsLearned),
       ))
       .catch(() => {});
-
-    // Also delete old-format records (missing entryTiming entirely)
+    // (b) old records without sourceTradeId, matched by symbol+pnlPct, missing lessons
+    await db.delete(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.symbol, trade.symbol),
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNull(tradeMemoryTable.sourceTradeId),
+        isNull(tradeMemoryTable.lessonsLearned),
+        eq(tradeMemoryTable.pnlPct, pnlPctStr),
+      ))
+      .catch(() => {});
+    // (c) old-format records missing entryTiming entirely
     await db.delete(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.symbol, trade.symbol),
