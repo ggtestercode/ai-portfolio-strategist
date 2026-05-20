@@ -843,6 +843,7 @@ async function handlePositionDecision(
   livePositions: BybitPosition[],
   bybitBalance:  number,
   outcomes:      SignalOutcome[],
+  opps:          ScanOpportunity[],
 ): Promise<void> {
   const sym = decision.symbol;
   const pos = livePositions.find(p =>
@@ -861,6 +862,20 @@ async function handlePositionDecision(
   }
 
   if (decision.action === "CUT") {
+    // Block low-conviction CUT: require pnlPct <= -8% OR a direct opposing signal with score >= 80
+    const opposingDir = pos.side === "Buy" ? "short" : "long";
+    const bSym = bybitSym(sym);
+    const opposingSignal = opps.find(o =>
+      (bybitSym(o.symbol) === bSym || o.symbol === sym) &&
+      o.direction === opposingDir &&
+      (o.score ?? 0) >= 80
+    );
+    if ((pos.pnlPct ?? 0) > -8 && !opposingSignal) {
+      console.log(`[cronScanner] ${sym} CUT blocked — pnlPct=${(pos.pnlPct ?? 0).toFixed(2)}% > -8% and no opposing signal score>=80 → HOLD`);
+      await logScalingDecision(sym, "HOLD", `CUT blocked: pnlPct=${(pos.pnlPct ?? 0).toFixed(2)}% and no high-score opposing signal`, pos.pnlPct);
+      outcomes.push({ symbol: sym, action: "HOLD", reason: `CUT blocked (${(pos.pnlPct ?? 0).toFixed(2)}% loss, no >=80 opposing signal)`, pnlPct: pos.pnlPct });
+      return;
+    }
     try {
       await bybitClose(sym);
       const exitPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
@@ -1139,7 +1154,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     // Position review for existing positions
     const posReview = await makePositionReview(cryptoOpps, livePositions, bybitBalance);
     for (const posDecision of posReview.positions) {
-      await handlePositionDecision(posDecision, livePositions, bybitBalance, outcomes).catch(e =>
+      await handlePositionDecision(posDecision, livePositions, bybitBalance, outcomes, cryptoOpps).catch(e =>
         console.error(`[cronScanner] posDecision ${posDecision.symbol}:`, e)
       );
     }
