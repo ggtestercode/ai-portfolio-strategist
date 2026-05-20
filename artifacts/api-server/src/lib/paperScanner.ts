@@ -200,7 +200,19 @@ export async function runPaperScan(): Promise<void> {
 
     // ── Log non-neutral signals to paper_trades (never execute) ─────────────
     let logged = 0;
-    let runningBalance = paperBalance;
+
+    // Deduct margin already locked in open paper trades before accepting new ones
+    const openPaperTrades = await db.select({ id: paperTradesTable.id })
+      .from(paperTradesTable)
+      .where(eq(paperTradesTable.status, "open"))
+      .catch(() => [] as Array<{ id: string }>);
+    const marginInUse   = openPaperTrades.length * Math.max(5, paperBalance * 0.05);
+    const availableBalance = paperBalance - marginInUse;
+    if (availableBalance < 5) {
+      console.log(`[paperTrade] Insufficient paper balance ($${availableBalance.toFixed(2)} available, ${openPaperTrades.length} open trades using $${marginInUse.toFixed(2)}) — skip`);
+      return;
+    }
+    let runningBalance = availableBalance;
 
     for (const sig of res.data.opportunities as ScanOpportunity[]) {
       if (!sig.direction || sig.direction === "neutral") continue;

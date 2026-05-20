@@ -274,8 +274,24 @@ async function setSlTpForExistingPositions(): Promise<void> {
         Math.abs(pm.tp1 / refPrice - 1) < 0.50;               // tp1 within 50% of current price
 
       if (metaQtyValid && metaTp1Valid) {
-        console.log(`[startup] ${pos.symbol} — metadata valid, preserving Claude SL/TP`);
-        continue;
+        // Validate SL direction plausibility against mark price (not entry)
+        // For trailing stops, SL > entryPrice is expected — check SL < markPrice instead
+        if (pm.sl && pos.side !== "None") {
+          const direction = pos.side === "Buy" ? "long" : "short";
+          const slAboveMark = direction === "long"  && pm.sl >= (pos.markPrice ?? refPrice);
+          const slBelowMark = direction === "short" && pm.sl <= (pos.markPrice ?? refPrice);
+          if (slAboveMark || slBelowMark) {
+            console.error(`[startup] ${pos.symbol} SL=$${pm.sl.toFixed(4)} is on WRONG SIDE of mark $${refPrice.toFixed(4)} for ${direction} — ATR reset required`);
+            // Fall through to ATR reset
+          } else {
+            const trailingNote = pm.trailingActive && pm.sl > pos.entryPrice ? " (trailing, locked in profit)" : "";
+            console.log(`[startup] ${pos.symbol} — metadata valid, preserving Claude SL/TP${trailingNote}`);
+            continue;
+          }
+        } else {
+          console.log(`[startup] ${pos.symbol} — metadata valid, preserving Claude SL/TP`);
+          continue;
+        }
       }
       console.log(`[startup] ${pos.symbol} — stale metadata detected (qty=${pm.originalQty} vs pos.size=${pos.size}, tp1=${pm.tp1}, refPrice=${refPrice.toFixed(4)}) → refreshing with ATR`);
     }

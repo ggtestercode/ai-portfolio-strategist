@@ -1485,7 +1485,14 @@ async function checkPositionMonitor(): Promise<void> {
       // Only move SL in the protective direction (ratchet up for longs, down for shorts)
       const betterSL    = isLong ? newSL > currentSL : (currentSL === 0 || newSL < currentSL);
 
-      if (betterSL) {
+      // Plausibility: SL must stay on correct side of live price
+      // For long: SL < livePrice; for short: SL > livePrice
+      const slPlausible = isLong ? newSL < livePrice : newSL > livePrice;
+      if (!slPlausible) {
+        console.warn(`[posMonitor] ${pos.symbol} trailing SL $${newSL.toFixed(4)} would be on wrong side of live $${livePrice.toFixed(4)} — skipping`);
+      }
+
+      if (betterSL && slPlausible) {
         if (!meta?.trailingActive) {
           // First activation — notify Telegram
           await bybitSetStopLoss(pos.symbol, newSL, pos.positionIdx)

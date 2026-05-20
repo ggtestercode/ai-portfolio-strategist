@@ -112,7 +112,7 @@ export async function getAllSymbols(): Promise<string[]> {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 export async function getPositions(): Promise<BybitPosition[]> {
-  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; markPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; positionIdx: number; createdTime?: string };
+  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; markPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; positionIdx: number; openTime?: string; createdTime?: string };
   const r = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear", settleCoin: "USDT" });
   console.log("[Bybit] Raw positions (settleCoin=USDT):", JSON.stringify(r.list));
 
@@ -131,7 +131,9 @@ export async function getPositions(): Promise<BybitPosition[]> {
     const pnlPct   = p.side === "Buy"
       ? (mark - entry) / entry * 100
       : (entry - mark) / entry * 100;
-    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size, entryPrice: entry, markPrice: mark, leverage: lev, pnl, pnlPct, margin, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0, openTime: parseInt(p.createdTime ?? "0") };
+    // openTime = actual position open time; createdTime is instrument/account creation (can be 2022)
+    const openTime = parseInt(p.openTime ?? p.createdTime ?? "0");
+    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size, entryPrice: entry, markPrice: mark, leverage: lev, pnl, pnlPct, margin, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0, openTime };
   });
 }
 
