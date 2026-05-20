@@ -10,6 +10,7 @@ import { getWatchlist }          from "./watchlist";
 import { fetchAssetData }        from "../data/marketData";
 import {
   getKlines,
+  getTicker,
   getFundingRate,
   getOpenInterest,
   getPositions as bybitGetPositions,
@@ -270,15 +271,15 @@ export async function updatePaperTradesPnl(): Promise<void> {
       .from(paperTradesTable)
       .where(and(eq(paperTradesTable.status, "open"), gt(paperTradesTable.signalTime, cutoff)));
 
+    console.log(`[paperMonitor] Checking ${open.length} open paper trades`);
     if (!open.length) return;
 
-    // Fetch each unique symbol's price once (deduplicated)
+    // Fetch live last price for each unique symbol
     const uniqueSyms = [...new Set(open.map(t => `${t.symbol}USDT`.replace(/USDTUSDT$/, "USDT")))];
     const priceMap = new Map<string, number>();
     await Promise.allSettled(uniqueSyms.map(async sym => {
-      const klines  = await getKlines(sym, "60", 1).catch(() => [] as BybitKline[]);
-      const current = klines.at(-1)?.close ?? 0;
-      if (current) priceMap.set(sym, current);
+      const price = await getTicker(sym).then(t => t.lastPrice).catch(() => 0);
+      if (price) priceMap.set(sym, price);
     }));
 
     // Process all trades, accumulate balance returns for one final DB write
@@ -294,6 +295,8 @@ export async function updatePaperTradesPnl(): Promise<void> {
         const entry   = trade.entryPrice;
         const isLong  = trade.direction === "long";
         const pnlPct  = isLong ? (current - entry) / entry * 100 : (entry - current) / entry * 100;
+
+        console.log(`[paperMonitor] ${trade.symbol} ${trade.direction} entry=${entry} price=${current} tp1=${trade.tp1 ?? "—"} sl=${trade.stopLoss ?? "—"} pnl%=${pnlPct.toFixed(2)}`);
 
         let newStatus = "open";
         let exitPrice: number | null = null;
@@ -381,6 +384,17 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
   } catch (err) {
     console.error("[paperScanner] Weekly report failed:", err);
   }
+}
+
+// ── Independent 5-min paper trade monitor ────────────────────────────────────
+// Runs regardless of whether the main scan succeeds
+
+export function startPaperMonitorCron(): void {
+  // every 5 minutes
+  cron.schedule("*/5 * * * *", () => {
+    void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));
+  });
+  console.log("[paperMonitor] Independent 5-min P/L monitor cron started");
 }
 
 // ── Sunday 9am SGT = 1am UTC weekly cron ─────────────────────────────────────

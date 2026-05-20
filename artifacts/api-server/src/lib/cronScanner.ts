@@ -1,6 +1,6 @@
 import cron, { type ScheduledTask }   from "node-cron";
 import { runScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
-import { runPaperScan, updatePaperTradesPnl, startWeeklyAbReportCron } from "./paperScanner";
+import { runPaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
@@ -1754,6 +1754,7 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
     void checkPositionMonitor().catch(e => console.error("[posMonitor]", e));
   }, MONITOR_INTERVAL_MS);
   if (alertFn) startWeeklyAbReportCron(alertFn);
+  startPaperMonitorCron();
   console.log("[posMonitor] Started — checks every 5 min");
 }
 
