@@ -136,7 +136,6 @@ export async function runPaperScan(): Promise<void> {
       return;
     }
 
-    const marginSize = Math.max(5, paperBalance * 0.05);
     const tableRows  = assetData.map(d => formatRow(d, classMap[d.symbol] ?? "Crypto"));
 
     // ── Version B system prompt — no regime/score blocks ────────────────────
