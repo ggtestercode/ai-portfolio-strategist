@@ -264,6 +264,13 @@ async function setSlTpForExistingPositions(): Promise<void> {
 
     if (hasSl && hasTp && hasMeta) {
       const pm = existingMeta[pos.symbol]!;
+
+      // Trailing SL above entry = locked-in profit — NEVER reset regardless of qty staleness
+      if (pm.trailingActive) {
+        console.log(`[startup] ${pos.symbol} — trailing SL active (SL=${pm.sl?.toFixed(4)}) preserving, not resetting`);
+        continue;
+      }
+
       // Validate stored metadata is plausible for the current position.
       // If qty or TP1 is wildly off (stale from an old session), fall through and refresh.
       const liveMarkPrice = (pos as any).markPrice as number | undefined;
