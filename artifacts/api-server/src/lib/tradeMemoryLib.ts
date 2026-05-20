@@ -204,7 +204,7 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
   };
 
   const res = await llm.json<R>({
-    taskType:      "assistant_reply",
+    taskType:      "trade_reflection",
     systemContext: "You are a trading journal assistant. Reply JSON only. Be specific about signal names and prices. No markdown, no generic advice.",
     prompt,
     schema: {
