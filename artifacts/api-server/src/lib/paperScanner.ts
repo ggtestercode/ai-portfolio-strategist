@@ -224,6 +224,19 @@ export async function runPaperScan(): Promise<void> {
         break;
       }
 
+      // FIX 1: Deduplicate — skip if same symbol+direction already open
+      const existing = await db.select({ id: paperTradesTable.id })
+        .from(paperTradesTable)
+        .where(and(
+          eq(paperTradesTable.symbol, sig.symbol),
+          eq(paperTradesTable.direction, sig.direction),
+          eq(paperTradesTable.status, "open"),
+        )).limit(1).catch(() => [] as Array<{ id: number }>);
+      if (existing.length > 0) {
+        console.log(`[paperTrade] Skipping duplicate — ${sig.symbol} ${sig.direction} already open`);
+        continue;
+      }
+
       const tradeMargin = Math.max(5, runningBalance * 0.05);
       runningBalance -= tradeMargin;
 
@@ -299,6 +312,23 @@ export async function updatePaperTradesPnl(): Promise<void> {
 
         console.log(`[paperMonitor] ${trade.symbol} ${trade.direction} entry=${entry} price=${current} tp1=${trade.tp1 ?? "—"} sl=${trade.stopLoss ?? "—"} pnl%=${pnlPct.toFixed(2)}`);
 
+        // FIX 2: 48h auto-close for stale open trades
+        const ageHours = (Date.now() - new Date(trade.signalTime).getTime()) / 3_600_000;
+        if (ageHours > 48) {
+          const finalPnl = (trade.marginUsed ?? 5) * 10 * (pnlPct / 100);
+          await db.update(paperTradesTable).set({
+            status:          "closed",
+            exitPrice:       current,
+            wouldHavePnl:    finalPnl,
+            wouldHavePnlPct: pnlPct,
+            exitTime:        now,
+            exitReason:      "48h_timer",
+          }).where(eq(paperTradesTable.id, trade.id));
+          if (trade.marginUsed) totalBalanceReturn += trade.marginUsed + finalPnl;
+          console.log(`[paperTrade] 48h timer closed ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}%`);
+          continue;
+        }
+
         let newStatus = "open";
         let exitPrice: number | null = null;
 
@@ -309,10 +339,14 @@ export async function updatePaperTradesPnl(): Promise<void> {
         const finalPct     = exitPrice ? (isLong ? (exitPrice - entry) / entry : (entry - exitPrice) / entry) * 100 : pnlPct;
         const realizedPnl  = exitPrice ? (trade.marginUsed ?? 5) * 10 * (finalPct / 100) : null;
 
+        const exitReason = newStatus === "stopped_out" ? "sl_hit"
+          : newStatus === "tp2_hit" ? "tp2_hit"
+          : newStatus === "tp1_hit" ? "tp1_hit"
+          : undefined;
         await db.update(paperTradesTable).set({
           wouldHavePnl:    finalPct * (trade.marginUsed ?? 5) * 10 / 100,
           wouldHavePnlPct: finalPct,
-          ...(newStatus !== "open" ? { status: newStatus, exitPrice, exitTime: now } : {}),
+          ...(newStatus !== "open" ? { status: newStatus, exitPrice, exitTime: now, exitReason } : {}),
         }).where(eq(paperTradesTable.id, trade.id));
 
         // Accumulate balance return — write once after loop

@@ -21,6 +21,7 @@ export const paperTradesTable = pgTable("paper_trades", {
   status:          text("status").notNull().default("open"),
   version:         text("version").notNull().default("B"),
   marginUsed:      real("margin_used"),
+  exitReason:      text("exit_reason"),
 });
 
 export type PaperTrade       = typeof paperTradesTable.$inferSelect;
