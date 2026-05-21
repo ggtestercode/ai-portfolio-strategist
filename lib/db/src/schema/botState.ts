@@ -1,5 +1,12 @@
 import { pgTable, integer, real, boolean, timestamp, text, jsonb } from "drizzle-orm/pg-core";
 
+export interface WatchCoin {
+  symbol:    string;
+  direction: string;
+  score:     number;
+  addedAt:   string; // ISO string
+}
+
 export interface CoinPenalty {
   penalty:         number;
   consecutiveHits: number;
@@ -42,6 +49,8 @@ export const botStateTable = pgTable("bot_state", {
   positionMetadata:     jsonb("position_metadata").$type<Record<string, PositionMeta>>().notNull().default({}),
   positionMonitorState: jsonb("position_monitor_state").$type<Record<string, PositionMonitorState>>().notNull().default({}),
   paperBalance:         real("paper_balance").notNull().default(40.0),
+  watchList:            jsonb("watch_list").$type<WatchCoin[]>().default([]),
+  watchListUpdatedAt:   timestamp("watch_list_updated_at", { withTimezone: true }),
 });
 
 export type BotState       = typeof botStateTable.$inferSelect;

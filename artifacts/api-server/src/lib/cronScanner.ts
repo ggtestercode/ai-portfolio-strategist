@@ -1,5 +1,5 @@
 import cron, { type ScheduledTask }   from "node-cron";
-import { runScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
+import { runScan, runFocusedScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
 import { runPaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
@@ -22,7 +22,7 @@ import {
   type BybitPosition,
   type BybitKline,
 } from "../brokers/bybit";
-import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, tradingRulesTable, ruleOverridesTable, type PositionMeta, type PositionMonitorState } from "@workspace/db";
+import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, tradingRulesTable, ruleOverridesTable, type PositionMeta, type PositionMonitorState, type WatchCoin } from "@workspace/db";
 import { eq, and, desc, isNull } from "drizzle-orm";
 
 // ── Close helpers ─────────────────────────────────────────────────────────────
@@ -68,6 +68,8 @@ export let pausedReason  = "";
 export let lastScanTime: Date | null = null;
 
 let cronTask:        ScheduledTask | null = null;
+let watchScanTask:   ScheduledTask | null = null;
+let watchScanNextAt: Date         | null = null;
 let isScanning:      boolean              = false;
 let currentInterval: string               = SCAN_INTERVAL ?? "0 */4 * * *";
 
@@ -1148,12 +1150,172 @@ function formatScanSummary(
   return lines.join("\n");
 }
 
+// ── Watch list 30-min rescan ──────────────────────────────────────────────────
+
+async function removeFromWatchList(symbol: string): Promise<void> {
+  const state = await loadBotState();
+  const updated = (state.watchList ?? []).filter(w => w.symbol !== symbol);
+  await saveBotState({ watchList: updated });
+}
+
+function stopWatchScan(): void {
+  if (watchScanTask) {
+    watchScanTask.stop();
+    watchScanTask = null;
+    watchScanNextAt = null;
+    console.log("[watchScan] Rescan stopped");
+  }
+}
+
+async function runWatchScan(): Promise<void> {
+  const state = await loadBotState().catch(() => null);
+  const watchCoins = (state?.watchList ?? []) as WatchCoin[];
+
+  if (!watchCoins.length) {
+    console.log("[watchScan] Watch list empty — stopping");
+    stopWatchScan();
+    return;
+  }
+
+  const [positions, balances] = await Promise.all([
+    bybitGetPositions().catch(() => [] as BybitPosition[]),
+    syncTotalCapitalToDB().catch(() => null),
+  ]);
+  const bybitBalance = (balances?.bybit ?? 0) > 0 ? balances!.bybit : 41;
+  const maxPos = bybitBalance < 200 ? 3 : Math.floor(bybitBalance / 10);
+
+  if (positions.length >= maxPos) {
+    console.log("[watchScan] All slots filled — stopping");
+    stopWatchScan();
+    return;
+  }
+
+  const symbols = [...new Set(watchCoins.map(w => bybitSym(w.symbol)))];
+  console.log(`[watchScan] Rescanning ${symbols.length} coins: ${symbols.join(", ")}`);
+
+  const result = await runFocusedScan(symbols).catch(e => {
+    console.error("[watchScan] Focused scan failed:", e);
+    return null;
+  });
+  if (!result) return;
+
+  const regime    = result.regime;
+  const threshold = getRegimeThreshold(regime?.regime);
+  const existingSyms = new Set(positions.map(p => bybitSym(p.symbol)));
+
+  for (const signal of result.opportunities) {
+    const sym       = bybitSym(signal.symbol);
+    const watchCoin = watchCoins.find(w => bybitSym(w.symbol) === sym);
+    if (!watchCoin) continue;
+    if (existingSyms.has(sym)) { await removeFromWatchList(signal.symbol); continue; } // already in position
+
+    if ((signal.score ?? 0) >= threshold) {
+      // Score crossed threshold — execute
+      if (await isCoinSuspended(signal.symbol)) { await removeFromWatchList(signal.symbol); continue; }
+
+      const amountUsd = calcRMultipleSizing(
+        bybitBalance,
+        signal.entry ?? signal.price,
+        signal.stopLoss ?? 0,
+        signal.leverage ?? 10,
+        signal.score ?? 65,
+        signal.conflictResolution ?? "NO_CONFLICT",
+        signal.timing ?? "EARLY",
+        signal.setupQuality ?? "MEDIUM",
+      );
+      if (amountUsd > 0) {
+        const proposal = buildProposal({
+          symbol:          sym,
+          side:            signal.direction === "short" ? "sell" : "buy",
+          amountUsd,
+          assetClass:      signal.assetClass,
+          broker:          "bybit",
+          rationale:       `[WatchScan] score=${signal.score} regime=${regime?.regime ?? "?"}. ${signal.reasoning ?? ""}`,
+          score:           signal.score,
+          currentPrice:    signal.price,
+          dataTimestamp:   signal.dataTimestamp,
+          stopLossPrice:   signal.stopLoss,
+          takeProfitPrice: signal.tp2 ?? signal.takeProfit,
+          tp1Price:        signal.tp1,
+        });
+        const gateResult = await approvalGate.submit(proposal).catch(e => {
+          console.error(`[watchScan] submit ${sym}:`, e);
+          return { action: "failed" as const, proposal, message: String(e), orderId: undefined };
+        });
+
+        if (gateResult.action === "executed") {
+          patchEntrySource(sym, "auto_scan").catch(() => {});
+          await logOpenTrade({
+            symbol:    sym,
+            broker:    "bybit",
+            direction: signal.direction === "short" ? "short" : "long",
+            entryPrice: signal.entry ?? signal.price,
+            leverage:  signal.leverage ?? 10,
+            amountUsd,
+            reasoning: `[WatchScan] score=${signal.score} regime=${regime?.regime ?? "?"} whyNow=${signal.whyNow ?? signal.reasoning?.slice(0, 200) ?? ""}`,
+            stopLoss:  signal.stopLoss,
+            takeProfit: signal.takeProfit,
+          }).catch(() => {});
+
+          await alertFn?.([
+            `⚡ <b>Watch list entry — ${sym} ${(signal.direction ?? "?").toUpperCase()}</b>`,
+            `Score: ${watchCoin.score} → <b>${signal.score}</b> ✅`,
+            `Threshold met: ${signal.score} ≥ ${threshold}`,
+            `Edge: ${signal.whyNow ?? signal.reasoning?.slice(0, 100) ?? "?"}`,
+            `Entry: $${signal.entry ?? signal.price} | SL: $${signal.stopLoss?.toFixed(4) ?? "?"} | TP1: $${signal.tp1?.toFixed(4) ?? "?"}`,
+          ].join("\n")).catch(() => {});
+        }
+      }
+      await removeFromWatchList(signal.symbol);
+
+    } else if ((signal.score ?? 0) < 55) {
+      // Score dropped significantly — remove from watch list
+      await removeFromWatchList(signal.symbol);
+      await alertFn?.([
+        `👁️ <b>Watch removed — ${sym}</b>`,
+        `Score dropped: ${watchCoin.score} → ${signal.score ?? "?"}`,
+        `Setup no longer valid`,
+      ].join("\n")).catch(() => {});
+      console.log(`[watchScan] ${sym} score dropped to ${signal.score ?? "?"} — removed from watch`);
+
+    } else {
+      console.log(`[watchScan] ${sym} score ${signal.score ?? "?"} — still watching`);
+    }
+  }
+
+  // Stop if watch list now empty
+  const updatedState = await loadBotState().catch(() => null);
+  if (!(updatedState?.watchList ?? []).length) {
+    stopWatchScan();
+  }
+}
+
+function startWatchScan(): void {
+  if (watchScanTask) return; // already running
+  watchScanTask = cron.schedule("*/30 * * * *", () => {
+    watchScanNextAt = new Date(Date.now() + 30 * 60 * 1000);
+    void runWatchScan().catch(e => console.error("[watchScan] unhandled:", e));
+  });
+  watchScanNextAt = new Date(Date.now() + 30 * 60 * 1000);
+  console.log("[watchScan] 30-min rescan started");
+}
+
+export function getWatchScanStatus(): { active: boolean; nextAt: Date | null } {
+  return { active: watchScanTask !== null, nextAt: watchScanNextAt };
+}
+
+export async function getWatchList(): Promise<WatchCoin[]> {
+  const state = await loadBotState().catch(() => null);
+  return (state?.watchList ?? []) as WatchCoin[];
+}
+
 // ── Core scan logic ───────────────────────────────────────────────────────────
 async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void> {
   if (!cronEnabled && triggered === "cron") { console.log("[cronScanner] Skipped — disabled"); return; }
   if (tradingPaused)                         { console.log("[cronScanner] Skipped — trading paused"); return; }
   if (isScanning)                            { console.log("[cronScanner] Skipped — scan already in progress"); return; }
 
+  stopWatchScan(); // stop any running watch scan — will restart after this scan completes
   isScanning = true;
   console.log(`[cronScanner] ${triggered === "manual" ? "Manual" : "Cron"} scan starting…`);
   lastScanTime = new Date();
@@ -1359,6 +1521,40 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     const dailyPnl = await getDailyPnl().catch(() => 0);
     const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, maxPositions, filteredSignals.length, result.opportunities);
     await alertFn?.(summary).catch(() => {});
+
+    // Extract Watch list coins and start 30-min rescan
+    const watchThreshLow = execThreshold - 10;
+    const watchCoins: WatchCoin[] = cryptoOpps
+      .filter(o => {
+        const s = o.score ?? 0;
+        const dir = o.direction ?? "neutral";
+        return (
+          (o.recommendation === "WATCH" || (s >= watchThreshLow && s < execThreshold)) &&
+          dir !== "neutral" &&
+          !existingSyms.has(bybitSym(o.symbol))
+        );
+      })
+      .map(o => ({
+        symbol:    bybitSym(o.symbol),
+        direction: o.direction ?? "neutral",
+        score:     o.score ?? 0,
+        addedAt:   new Date().toISOString(),
+      }));
+
+    await saveBotState({ watchList: watchCoins, watchListUpdatedAt: new Date() }).catch(() => {});
+
+    if (watchCoins.length) {
+      console.log(`[watchScan] ${watchCoins.length} coins added to watch list: ${watchCoins.map(w => w.symbol).join(", ")}`);
+      const watchMsg = [
+        `👀 <b>Watch list active (${watchCoins.length} coins):</b>`,
+        ...watchCoins.map(w => `  • ${w.symbol} ${w.direction.toUpperCase()} — score ${w.score} (need ${execThreshold})`),
+        `Rescanning every 30 min...`,
+      ].join("\n");
+      await alertFn?.(watchMsg).catch(() => {});
+      startWatchScan();
+    } else {
+      await saveBotState({ watchList: [] }).catch(() => {});
+    }
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);
 

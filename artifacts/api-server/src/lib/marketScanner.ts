@@ -382,7 +382,7 @@ export async function runFreshScan(): Promise<ScanResult> {
   return runScan();
 }
 
-async function fetchBatch(entries: WatchlistEntry[]): Promise<AssetData[]> {
+async function fetchBatch(entries: Array<{ symbol: string; assetClass: string }>): Promise<AssetData[]> {
   const settled = await Promise.allSettled(
     entries.map(e => fetchAssetData(e.symbol, e.assetClass))
   );
@@ -408,6 +408,194 @@ function formatRow(d: AssetData, assetClass: string): string {
   return `${d.symbol}|${assetClass}|$${d.price.toFixed(2)}|${d.change7d > 0 ? "+" : ""}${d.change7d}%|${d.change30d > 0 ? "+" : ""}${d.change30d}%|RSI${d.rsi}|${vol}`;
 }
 
+// ── Phase 2 helper: fetch data + LLM signal generation for given symbols ─────
+
+async function runPhase2(
+  selectedSymbols: string[],
+  classMap:        Record<string, string>,
+  allAssetData:    AssetData[],
+  regime:          MarketRegime,
+  bybitPosSummary: string,
+  profile:         { riskTolerance?: string; targetReturnPct?: number; totalCapital?: number; strategyType?: string } | null,
+  tradeMemory:     string,
+  perfSummary:     string,
+  activeRules:     Awaited<ReturnType<typeof getActiveRules>>,
+): Promise<ScanOpportunity[]> {
+  // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
+  const mtfLines:     string[] = [];
+  const fundingLines: string[] = [];
+  const sweepMap     = new Map<string, SweepResult>();
+  const squeezeMap   = new Map<string, string>();
+
+  await Promise.allSettled(selectedSymbols.map(async sym => {
+    try {
+      const [mtf, fr, oi, klines] = await Promise.all([
+        fetchMTFData(sym),
+        getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 })),
+        getOpenInterest(sym).catch(() => 0),
+        getKlines(sym, "60", 25).catch(() => [] as BybitKline[]),
+      ]);
+      const rSign = fr.rate >= 0 ? "+" : "";
+      mtfLines.push(`${sym} MTF: ${mtf}`);
+      fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
+      sweepMap.set(sym, detectLiquiditySweep(klines));
+      const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
+      const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
+      const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
+      squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
+    } catch { /* skip */ }
+  }));
+
+  const rsMap = await fetchRelativeStrength(selectedSymbols).catch(() => new Map<string, RSData>());
+
+  const rsLines = selectedSymbols.map(sym => {
+    const rs = rsMap.get(sym);
+    if (!rs) return null;
+    const sign = rs.rsAvg > 0 ? "+" : "";
+    const tag  = rs.bias === "short" ? "→ weak, short bias" : rs.bias === "long" ? "→ strong, long bias" : "→ neutral";
+    return `  ${sym}: ${sign}${rs.rsAvg.toFixed(1)}% vs BTC ${tag}`;
+  }).filter(Boolean);
+
+  const rsContext = rsLines.length
+    ? `Relative strength vs BTC (avg 4h/1D/7D):\n${rsLines.join("\n")}`
+    : "";
+
+  const sweepLines: string[] = [];
+  for (const [sym, sw] of sweepMap) {
+    if (!sw.detected) continue;
+    sweepLines.push(
+      `Liquidity sweep detected on ${sym}: ${sw.type}\n` +
+      `  Level: $${sw.level.toFixed(4)} | Sweep extreme: $${sw.sweepExtreme.toFixed(4)}\n` +
+      `  Wick: ${sw.wickRatio.toFixed(1)}× body | Volume: ${sw.volumeRatio.toFixed(1)}× avg\n` +
+      `  Reversal: ${sw.reversalCandles} candle(s) | Quality: ${sw.quality}`
+    );
+  }
+  const squeezeLines: string[] = [];
+  for (const [sym, sq] of squeezeMap) {
+    if (sq === "NONE") continue;
+    squeezeLines.push(`Squeeze setup on ${sym}: ${sq}`);
+  }
+  const sweepContext   = sweepLines.join("\n\n");
+  const squeezeContext = squeezeLines.join("\n");
+
+  // Table: selected crypto + all non-crypto for context
+  const tableData = allAssetData.filter(d => selectedSymbols.includes(d.symbol) || classMap[d.symbol] !== "Crypto");
+  const tableRows = tableData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
+
+  // ── Phase 2: Call 2 — Sonnet generates signals for top 10 only ───────────
+  const risk         = (profile?.riskTolerance ?? "medium").toLowerCase();
+  const targetReturn = profile?.targetReturnPct ?? 10;
+  const capital      = profile?.totalCapital ?? 200;
+  const maxPosition  = Math.max(10, capital * 0.5);
+
+  const riskDirective =
+    risk === "extreme" || risk === "high"
+      ? `EXTREME/HIGH risk: surface only high-conviction momentum plays. Crypto leverage up to 50x. Target: ${targetReturn}%/period.`
+      : risk === "low"
+        ? `LOW risk: prefer defensive, low-volatility assets. Avoid leverage >3x. Target: ${targetReturn}%/period.`
+        : `MEDIUM risk: balanced approach. Leverage max 10x. Target: ${targetReturn}%/period.`;
+
+  const strongTrendDir = regime.diPlus >= regime.diMinus ? "bullish" : "bearish";
+  const regimeScoring =
+    regime.regime === "CHOPPY"
+      ? "REGIME=CHOPPY: DO NOT suggest new entries. Return WATCH or AVOID for all signals."
+    : regime.regime === "RANGING"
+      ? "REGIME=RANGING: Price oscillating between support and resistance. ONLY enter at range boundaries — SHORT when price is within 3% of the 50-period high (resistance), LONG when price is within 3% of the 50-period low (support). DO NOT enter mid-range. Include the 50-period high as entry/resistance context for shorts and 50-period low for longs. Use limit orders at or just inside the boundary. SL beyond the boundary (short: above 50-period high, long: below 50-period low). Target the opposite boundary for TP. Small size, tight SL. Both directions allowed — pick whichever boundary price is near."
+    : regime.regime === "EXHAUSTION"
+      ? "REGIME=EXHAUSTION: No new trend entries. Counter-trend scalps only. Force partial profits on existing winning positions."
+    : regime.regime === "VOLATILE"
+      ? `REGIME=VOLATILE: ATR is ${(regime.atr / (regime.atrAvg30d || 1)).toFixed(1)}× above average. Halve position size. Widen SL to 2×ATR. Quick TP (≤1×ATR). Limit orders only.`
+    : regime.regime === "STRONG_TREND"
+      ? `REGIME=STRONG_TREND (${strongTrendDir}, ADX=${regime.adx.toFixed(0)}): Very strong trend. ${strongTrendDir === "bullish" ? "Prefer longs but identify coins showing individual bearish divergence for short opportunities." : "Prefer shorts but identify coins showing individual bullish divergence for long opportunities."} Allow both directions — check each coin's own momentum.`
+    : regime.regime === "TRENDING_UP"
+      ? "REGIME=TRENDING_UP: Prefer longs on breakouts. Shorts allowed on coins showing bearish divergence or weakness (price rejecting resistance, failing to follow BTC higher). Both directions valid — scan each coin individually."
+      : "REGIME=TRENDING_DOWN: Prefer shorts on breakdowns. Longs allowed on coins showing bullish divergence or holding support (failing to follow BTC lower). Both directions valid — scan each coin individually.";
+
+  const scoringWeights = regime.regime === "VOLATILE"
+    ? [
+        "Dynamic score weights for VOLATILE regime:",
+        "  Direction clarity: 25pts | 4h structure: 25pts",
+        "  Volume: 15pts | OI: 15pts | Funding: 10pts",
+        "  Penalties: ATR extreme -10pts",
+        "  Minimum score to recommend: 65",
+      ].join("\n")
+    : [
+        "Dynamic score weights for TRENDING regime:",
+        "  Regime alignment: 30pts | 4h trend direction: 25pts | 1h timing: 20pts",
+        "  Volume expansion: 8pts | OI+price alignment: 7pts | Funding context: 5pts",
+        "  Penalties: RSI >80 or <20: -5pts | Extended from EMA: -5pts",
+        "  Signal freshness: -10pts if setup >2h old",
+        "  Minimum score to recommend: 65 — only return signals scoring ≥65",
+      ].join("\n");
+
+  const systemContext = [
+    "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
+    `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","riskRewardRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
+    `Rank exactly 5. LONGS: ≥80=STRONG BUY(strong_buy), 60-79=BUY(high). SHORTS: ≥80=STRONG SELL(strong_sell), 60-79=SELL(high). 40-59=WATCH, <40=AVOID. Include ≥1 short per scan — look for coins rejecting resistance or lagging BTC.`,
+    `Funding: |rate|<0.03% neutral; 0.03-0.07% directional +3pts; >0.07% crowded -5pts. OI up+price up=bullish +5pts; OI down+price up=weak +2pts; OI up+price down=bearish +5pts; OI down+price down=-3pts.`,
+    riskDirective,
+    regimeScoring,
+    scoringWeights,
+    `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must be 1-3× 4h ATR. If structural level >3× ATR = too far, use next closest level. If <1× ATR = too tight, use level beyond it. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed by ATR range. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
+    `Orders: LIMIT(GTC) mid-range at nearest S/R; MARKET(IOC) only on confirmed volume breakout. Max position: $${maxPosition.toFixed(0)}.`,
+    `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
+    `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
+    `RS data: >+5% vs BTC=long candidate +5pts; <-5%=short candidate +5pts; set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
+  ].join("\n");
+
+  const prompt = [
+    `Bybit live positions: ${bybitPosSummary}`,
+    `Risk: ${profile?.riskTolerance ?? "high"}. Strategy: ${profile?.strategyType ?? "Momentum"}.`,
+    `UTC: ${new Date().toISOString()}`,
+    ``,
+    `Market regime (BTC proxy): ${regime.regime}`,
+    `ADX: ${regime.adx.toFixed(1)} | DI+: ${regime.diPlus.toFixed(1)} | DI-: ${regime.diMinus.toFixed(1)}`,
+    `4h EMA20: $${regime.ema20_4h.toFixed(0)} | EMA50: $${regime.ema50_4h.toFixed(0)} | EMA200: $${regime.ema200_4h.toFixed(0)}`,
+    `ATR: $${regime.atr.toFixed(0)} vs 30d avg: $${regime.atrAvg30d.toFixed(0)} (${regime.atr > 0 && regime.atrAvg30d > 0 ? (regime.atr / regime.atrAvg30d).toFixed(1) : "?"}×)`,
+    `Regime note: ${regime.summary}`,
+    ``,
+    mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
+    fundingLines.length ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n` : "",
+    rsContext ? `\n${rsContext}\n` : "",
+    sweepContext   ? `\n${sweepContext}` : "",
+    squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",
+    `Market snapshot — top 10 selected (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
+    tableRows.join("\n"),
+    ``,
+    tradeMemory ? `Trade memory (last reflections):\n${tradeMemory}` : "",
+    perfSummary ? `\n${perfSummary}` : "",
+    activeRules.length ? [
+      `\n═══ ACTIVE TRADING RULES ═══`,
+      `(Generated from trade reflections — SOFT rules: state which rule you override and why)`,
+      ...activeRules.map(r => {
+        const tot = r.winsFollowing + r.lossesFollowing;
+        const wr  = tot > 0 ? `${Math.round(r.winsFollowing / tot * 100)}%` : "no data";
+        return `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}\n  Logic: ${r.causalLogic ?? "see evidence"} | Track record: ${r.winsFollowing}W/${r.lossesFollowing}L (${wr})`;
+      }),
+      `If overriding a rule, include "ruleOverridden": <number>, "overrideReason": "<specific reason>" in your response.`,
+    ].join("\n") : "",
+  ].filter(Boolean).join("\n");
+
+  const res = await llm.json<{ opportunities: ScanOpportunity[]; scanTimestamp: string; summary: string }>({
+    taskType:      "market_scan",
+    systemContext,
+    prompt,
+    schema: {
+      type: "object",
+      properties: {
+        opportunities: { type: "array" },
+        scanTimestamp: { type: "string" },
+        summary:       { type: "string" },
+      },
+      required: ["opportunities", "scanTimestamp", "summary"],
+    },
+    fallback: FALLBACK_RESULT,
+  });
+
+  if (!res.parseSuccess) return [];
+  return res.data.opportunities ?? [];
+}
+
 export async function runScan(): Promise<ScanResult> {
   return cache.get(CacheKey.marketScan(), TTL.MARKET_SCAN, async () => {
     // ── Phase 0: Regime + basic data ─────────────────────────────────────────
@@ -415,7 +603,7 @@ export async function runScan(): Promise<ScanResult> {
 
     const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules] = await Promise.all([
       getWatchlist(),
-      db.select().from(profileTable).limit(1).then(r => r[0]),
+      db.select().from(profileTable).limit(1).then(r => r[0] ?? null),
       bybitGetPositions().catch(() => [] as BybitPosition[]),
       getRecentMemory(20).catch(() => ""),
       getPerformanceSummary().catch(() => ""),
@@ -461,186 +649,42 @@ export async function runScan(): Promise<ScanResult> {
       : cryptoData.slice(0, 10).map(d => d.symbol);
     console.log(`[scanner] Phase 1 → ${selectedSymbols.join(", ")}`);
 
-    // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
-    const mtfLines:     string[] = [];
-    const fundingLines: string[] = [];
-    const sweepMap     = new Map<string, SweepResult>();
-    const squeezeMap   = new Map<string, string>();
+    const opportunities = await runPhase2(selectedSymbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules);
 
-    await Promise.allSettled(selectedSymbols.map(async sym => {
-      try {
-        const [mtf, fr, oi, klines] = await Promise.all([
-          fetchMTFData(sym),
-          getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 })),
-          getOpenInterest(sym).catch(() => 0),
-          getKlines(sym, "60", 25).catch(() => [] as BybitKline[]),
-        ]);
-        const rSign = fr.rate >= 0 ? "+" : "";
-        mtfLines.push(`${sym} MTF: ${mtf}`);
-        fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
-        sweepMap.set(sym, detectLiquiditySweep(klines));
-        const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
-        const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
-        const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
-        squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
-      } catch { /* skip */ }
-    }));
-
-    const rsMap = await fetchRelativeStrength(selectedSymbols).catch(() => new Map<string, RSData>());
-
-    const rsLines = selectedSymbols.map(sym => {
-      const rs = rsMap.get(sym);
-      if (!rs) return null;
-      const sign = rs.rsAvg > 0 ? "+" : "";
-      const tag  = rs.bias === "short" ? "→ weak, short bias" : rs.bias === "long" ? "→ strong, long bias" : "→ neutral";
-      return `  ${sym}: ${sign}${rs.rsAvg.toFixed(1)}% vs BTC ${tag}`;
-    }).filter(Boolean);
-
-    const rsContext = rsLines.length
-      ? `Relative strength vs BTC (avg 4h/1D/7D):\n${rsLines.join("\n")}`
-      : "";
-
-    const sweepLines: string[] = [];
-    for (const [sym, sw] of sweepMap) {
-      if (!sw.detected) continue;
-      sweepLines.push(
-        `Liquidity sweep detected on ${sym}: ${sw.type}\n` +
-        `  Level: $${sw.level.toFixed(4)} | Sweep extreme: $${sw.sweepExtreme.toFixed(4)}\n` +
-        `  Wick: ${sw.wickRatio.toFixed(1)}× body | Volume: ${sw.volumeRatio.toFixed(1)}× avg\n` +
-        `  Reversal: ${sw.reversalCandles} candle(s) | Quality: ${sw.quality}`
-      );
-    }
-    const squeezeLines: string[] = [];
-    for (const [sym, sq] of squeezeMap) {
-      if (sq === "NONE") continue;
-      squeezeLines.push(`Squeeze setup on ${sym}: ${sq}`);
-    }
-    const sweepContext   = sweepLines.join("\n\n");
-    const squeezeContext = squeezeLines.join("\n");
-
-    // Table: selected crypto + all non-crypto for context
-    const tableData = assetData.filter(d => selectedSymbols.includes(d.symbol) || classMap[d.symbol] !== "Crypto");
-    const tableRows = tableData.map(d => formatRow(d, classMap[d.symbol] ?? "Unknown"));
-
-    // ── Phase 2: Call 2 — Sonnet generates signals for top 10 only ───────────
-    const risk         = (profile?.riskTolerance ?? "medium").toLowerCase();
-    const targetReturn = profile?.targetReturnPct ?? 10;
-    const capital      = profile?.totalCapital ?? 200;
-    const strategyName = profile?.strategyType ?? "Balanced";
-    const maxPosition  = Math.max(10, capital * 0.5);
-
-    const riskDirective =
-      risk === "extreme" || risk === "high"
-        ? `EXTREME/HIGH risk: surface only high-conviction momentum plays. Crypto leverage up to 50x. Target: ${targetReturn}%/period.`
-        : risk === "low"
-          ? `LOW risk: prefer defensive, low-volatility assets. Avoid leverage >3x. Target: ${targetReturn}%/period.`
-          : `MEDIUM risk: balanced approach. Leverage max 10x. Target: ${targetReturn}%/period.`;
-
-    const strongTrendDir = regime.diPlus >= regime.diMinus ? "bullish" : "bearish";
-    const regimeScoring =
-      regime.regime === "CHOPPY"
-        ? "REGIME=CHOPPY: DO NOT suggest new entries. Return WATCH or AVOID for all signals."
-      : regime.regime === "RANGING"
-        ? "REGIME=RANGING: Price oscillating between support and resistance. ONLY enter at range boundaries — SHORT when price is within 3% of the 50-period high (resistance), LONG when price is within 3% of the 50-period low (support). DO NOT enter mid-range. Include the 50-period high as entry/resistance context for shorts and 50-period low for longs. Use limit orders at or just inside the boundary. SL beyond the boundary (short: above 50-period high, long: below 50-period low). Target the opposite boundary for TP. Small size, tight SL. Both directions allowed — pick whichever boundary price is near."
-      : regime.regime === "EXHAUSTION"
-        ? "REGIME=EXHAUSTION: No new trend entries. Counter-trend scalps only. Force partial profits on existing winning positions."
-      : regime.regime === "VOLATILE"
-        ? `REGIME=VOLATILE: ATR is ${(regime.atr / (regime.atrAvg30d || 1)).toFixed(1)}× above average. Halve position size. Widen SL to 2×ATR. Quick TP (≤1×ATR). Limit orders only.`
-      : regime.regime === "STRONG_TREND"
-        ? `REGIME=STRONG_TREND (${strongTrendDir}, ADX=${regime.adx.toFixed(0)}): Very strong trend. ${strongTrendDir === "bullish" ? "Prefer longs but identify coins showing individual bearish divergence for short opportunities." : "Prefer shorts but identify coins showing individual bullish divergence for long opportunities."} Allow both directions — check each coin's own momentum.`
-      : regime.regime === "TRENDING_UP"
-        ? "REGIME=TRENDING_UP: Prefer longs on breakouts. Shorts allowed on coins showing bearish divergence or weakness (price rejecting resistance, failing to follow BTC higher). Both directions valid — scan each coin individually."
-        : "REGIME=TRENDING_DOWN: Prefer shorts on breakdowns. Longs allowed on coins showing bullish divergence or holding support (failing to follow BTC lower). Both directions valid — scan each coin individually.";
-
-    const scoringWeights = regime.regime === "VOLATILE"
-      ? [
-          "Dynamic score weights for VOLATILE regime:",
-          "  Direction clarity: 25pts | 4h structure: 25pts",
-          "  Volume: 15pts | OI: 15pts | Funding: 10pts",
-          "  Penalties: ATR extreme -10pts",
-          "  Minimum score to recommend: 65",
-        ].join("\n")
-      : [
-          "Dynamic score weights for TRENDING regime:",
-          "  Regime alignment: 30pts | 4h trend direction: 25pts | 1h timing: 20pts",
-          "  Volume expansion: 8pts | OI+price alignment: 7pts | Funding context: 5pts",
-          "  Penalties: RSI >80 or <20: -5pts | Extended from EMA: -5pts",
-          "  Signal freshness: -10pts if setup >2h old",
-          "  Minimum score to recommend: 65 — only return signals scoring ≥65",
-        ].join("\n");
-
-    const systemContext = [
-      "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","riskRewardRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
-      `Rank exactly 5. LONGS: ≥80=STRONG BUY(strong_buy), 60-79=BUY(high). SHORTS: ≥80=STRONG SELL(strong_sell), 60-79=SELL(high). 40-59=WATCH, <40=AVOID. Include ≥1 short per scan — look for coins rejecting resistance or lagging BTC.`,
-      `Funding: |rate|<0.03% neutral; 0.03-0.07% directional +3pts; >0.07% crowded -5pts. OI up+price up=bullish +5pts; OI down+price up=weak +2pts; OI up+price down=bearish +5pts; OI down+price down=-3pts.`,
-      riskDirective,
-      regimeScoring,
-      scoringWeights,
-      `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must be 1-3× 4h ATR. If structural level >3× ATR = too far, use next closest level. If <1× ATR = too tight, use level beyond it. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed by ATR range. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
-      `Orders: LIMIT(GTC) mid-range at nearest S/R; MARKET(IOC) only on confirmed volume breakout. Max position: $${maxPosition.toFixed(0)}.`,
-      `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
-      `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
-      `RS data: >+5% vs BTC=long candidate +5pts; <-5%=short candidate +5pts; set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
-    ].join("\n");
-
-    const prompt = [
-      `Bybit live positions: ${bybitPosSummary}`,
-      `Risk: ${profile?.riskTolerance ?? "high"}. Strategy: ${profile?.strategyType ?? "Momentum"}.`,
-      `UTC: ${new Date().toISOString()}`,
-      ``,
-      `Market regime (BTC proxy): ${regime.regime}`,
-      `ADX: ${regime.adx.toFixed(1)} | DI+: ${regime.diPlus.toFixed(1)} | DI-: ${regime.diMinus.toFixed(1)}`,
-      `4h EMA20: $${regime.ema20_4h.toFixed(0)} | EMA50: $${regime.ema50_4h.toFixed(0)} | EMA200: $${regime.ema200_4h.toFixed(0)}`,
-      `ATR: $${regime.atr.toFixed(0)} vs 30d avg: $${regime.atrAvg30d.toFixed(0)} (${regime.atr > 0 && regime.atrAvg30d > 0 ? (regime.atr / regime.atrAvg30d).toFixed(1) : "?"}×)`,
-      `Regime note: ${regime.summary}`,
-      ``,
-      mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
-      fundingLines.length ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n` : "",
-      rsContext ? `\n${rsContext}\n` : "",
-      sweepContext   ? `\n${sweepContext}` : "",
-      squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",
-      `Market snapshot — top 10 selected (Symbol|Class|Price|7d%|30d%|RSI|Volume):`,
-      tableRows.join("\n"),
-      ``,
-      tradeMemory ? `Trade memory (last reflections):\n${tradeMemory}` : "",
-      perfSummary ? `\n${perfSummary}` : "",
-      activeRules.length ? [
-        `\n═══ ACTIVE TRADING RULES ═══`,
-        `(Generated from trade reflections — SOFT rules: state which rule you override and why)`,
-        ...activeRules.map(r => {
-          const tot = r.winsFollowing + r.lossesFollowing;
-          const wr  = tot > 0 ? `${Math.round(r.winsFollowing / tot * 100)}%` : "no data";
-          return `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}\n  Logic: ${r.causalLogic ?? "see evidence"} | Track record: ${r.winsFollowing}W/${r.lossesFollowing}L (${wr})`;
-        }),
-        `If overriding a rule, include "ruleOverridden": <number>, "overrideReason": "<specific reason>" in your response.`,
-      ].join("\n") : "",
-    ].filter(Boolean).join("\n");
-
-    const res = await llm.json<ScanResult>({
-      taskType:      "market_scan",
-      systemContext,
-      prompt,
-      schema: {
-        type: "object",
-        properties: {
-          opportunities: { type: "array" },
-          scanTimestamp: { type: "string" },
-          summary:       { type: "string" },
-        },
-        required: ["opportunities", "scanTimestamp", "summary"],
-      },
-      fallback: FALLBACK_RESULT,
-    });
-
-    if (!res.parseSuccess) return { ...FALLBACK_RESULT, regime };
-
-    const result = res.data;
-    result.scanTimestamp = new Date().toISOString();
-    result.regime = regime;
-
+    const result: ScanResult = { opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "" };
     return result;
   });
+}
+
+export async function runFocusedScan(symbols: string[]): Promise<ScanResult> {
+  const regime = await detectMarketRegime();
+  const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules] = await Promise.all([
+    getWatchlist(),
+    db.select().from(profileTable).limit(1).then(r => r[0] ?? null),
+    bybitGetPositions().catch(() => [] as BybitPosition[]),
+    getRecentMemory(20).catch(() => ""),
+    getPerformanceSummary().catch(() => ""),
+    getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>),
+  ]);
+
+  const watchlistClassMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
+  // Default to "Crypto" for watch coins not in the portfolio watchlist
+  const classMap: Record<string, string> = {
+    ...watchlistClassMap,
+    ...Object.fromEntries(symbols.map(s => [s, watchlistClassMap[s] ?? "Crypto"])),
+  };
+
+  // Fetch asset data for just these symbols
+  const focusedEntries = symbols.map(s => ({ symbol: s, assetClass: classMap[s] ?? "Crypto" }));
+  const assetData = await fetchBatch(focusedEntries);
+
+  const bybitPosSummary = bybitPositions.length
+    ? bybitPositions.map(p => `${p.symbol} ${p.side} size=${p.size} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
+    : "none";
+
+  const opportunities = await runPhase2(symbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules);
+
+  return { opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "" };
 }
 
 export function scheduleScan(): void {

@@ -45,6 +45,8 @@ import {
   setProfitThresholds,
   getProfitThresholds,
   getStatus as getCronStatus,
+  getWatchScanStatus,
+  getWatchList,
 } from "../lib/cronScanner";
 import {
   getPortfolioLeverage,
@@ -62,6 +64,7 @@ import {
   paperTradesTable,
   tradeMemoryTable,
   type PositionMeta,
+  type WatchCoin,
 } from "@workspace/db";
 import { desc, gt, and, eq } from "drizzle-orm";
 
@@ -543,21 +546,43 @@ export function startPolling(): void {
   b.onText(/^\/watchlist(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const list = await getWatchlist();
+      const [list, watchStatus] = await Promise.all([
+        getWatchlist(),
+        Promise.resolve(getWatchScanStatus()),
+      ]);
+
+      const lines: string[] = [`📋 <b>Watchlist (${list.length} symbols)</b>`, `<i>${utcNow()}</i>`, ``];
+
+      // Watch scan section (signal watch list)
+      if (watchStatus.active) {
+        const watching = await getWatchList().catch(() => [] as WatchCoin[]);
+        if (watching.length) {
+          const threshold = getRegimeThreshold(undefined); // rough — actual threshold from latest regime
+          lines.push(`👀 <b>Currently watching (${watching.length}):</b>`);
+          for (const w of watching) {
+            const addedMs  = Date.now() - new Date(w.addedAt).getTime();
+            const addedAgo = addedMs < 3_600_000 ? `${Math.round(addedMs / 60_000)}min ago` : `${Math.round(addedMs / 3_600_000)}h ago`;
+            lines.push(`  • ${escapeHtml(w.symbol)} ${w.direction.toUpperCase()} — score ${w.score} (need ${threshold}) | added ${addedAgo}`);
+          }
+          if (watchStatus.nextAt) {
+            const minsLeft = Math.max(0, Math.round((watchStatus.nextAt.getTime() - Date.now()) / 60_000));
+            lines.push(`🔄 Next rescan: ${minsLeft} min`);
+          }
+          lines.push(``);
+        }
+      }
+
+      // Portfolio watchlist (existing)
       const grouped: Record<string, string[]> = {};
       for (const e of list) {
         (grouped[e.assetClass] ??= []).push(e.symbol);
       }
-      const lines = Object.entries(grouped).map(([cls, syms]) =>
+      const portfolioLines = Object.entries(grouped).map(([cls, syms]) =>
         `<b>${escapeHtml(cls)}</b> (${syms.length}): ${syms.map(escapeHtml).join(" ")}`
       ).join("\n\n");
+      lines.push(portfolioLines);
 
-      await b.sendMessage(chatId, [
-        `📋 <b>Watchlist (${list.length} assets)</b>`,
-        `<i>${utcNow()}</i>`,
-        ``,
-        lines,
-      ].join("\n"), { parse_mode: "HTML" });
+      await b.sendMessage(chatId, lines.join("\n"), { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
