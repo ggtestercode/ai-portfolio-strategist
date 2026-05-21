@@ -1111,8 +1111,7 @@ export function startPolling(): void {
 
   // ── /setprofit — set profit auto-close thresholds ────────────────────────
   b.onText(/^\/setprofit(?:@\w+)?(?:\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?))?$/i, async (msg, match) => {
-    const chatId = msg.chat.id;
-    if (!isAuthorized(chatId)) return;
+    const chatId = String(msg.chat.id);
     const partialArg = match?.[1] ? parseFloat(match[1]) : null;
     const fullArg    = match?.[2] ? parseFloat(match[2]) : null;
     if (partialArg !== null && fullArg !== null) {
