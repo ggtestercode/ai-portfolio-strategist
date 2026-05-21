@@ -60,6 +60,7 @@ import {
   targetAllocationsTable,
   botStateTable,
   paperTradesTable,
+  tradeMemoryTable,
   type PositionMeta,
 } from "@workspace/db";
 import { desc, gt, and, eq } from "drizzle-orm";
@@ -1448,6 +1449,44 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       const rules = await getActiveRules();
+
+      // Execution health section (last 20 closed trades)
+      let healthSection = "";
+      try {
+        const last20 = await db.select({
+          failureType: tradeMemoryTable.failureType,
+          executionIssues: tradeMemoryTable.executionIssues,
+        }).from(tradeMemoryTable)
+          .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+          .orderBy(desc(tradeMemoryTable.createdAt))
+          .limit(20);
+
+        const counts = { execution: 0, strategy: 0, mixed: 0, success: 0, unknown: 0 };
+        const issueCounts: Record<string, number> = {};
+        for (const r of last20) {
+          const ft = (r.failureType ?? "unknown") as keyof typeof counts;
+          counts[ft] = (counts[ft] ?? 0) + 1;
+          if (Array.isArray(r.executionIssues)) {
+            for (const issue of r.executionIssues as string[]) {
+              issueCounts[issue] = (issueCounts[issue] ?? 0) + 1;
+            }
+          }
+        }
+        const topIssues = Object.entries(issueCounts)
+          .sort((a,b) => b[1]-a[1]).slice(0,5)
+          .map(([issue, n]) => `  • ${escapeHtml(issue)}: ${n}x`).join("\n") || "  none";
+
+        healthSection = [
+          ``,
+          `🔧 <b>Execution Health (last ${last20.length} trades):</b>`,
+          `✅ Success: ${counts.success} | 📊 Strategy: ${counts.strategy}`,
+          `⚙️ Execution: ${counts.execution} | 🔀 Mixed: ${counts.mixed}`,
+          ``,
+          `Common execution issues:`,
+          topIssues,
+        ].join("\n");
+      } catch { /* non-fatal */ }
+
       if (!rules.length) {
         await b.sendMessage(chatId, [
           `🧠 <b>Active Trading Rules</b>`,
@@ -1456,6 +1495,7 @@ export function startPolling(): void {
           `Rules auto-generate after every 20 closed trades.`,
           ``,
           `<i>Use /forceRules to generate now (if 10+ reflections exist)</i>`,
+          healthSection,
         ].join("\n"), { parse_mode: "HTML" });
         return;
       }
@@ -1489,6 +1529,7 @@ export function startPolling(): void {
           : `No trade data yet`,
         ``,
         `<i>Rules update every 20 closed trades</i>`,
+        healthSection,
       ].join("\n");
 
       await b.sendMessage(chatId, lines, { parse_mode: "HTML" });

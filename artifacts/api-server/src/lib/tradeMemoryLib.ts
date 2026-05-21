@@ -5,7 +5,7 @@ import {
 import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
-import { getClosedPnl as bybitGetClosedPnl }  from "../brokers/bybit";
+import { getClosedPnl as bybitGetClosedPnl, getKlines }  from "../brokers/bybit";
 
 // ─── Rule alert notifier ──────────────────────────────────────────────────────
 
@@ -43,6 +43,7 @@ interface ReflectionInput {
   tp1?:          string | null;
   tp2?:          string | null;
   sourceTradeId?: string | null;
+  markPriceAtDecision?: number;  // pre-order price the system used
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -53,6 +54,25 @@ const toSGT = (d: Date) => {
 };
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+function checkCandlesReachedPrice(candles: Array<{high: number; low: number}>, price: number, direction: "long" | "short"): boolean {
+  if (price <= 0 || candles.length === 0) return false;
+  return direction === "long"
+    ? candles.some(c => c.high >= price)
+    : candles.some(c => c.low <= price);
+}
+
+function getMaxProfitDuringHold(candles: Array<{high: number; low: number}>, entryPrice: number, direction: "long" | "short"): number {
+  if (entryPrice <= 0 || candles.length === 0) return 0;
+  let best = 0;
+  for (const c of candles) {
+    const pct = direction === "long"
+      ? (c.high - entryPrice) / entryPrice * 100
+      : (entryPrice - c.low) / entryPrice * 100;
+    if (pct > best) best = pct;
+  }
+  return best;
+}
 
 // ─── logClosedTrade (eToro / legacy) ─────────────────────────────────────────
 
@@ -111,7 +131,46 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
   const partials        = bybitCloses.length > 1 ? bybitCloses.slice(0, -1) : [];
   const estimatedFees   = Math.abs(input.pnl) * 0.002; // ~0.1% in + 0.1% out taker approx
 
-  // 2. Version B comparison (paper_trades)
+  // 2. Candle data for trade period (1h candles, entry→exit)
+  type Candle1h = { high: number; low: number; close: number; time: number };
+  let tradePeriodCandles: Candle1h[] = [];
+  try {
+    if (input.entryAt && input.exitAt) {
+      const holdHrs = Math.ceil((input.exitAt.getTime() - input.entryAt.getTime()) / 3_600_000) + 2;
+      const limit = Math.min(200, Math.max(10, holdHrs));
+      const raw = await getKlines(input.symbol, "60", limit);
+      const entryMs = input.entryAt.getTime();
+      const exitMs  = input.exitAt.getTime();
+      tradePeriodCandles = raw
+        .filter((k: Candle1h & { ts: number }) => k.ts >= entryMs - 3_600_000 && k.ts <= exitMs + 3_600_000)
+        .map((k: Candle1h & { ts: number }) => ({ high: k.high, low: k.low, close: k.close, time: k.ts }));
+    }
+  } catch { /* non-fatal */ }
+
+  // 3. Partial closes from trade_memory for this symbol in trade window
+  type PartialMem = { partialType: string | null; priceAtClose: string | null; pnlPct: string | null; createdAt: Date };
+  let memPartials: PartialMem[] = [];
+  try {
+    if (input.entryAt && input.exitAt) {
+      const windowStart = new Date(input.entryAt.getTime() - 30 * 60_000);
+      const windowEnd   = new Date(input.exitAt.getTime() + 30 * 60_000);
+      memPartials = await db.select({
+        partialType:  tradeMemoryTable.partialType,
+        priceAtClose: tradeMemoryTable.priceAtClose,
+        pnlPct:       tradeMemoryTable.pnlPct,
+        createdAt:    tradeMemoryTable.createdAt,
+      }).from(tradeMemoryTable)
+        .where(and(
+          eq(tradeMemoryTable.symbol, input.symbol),
+          eq(tradeMemoryTable.action, "PARTIAL"),
+          gte(tradeMemoryTable.createdAt, windowStart),
+          lte(tradeMemoryTable.createdAt, windowEnd),
+        ))
+        .orderBy(asc(tradeMemoryTable.createdAt));
+    }
+  } catch { /* non-fatal */ }
+
+  // 4. Version B comparison (paper_trades)
   let versionBStr = "Version B had no trade on this symbol in the same period.";
   try {
     if (input.entryAt) {
@@ -149,7 +208,63 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     regime = state?.currentRegime ?? "UNKNOWN";
   } catch { /* non-fatal */ }
 
-  // 4. Hold duration
+  // ── Execution quality checks ──────────────────────────────────────────────
+  const tp1Price   = input.tp1   ? parseFloat(input.tp1)  : 0;
+  const tp2Price   = input.tp2   ? parseFloat(input.tp2)  : 0;
+  const plannedSL  = input.sl    ? parseFloat(input.sl)   : 0;
+
+  const tp1Reached = checkCandlesReachedPrice(tradePeriodCandles, tp1Price, input.direction as "long" | "short");
+  const tp2Reached = checkCandlesReachedPrice(tradePeriodCandles, tp2Price, input.direction as "long" | "short");
+  const tp1Executed = memPartials.some(p => p.partialType === "tp1");
+  const tp2Executed = memPartials.some(p => p.partialType === "tp2");
+
+  const maxProfitPct = getMaxProfitDuringHold(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
+
+  const actualExitPrice = bybitCloses.length > 0
+    ? bybitCloses[bybitCloses.length - 1]!.avgExitPrice
+    : input.exitPrice;
+  const expectedExitPrice = input.markPriceAtDecision ?? input.exitPrice;
+  const slippage = expectedExitPrice > 0
+    ? Math.abs(actualExitPrice - expectedExitPrice) / expectedExitPrice * 100
+    : 0;
+
+  const executionIssues: string[] = [];
+  if (tp1Price > 0 && tp1Reached && !tp1Executed) executionIssues.push("TP1 reached but not triggered");
+  if (tp2Price > 0 && tp2Reached && !tp2Executed) executionIssues.push("TP2 reached but not triggered");
+  if (maxProfitPct >= 5  && !memPartials.some(p => p.partialType === "profit_5pct"))  executionIssues.push("5% profit protection missed");
+  if (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct")) executionIssues.push("10% profit protection missed");
+  if (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct")) executionIssues.push("20% profit protection missed");
+  if (slippage > 0.5)     executionIssues.push(`Significant slippage: ${slippage.toFixed(2)}%`);
+  if (plannedSL > 0) {
+    const slDirectionOk = input.direction === "long" ? plannedSL < input.entryPrice : plannedSL > input.entryPrice;
+    if (!slDirectionOk) executionIssues.push("SL direction wrong");
+  }
+  const unplannedPartials = memPartials.filter(p =>
+    !["tp1","tp2","profit_5pct","profit_10pct","profit_20pct","large_profit"].includes(p.partialType ?? "")
+  );
+  if (unplannedPartials.length > 0) executionIssues.push(`Unplanned partials: ${unplannedPartials.map(p => p.partialType).join(", ")}`);
+  if (memPartials.length > 3) executionIssues.push(`Excessive partials: ${memPartials.length} closes`);
+
+  // Determine exit method from bybit data and partials
+  const profitProtectionTypes = ["profit_5pct","profit_10pct","profit_20pct","large_profit"];
+  const exitMethod = memPartials.some(p => profitProtectionTypes.includes(p.partialType ?? ""))
+    ? "profit_protection"
+    : bybitCloses.length > 0 && bybitCloses[bybitCloses.length-1]!.closedPnl !== undefined
+      ? (input.pnlPct < -5 ? "sl_hit" : "review")
+      : "unknown";
+
+  const tradeLost = input.pnlPct < 0;
+  const failureType: "strategy" | "execution" | "mixed" | "success" =
+    !tradeLost          ? "success"
+    : executionIssues.length > 2 ? "execution"
+    : executionIssues.length > 0 ? "mixed"
+    : "strategy";
+
+  const profitProtectionMissed = (maxProfitPct >= 5 && !memPartials.some(p => p.partialType === "profit_5pct"))
+    || (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct"))
+    || (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct"));
+
+  // 5. Hold duration
   const holdMs      = input.entryAt && input.exitAt
     ? input.exitAt.getTime() - input.entryAt.getTime() : null;
   const holdHours   = holdMs !== null ? Math.floor(holdMs / 3600000) : null;
@@ -193,6 +308,43 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     ``,
     `Version B comparison (same symbol, same period):`,
     versionBStr,
+    ``,
+    `── Execution Analysis ──────────────────────────────`,
+    `TP levels:`,
+    `  TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
+    `  TP2 ($${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"}): reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}${tp2Price > 0 && tp2Reached && !tp2Executed ? " ⚠️ MISSED" : ""}`,
+    ``,
+    `Profit protection:`,
+    `  Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
+    `  5% threshold: triggered=${maxProfitPct >= 5 ? "YES" : "NO"} | executed=${memPartials.some(p => p.partialType === "profit_5pct") ? "YES" : "NO"}`,
+    `  10% threshold: triggered=${maxProfitPct >= 10 ? "YES" : "NO"} | executed=${memPartials.some(p => p.partialType === "profit_10pct") ? "YES" : "NO"}`,
+    `  20% threshold: triggered=${maxProfitPct >= 20 ? "YES" : "NO"} | executed=${memPartials.some(p => p.partialType === "profit_20pct") ? "YES" : "NO"}`,
+    ``,
+    `Fill quality:`,
+    `  Expected exit: $${expectedExitPrice.toFixed(4)}`,
+    `  Actual exit:   $${actualExitPrice.toFixed(4)}`,
+    `  Slippage:      ${slippage.toFixed(3)}%${slippage > 0.5 ? " ⚠️ SIGNIFICANT" : ""}`,
+    ``,
+    `Stop loss:`,
+    `  Planned: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} | Direction: ${plannedSL > 0 ? (input.direction === "long" ? (plannedSL < input.entryPrice ? "correct (below entry)" : "WRONG (above entry)") : (plannedSL > input.entryPrice ? "correct (above entry)" : "WRONG (below entry)")) : "n/a"}`,
+    ``,
+    `Partial closes:`,
+    `  Planned:   tp1, tp2`,
+    `  Executed:  ${memPartials.length > 0 ? memPartials.map(p => `${p.partialType ?? "?"}@$${parseFloat(p.priceAtClose ?? "0").toFixed(4)}`).join(", ") : "none"}`,
+    `  Unplanned: ${unplannedPartials.length > 0 ? unplannedPartials.map(p => p.partialType ?? "?").join(", ") : "none"}`,
+    `  Total closes: ${memPartials.length}`,
+    ``,
+    `Exit method: ${exitMethod}`,
+    `Execution issues: ${executionIssues.length > 0 ? executionIssues.join("; ") : "none"}`,
+    `Failure type: ${failureType.toUpperCase()}`,
+    ``,
+    failureType === "execution"
+      ? `IMPORTANT: Failure type is EXECUTION. Do NOT blame the strategy. Identify the specific system bug. What code fix is needed?`
+      : failureType === "strategy"
+      ? `IMPORTANT: Failure type is STRATEGY. What was wrong with the analysis? What signals were missed? What to do differently next time?`
+      : failureType === "mixed"
+      ? `IMPORTANT: Failure type is MIXED. Address both execution issues AND strategy quality.`
+      : `IMPORTANT: Trade was successful. Focus on what worked well and reinforce good patterns.`,
     ``,
     `Reflect honestly. Be specific about named signals. No generic advice. Return ONLY valid JSON:`,
     `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
@@ -281,7 +433,33 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     whatDidnt:            d.whatDidnt            || null,
     lessonsLearned:       d.lessonsLearned       || null,
     nextTimeWouldDo:      d.nextTimeWouldDo      || null,
+    // Execution quality tracking
+    failureType,
+    executionIssues,
+    tp1Reached,
+    tp2Reached,
+    maxProfitPct:           String(maxProfitPct.toFixed(4)),
+    profitProtectionMissed,
+    slippagePct:            String(slippage.toFixed(4)),
+    excessivePartials:      memPartials.length > 3,
+    exitMethod,
+    metadataWasStale:       false,
   });
+
+  // Alert on execution failures
+  if (executionIssues.length > 0 && _ruleAlertFn) {
+    const resultLabel = tradeLost ? "LOSS" : "WIN";
+    const msg = [
+      `⚠️ <b>Execution issue — ${input.symbol}</b>`,
+      `Issues: ${executionIssues.join(", ")}`,
+      `Trade result: ${resultLabel} ${input.pnlPct >= 0 ? "+" : ""}${input.pnlPct.toFixed(2)}%`,
+      ``,
+      failureType === "execution"
+        ? "Strategy was correct — system bug needs a fix"
+        : "Mixed: strategy + execution issues",
+    ].join("\n");
+    _ruleAlertFn(msg).catch(() => {});
+  }
 
   // Fix 5: Log reflection quality fields
   const isComplete = !!(d.lessonsLearned && d.whatWorked && d.whatDidnt && d.nextTimeWouldDo);
@@ -425,7 +603,25 @@ export async function generateTradingRules(): Promise<void> {
     return;
   }
 
-  const reflStr = reflections.map(r => {
+  // Separate execution failures from strategy failures
+  const strategyReflections = reflections.filter(r =>
+    !r.failureType || r.failureType === "strategy" || r.failureType === "success" || r.failureType === "mixed"
+  );
+  const executionOnlyFailures = reflections.filter(r => r.failureType === "execution");
+
+  // Summarise execution failures
+  const allExecIssues: string[] = [];
+  for (const r of executionOnlyFailures) {
+    if (Array.isArray(r.executionIssues)) allExecIssues.push(...(r.executionIssues as string[]));
+  }
+  const execIssueCounts: Record<string, number> = {};
+  for (const issue of allExecIssues) execIssueCounts[issue] = (execIssueCounts[issue] ?? 0) + 1;
+  const execSummary = Object.entries(execIssueCounts)
+    .sort((a,b) => b[1]-a[1])
+    .map(([issue, count]) => `  - ${issue}: ${count}x`)
+    .join("\n") || "  none";
+
+  const reflStr = strategyReflections.map(r => {
     const pct = parseFloat(r.pnlPct ?? "0");
     return [
       `${r.symbol} | P/L: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
@@ -443,7 +639,13 @@ export async function generateTradingRules(): Promise<void> {
   ).join("\n");
 
   const prompt = [
-    `Analyse ${reflections.length} trade reflections and generate exactly 5 actionable trading rules.`,
+    `Analyse trade reflections and generate exactly 5 actionable trading rules.`,
+    ``,
+    `Execution-only failures excluded from rule generation (${executionOnlyFailures.length} trades):`,
+    execSummary,
+    `These need code fixes, not strategy rules.`,
+    ``,
+    `Analyse ONLY the ${strategyReflections.length} strategy/mixed/success entries below for rule generation:`,
     ``,
     `Requirements per rule:`,
     `- Minimum 3 trade occurrences as evidence`,
@@ -452,7 +654,7 @@ export async function generateTradingRules(): Promise<void> {
     `- Flag if rule contradicts market fundamentals`,
     `- Confidence: HIGH (5+ occurrences) | MEDIUM (3-4) | LOW (<3)`,
     ``,
-    `Trade reflections (${reflections.length} trades):`,
+    `Trade reflections (${strategyReflections.length} trades):`,
     reflStr,
     ``,
     existingRules.length ? `Current active rules:\n${existingStr}` : "No existing rules.",

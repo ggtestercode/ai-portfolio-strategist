@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, jsonb, boolean, decimal } from "drizzle-orm/pg-core";
 
 export const tradeMemoryTable = pgTable("trade_memory", {
   id:                   uuid("id").primaryKey().defaultRandom(),
@@ -31,6 +31,17 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   versionBLesson:       text("version_b_lesson"),
   pnlPct:               text("pnl_pct"),               // stored for display without joining trade_log
   sourceTradeId:        text("source_trade_id"),        // trade_log.id for exact deduplication
+  // Execution quality tracking — batch 3
+  failureType:          text("failure_type"),           // 'strategy' | 'execution' | 'mixed' | 'success'
+  executionIssues:      jsonb("execution_issues"),      // string[]
+  tp1Reached:           boolean("tp1_reached"),
+  tp2Reached:           boolean("tp2_reached"),
+  maxProfitPct:         decimal("max_profit_pct", { precision: 10, scale: 4 }),
+  profitProtectionMissed: boolean("profit_protection_missed"),
+  slippagePct:          decimal("slippage_pct", { precision: 10, scale: 4 }),
+  excessivePartials:    boolean("excessive_partials"),
+  exitMethod:           text("exit_method"),            // 'review' | 'sl_hit' | 'tp_hit' | '48h_timer' | 'profit_protection' | 'unknown'
+  metadataWasStale:     boolean("metadata_was_stale"),
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;
