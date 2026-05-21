@@ -410,16 +410,23 @@ export async function runPaperScan(): Promise<void> {
         continue;
       }
 
+      // Fall back to scan direction if review entry omitted it
+      const direction = entry.direction || opp.direction;
+      if (!direction || direction === "neutral") {
+        console.log(`[paperTrade] Skipping ${entry.symbol} — no valid direction`);
+        continue;
+      }
+
       // Deduplicate — skip if same symbol+direction already open
       const existing = await db.select({ id: paperTradesTable.id })
         .from(paperTradesTable)
         .where(and(
           eq(paperTradesTable.symbol, entry.symbol),
-          eq(paperTradesTable.direction, entry.direction),
+          eq(paperTradesTable.direction, direction),
           eq(paperTradesTable.status, "open"),
         )).limit(1).catch(() => [] as Array<{ id: number }>);
       if (existing.length > 0) {
-        console.log(`[paperTrade] Skipping duplicate — ${entry.symbol} ${entry.direction} already open`);
+        console.log(`[paperTrade] Skipping duplicate — ${entry.symbol} ${direction} already open`);
         continue;
       }
 
@@ -430,7 +437,7 @@ export async function runPaperScan(): Promise<void> {
       // Realistic fill: random slippage 0.05%–0.15%
       const slippagePct  = 0.0005 + Math.random() * 0.001;
       const rawEntry     = opp.entry ?? opp.price;
-      const actualEntry  = entry.direction === "long"
+      const actualEntry  = direction === "long"
         ? rawEntry * (1 + slippagePct)
         : rawEntry * (1 - slippagePct);
 
@@ -446,7 +453,7 @@ export async function runPaperScan(): Promise<void> {
 
       await db.insert(paperTradesTable).values({
         symbol:     entry.symbol,
-        direction:  entry.direction,
+        direction:  direction,
         entryPrice: actualEntry,
         stopLoss:   opp.stopLoss         ?? null,
         tp1:        opp.tp1              ?? null,
@@ -463,7 +470,7 @@ export async function runPaperScan(): Promise<void> {
       }).catch(e => { console.warn(`[paperScanner] DB insert ${entry.symbol}:`, e.message); dbWriteAlert(`insert ${entry.symbol}`, e); });
 
       console.log(
-        `[paperTrade] Version B would enter: ${entry.symbol} ${entry.direction} ` +
+        `[paperTrade] Version B would enter: ${entry.symbol} ${direction} ` +
         `at $${actualEntry.toFixed(4)} (slip=${(slippagePct * 100).toFixed(3)}%) margin=$${tradeMargin.toFixed(2)} balance=$${runningBalance.toFixed(2)} score=${opp.score}`
       );
       console.log(`[paperFee] ${entry.symbol} open fee: $${openFee.toFixed(4)}`);
