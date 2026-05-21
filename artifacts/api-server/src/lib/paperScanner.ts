@@ -738,8 +738,9 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
 
 export function startPaperMonitorCron(alertFn?: (msg: string) => Promise<void>): void {
   if (alertFn) _paperAlertFn = alertFn;  // store for DB write failure alerts
-  // every 5 minutes
+  // every 5 minutes — skipped when PAPER_TRADING_ENABLED=false
   cron.schedule("*/5 * * * *", () => {
+    if (process.env["PAPER_TRADING_ENABLED"] === "false") return;
     void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));
   });
 

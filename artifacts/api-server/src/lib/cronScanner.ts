@@ -1579,8 +1579,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);
 
     // Run Version B paper scan in parallel — never blocks live trading
-    runPaperScan().catch(err => console.error("[paperScanner] Error:", err));
-    updatePaperTradesPnl().catch(err => console.error("[paperScanner] P&L update:", err));
+    if (process.env["PAPER_TRADING_ENABLED"] !== "false") {
+      runPaperScan().catch(err => console.error("[paperScanner] Error:", err));
+      updatePaperTradesPnl().catch(err => console.error("[paperScanner] P&L update:", err));
+    } else {
+      console.log("[paperScanner] Disabled via PAPER_TRADING_ENABLED=false");
+    }
   } catch (err) {
     console.error("[cronScanner] Scan failed:", err);
   } finally {
