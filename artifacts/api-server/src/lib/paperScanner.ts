@@ -19,7 +19,7 @@ import {
 import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
 import { llm }                   from "./llmRouter";
 import { db, profileTable, paperTradesTable, botStateTable, tradeMemoryTable, ruleOverridesTable } from "@workspace/db";
-import { eq, gt, and, isNull, isNotNull } from "drizzle-orm";
+import { eq, gt, and, isNull, isNotNull, sql } from "drizzle-orm";
 import { backfillStructuredReflections } from "./tradeMemoryLib";
 
 const PAPER_STARTING_BALANCE = 40.0;
@@ -44,6 +44,19 @@ async function setPaperBalance(balance: number): Promise<void> {
     .set({ paperBalance: balance, lastUpdated: new Date() })
     .where(eq(botStateTable.id, 1));
 }
+
+async function addPaperCosts(fees: number, funding: number, slippage: number): Promise<void> {
+  if (fees === 0 && funding === 0 && slippage === 0) return;
+  await db.update(botStateTable).set({
+    ...(fees     > 0 ? { paperTotalFees:     sql`paper_total_fees + ${fees}` }       : {}),
+    ...(funding  > 0 ? { paperTotalFunding:  sql`paper_total_funding + ${funding}` } : {}),
+    ...(slippage > 0 ? { paperTotalSlippage: sql`paper_total_slippage + ${slippage}` } : {}),
+    lastUpdated: new Date(),
+  }).where(eq(botStateTable.id, 1))
+    .catch(e => console.warn("[paperScanner] cost tracking failed:", e.message));
+}
+
+let lastPaperFundingAt = 0;  // epoch ms — reset on process restart
 import cron from "node-cron";
 
 // ── Market data helpers (mirror of marketScanner internals) ──────────────────
@@ -213,7 +226,9 @@ export async function runPaperScan(): Promise<void> {
     }
     const emptyReview: PortfolioReview = { positionReviews: [], newEntries: [], portfolioReasoning: "" };
     let portfolioDecision  = emptyReview;
-    let balanceFromClosures = 0;
+    let balanceFromClosures  = 0;
+    let totalFeesThisScan    = 0;
+    let totalSlippageThisScan = 0;
 
     if (openTrades.length > 0) {
       // Fetch live prices for open positions
@@ -298,6 +313,7 @@ export async function runPaperScan(): Promise<void> {
           const pnlUsd = margin * 10 * (pnlPct / 100);
 
           if (rv.decision === "CLOSE") {
+            const closeFee = margin * 10 * 0.00055;
             await db.update(paperTradesTable).set({
               status:          "closed",
               exitPrice:       cur,
@@ -307,20 +323,25 @@ export async function runPaperScan(): Promise<void> {
               exitReason:      "claude_close",
             }).where(eq(paperTradesTable.id, trade.id))
               .catch(e => console.warn(`[paperScanner] CLOSE ${trade.symbol}:`, e.message));
-            balanceFromClosures += margin + pnlUsd;
-            console.log(`[paperTrade] Version B CLOSE ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}% returned=$${(margin + pnlUsd).toFixed(2)} | ${rv.reasoning.slice(0, 80)}`);
+            balanceFromClosures += margin + pnlUsd - closeFee;
+            totalFeesThisScan   += closeFee;
+            console.log(`[paperTrade] Version B CLOSE ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}% returned=$${(margin + pnlUsd - closeFee).toFixed(2)} | ${rv.reasoning.slice(0, 80)}`);
+            console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
 
           } else if (rv.decision === "PARTIAL_CLOSE") {
-            const pct       = Math.min(Math.max((rv.closePercent ?? 50) / 100, 0.1), 0.9);
-            const closedMgn = margin * pct;
-            const closedPnl = closedMgn * 10 * (pnlPct / 100);
+            const pct        = Math.min(Math.max((rv.closePercent ?? 50) / 100, 0.1), 0.9);
+            const closedMgn  = margin * pct;
+            const closedPnl  = closedMgn * 10 * (pnlPct / 100);
+            const closeFee   = closedMgn * 10 * 0.00055;
             await db.update(paperTradesTable).set({
               marginUsed: margin - closedMgn,
               exitReason: "claude_partial",
             }).where(eq(paperTradesTable.id, trade.id))
               .catch(e => console.warn(`[paperScanner] PARTIAL_CLOSE ${trade.symbol}:`, e.message));
-            balanceFromClosures += closedMgn + closedPnl;
-            console.log(`[paperTrade] Version B PARTIAL_CLOSE ${trade.symbol} ${(pct * 100).toFixed(0)}% pnl=${pnlPct.toFixed(2)}% returned=$${(closedMgn + closedPnl).toFixed(2)}`);
+            balanceFromClosures += closedMgn + closedPnl - closeFee;
+            totalFeesThisScan   += closeFee;
+            console.log(`[paperTrade] Version B PARTIAL_CLOSE ${trade.symbol} ${(pct * 100).toFixed(0)}% pnl=${pnlPct.toFixed(2)}% returned=$${(closedMgn + closedPnl - closeFee).toFixed(2)}`);
+            console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
           }
           // HOLD: no action
         }
@@ -391,13 +412,31 @@ export async function runPaperScan(): Promise<void> {
         continue;
       }
 
-      const tradeMargin = Math.max(5, runningBalance * 0.05);
-      runningBalance -= tradeMargin;
+      // Claude's sizing, clamped to [$5, 50% of available balance]
+      const claudeSize  = opp.positionSizeUsd ?? 0;
+      const tradeMargin = Math.max(5, Math.min(claudeSize > 0 ? claudeSize : runningBalance * 0.05, runningBalance * 0.50));
+
+      // Realistic fill: random slippage 0.05%–0.15%
+      const slippagePct  = 0.0005 + Math.random() * 0.001;
+      const rawEntry     = opp.entry ?? opp.price;
+      const actualEntry  = entry.direction === "long"
+        ? rawEntry * (1 + slippagePct)
+        : rawEntry * (1 - slippagePct);
+
+      // Open fee: taker 0.055% on notional
+      const leverage   = opp.leverage ?? 10;
+      const notional   = tradeMargin * leverage;
+      const openFee    = notional * 0.00055;
+      const slipCost   = notional * slippagePct;
+
+      runningBalance       -= tradeMargin;
+      totalFeesThisScan    += openFee;
+      totalSlippageThisScan += slipCost;
 
       await db.insert(paperTradesTable).values({
         symbol:     entry.symbol,
         direction:  entry.direction,
-        entryPrice: opp.entry ?? opp.price,
+        entryPrice: actualEntry,
         stopLoss:   opp.stopLoss         ?? null,
         tp1:        opp.tp1              ?? null,
         tp2:        opp.tp2              ?? null,
@@ -414,16 +453,22 @@ export async function runPaperScan(): Promise<void> {
 
       console.log(
         `[paperTrade] Version B would enter: ${entry.symbol} ${entry.direction} ` +
-        `at $${opp.entry} margin=$${tradeMargin.toFixed(2)} balance=$${runningBalance.toFixed(2)} score=${opp.score} regime=${regime.regime}`
+        `at $${actualEntry.toFixed(4)} (slip=${(slippagePct * 100).toFixed(3)}%) margin=$${tradeMargin.toFixed(2)} balance=$${runningBalance.toFixed(2)} score=${opp.score}`
       );
+      console.log(`[paperFee] ${entry.symbol} open fee: $${openFee.toFixed(4)}`);
       logged++;
     }
 
-    // Single balance write: effectivePaperBalance minus new trade spend
-    const newTradeSpend  = availableBalance - runningBalance;
-    const finalBalance   = effectivePaperBalance - newTradeSpend;
-    if (finalBalance !== paperBalance) {
-      await setPaperBalance(Math.max(0, finalBalance))
+    // Single balance write: fees deducted on top of trade spend
+    const newTradeSpend = availableBalance - runningBalance;
+    const finalBalance  = Math.max(0, effectivePaperBalance - newTradeSpend - totalFeesThisScan);
+    if (finalBalance !== paperBalance || totalFeesThisScan > 0 || totalSlippageThisScan > 0) {
+      await db.update(botStateTable).set({
+        paperBalance:       finalBalance,
+        ...(totalFeesThisScan    > 0 ? { paperTotalFees:     sql`paper_total_fees + ${totalFeesThisScan}` }         : {}),
+        ...(totalSlippageThisScan > 0 ? { paperTotalSlippage: sql`paper_total_slippage + ${totalSlippageThisScan}` } : {}),
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, 1))
         .catch(e => console.warn("[paperScanner] balance update:", e.message));
     }
 
@@ -454,9 +499,29 @@ export async function updatePaperTradesPnl(): Promise<void> {
       if (price) priceMap.set(sym, price);
     }));
 
+    // ── 8h funding simulation ─────────────────────────────────────────────────
+    let totalFundingCost = 0;
+    if (Date.now() - lastPaperFundingAt >= 8 * 3600_000) {
+      lastPaperFundingAt = Date.now();
+      for (const trade of open) {
+        try {
+          const sym = `${trade.symbol}USDT`.replace(/USDTUSDT$/, "USDT");
+          const cur = priceMap.get(sym);
+          if (!cur) continue;
+          const fr = await getFundingRate(sym).catch(() => null);
+          if (!fr) continue;
+          const fundingCost = (trade.marginUsed ?? 5) * 10 * Math.abs(fr.rate);
+          totalFundingCost += fundingCost;
+          console.log(`[paperFunding] ${trade.symbol} rate=${(fr.rate * 100).toFixed(4)}% cost=$${fundingCost.toFixed(4)}`);
+        } catch { /* skip */ }
+      }
+      if (totalFundingCost > 0) console.log(`[paperFunding] Total this cycle: $${totalFundingCost.toFixed(4)}`);
+    }
+
     // Process all trades, accumulate balance returns for one final DB write
     const now = new Date();
     let totalBalanceReturn = 0;
+    let totalCloseFees     = 0;
 
     for (const trade of open) {
       try {
@@ -470,10 +535,11 @@ export async function updatePaperTradesPnl(): Promise<void> {
 
         console.log(`[paperMonitor] ${trade.symbol} ${trade.direction} entry=${entry} price=${current} tp1=${trade.tp1 ?? "—"} sl=${trade.stopLoss ?? "—"} pnl%=${pnlPct.toFixed(2)}`);
 
-        // FIX 2: 48h auto-close for stale open trades
+        // 48h auto-close for stale open trades
         const ageHours = (Date.now() - new Date(trade.signalTime as unknown as string).getTime()) / 3_600_000;
         if (ageHours > 48) {
           const finalPnl = (trade.marginUsed ?? 5) * 10 * (pnlPct / 100);
+          const closeFee = (trade.marginUsed ?? 5) * 10 * 0.00055;
           await db.update(paperTradesTable).set({
             status:          "closed",
             exitPrice:       current,
@@ -483,7 +549,9 @@ export async function updatePaperTradesPnl(): Promise<void> {
             exitReason:      "48h_timer",
           }).where(eq(paperTradesTable.id, trade.id));
           if (trade.marginUsed) totalBalanceReturn += trade.marginUsed + finalPnl;
+          totalCloseFees += closeFee;
           console.log(`[paperTrade] 48h timer closed ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}%`);
+          console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
           continue;
         }
 
@@ -507,17 +575,25 @@ export async function updatePaperTradesPnl(): Promise<void> {
           ...(newStatus !== "open" ? { status: newStatus, exitPrice, exitTime: now, exitReason } : {}),
         }).where(eq(paperTradesTable.id, trade.id));
 
-        // Accumulate balance return — write once after loop
+        // Accumulate balance return and close fee for closed trades
         if (newStatus !== "open" && trade.marginUsed) {
+          const closeFee = trade.marginUsed * 10 * 0.00055;
           totalBalanceReturn += trade.marginUsed + (realizedPnl ?? 0);
+          totalCloseFees     += closeFee;
+          console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
         }
       } catch { /* skip individual trade errors */ }
     }
 
-    // Single balance update for all closed trades this cycle
-    if (totalBalanceReturn !== 0) {
+    // Single balance update: returns from closures minus fees and funding
+    if (totalBalanceReturn !== 0 || totalCloseFees !== 0 || totalFundingCost !== 0) {
       const bal = await getPaperBalance();
-      await setPaperBalance(Math.max(0, bal + totalBalanceReturn))
+      await db.update(botStateTable).set({
+        paperBalance: Math.max(0, bal + totalBalanceReturn - totalCloseFees - totalFundingCost),
+        ...(totalCloseFees   > 0 ? { paperTotalFees:    sql`paper_total_fees + ${totalCloseFees}` }       : {}),
+        ...(totalFundingCost > 0 ? { paperTotalFunding: sql`paper_total_funding + ${totalFundingCost}` } : {}),
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, 1))
         .catch(e => console.warn("[paperScanner] balance return:", e.message));
     }
   } catch (err) {

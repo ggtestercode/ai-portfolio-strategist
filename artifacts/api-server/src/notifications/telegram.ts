@@ -1408,20 +1408,29 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       const [balRow, trades] = await Promise.all([
-        db.select({ paperBalance: botStateTable.paperBalance }).from(botStateTable).limit(1),
+        db.select({
+          paperBalance:      botStateTable.paperBalance,
+          paperTotalFees:    botStateTable.paperTotalFees,
+          paperTotalFunding: botStateTable.paperTotalFunding,
+          paperTotalSlippage: botStateTable.paperTotalSlippage,
+        }).from(botStateTable).limit(1),
         db.select().from(paperTradesTable)
           .where(gt(paperTradesTable.signalTime, new Date(Date.now() - 14 * 24 * 3600_000)))
           .orderBy(desc(paperTradesTable.signalTime)),
       ]);
 
-      const paperBalance = balRow[0]?.paperBalance ?? 40;
+      const paperBalance       = balRow[0]?.paperBalance       ?? 40;
+      const totalFees          = balRow[0]?.paperTotalFees      ?? 0;
+      const totalFunding       = balRow[0]?.paperTotalFunding   ?? 0;
+      const totalSlippage      = balRow[0]?.paperTotalSlippage  ?? 0;
 
       const open   = trades.filter(t => t.status === "open");
       const closed = trades.filter(t => t.status !== "open");
 
-      // Return % = realized P/L only (open margin doesn't count as a loss)
+      // Gross P/L = realized P/L from closed trades (entry already includes slippage)
       const realizedPnl = closed.reduce((s, t) => s + (t.wouldHavePnl ?? 0), 0);
-      const returnPct   = (realizedPnl / 40) * 100;
+      const netPnl      = realizedPnl - totalFees - totalFunding;
+      const returnPct   = (netPnl / 40) * 100;
 
       const wins    = closed.filter(t => (t.wouldHavePnlPct ?? 0) > 0);
       const losses  = closed.filter(t => (t.wouldHavePnlPct ?? 0) <= 0);
@@ -1461,6 +1470,11 @@ export function startPolling(): void {
       const lines = [
         `📋 <b>Paper Trading (Version B)</b>`,
         `💰 Paper Balance: $${paperBalance.toFixed(2)} <i>(started $40)</i>`,
+        `📊 Gross P/L: ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)}`,
+        `💸 Total fees: -$${totalFees.toFixed(2)}`,
+        `💸 Total funding: -$${totalFunding.toFixed(2)}`,
+        `💸 Slippage est: -$${totalSlippage.toFixed(2)}`,
+        `📈 Net P/L (realistic): ${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)}`,
         `📈 Return: ${returnPct >= 0 ? "+" : ""}${returnPct.toFixed(1)}%`,
         ``,
         open.length
