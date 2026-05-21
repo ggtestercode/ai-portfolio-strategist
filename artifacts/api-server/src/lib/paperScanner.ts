@@ -16,9 +16,9 @@ import {
   getPositions as bybitGetPositions,
   type BybitKline,
 } from "../brokers/bybit";
-import { getRecentMemory, getPerformanceSummary } from "./tradeMemoryLib";
+import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
 import { llm }                   from "./llmRouter";
-import { db, profileTable, paperTradesTable, botStateTable, tradeMemoryTable } from "@workspace/db";
+import { db, profileTable, paperTradesTable, botStateTable, tradeMemoryTable, ruleOverridesTable } from "@workspace/db";
 import { eq, gt, and, isNull, isNotNull } from "drizzle-orm";
 import { backfillStructuredReflections } from "./tradeMemoryLib";
 
@@ -380,6 +380,32 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
     const lastRefStr  = lastRef ? lastRef.toISOString().replace("T", " ").slice(0, 16) + " UTC" : "never";
     const healthFlag  = incompleteRef > totalRef * 0.10 ? "⚠️ Action needed" : "✅ Healthy";
 
+    // Self-improvement: active rules stats
+    const activeRules = await getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>);
+    const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000);
+    const weeklyOverrides = await db.select().from(ruleOverridesTable)
+      .where(gt(ruleOverridesTable.createdAt, weekAgo))
+      .catch(() => [] as typeof ruleOverridesTable.$inferSelect[]);
+
+    const overrideWins   = weeklyOverrides.filter(o => o.tradeResult === "win").length;
+    const overrideLosses = weeklyOverrides.filter(o => o.tradeResult === "loss").length;
+    const totalFollowed  = activeRules.reduce((s, r) => s + r.winsFollowing + r.lossesFollowing, 0);
+    const totalWins      = activeRules.reduce((s, r) => s + r.winsFollowing, 0);
+    const followWinRate  = totalFollowed > 0 ? Math.round(totalWins / totalFollowed * 100) : null;
+
+    const ruleLines: string[] = activeRules.map(r => {
+      const tot = r.winsFollowing + r.lossesFollowing;
+      const wr  = tot > 0 ? `${Math.round(r.winsFollowing / tot * 100)}%` : "no data";
+      const ruleOverrides = weeklyOverrides.filter(o => o.ruleId === r.id);
+      const overrideWin  = ruleOverrides.filter(o => o.tradeResult === "win").length;
+      const overrideLoss = ruleOverrides.filter(o => o.tradeResult === "loss").length;
+      return [
+        `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText.slice(0, 60)}`,
+        `  Followed: ${tot} times → ${wr} win rate`,
+        ruleOverrides.length ? `  Overrides this week: ${ruleOverrides.length} (${overrideWin}W/${overrideLoss}L)` : `  Overrides this week: 0`,
+      ].join("\n");
+    });
+
     const lines = [
       `📊 <b>Weekly A/B Test Report</b>`,
       ``,
@@ -401,7 +427,18 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
       `Last reflection: ${lastRefStr}`,
       incompleteRef > 0 ? `${healthFlag} — ${incompleteRef} incomplete reflections` : `${healthFlag}`,
       ``,
-      `<i>Run /paperhistory for full signal log</i>`,
+      `🧠 <b>Self-Improvement Report:</b>`,
+      activeRules.length
+        ? [
+            `Active rules: ${activeRules.length}`,
+            followWinRate !== null ? `Overall win rate when rules followed: ${followWinRate}%` : "",
+            `This week's overrides: ${weeklyOverrides.length} (${overrideWins}W/${overrideLosses}L)`,
+            ``,
+            ...ruleLines,
+          ].filter(Boolean).join("\n")
+        : `No rules yet — generates after 20 closed trades\nUse /rules to check`,
+      ``,
+      `<i>Run /paperhistory for full signal log | /rules for current rule details</i>`,
     ].filter(line => line !== undefined).join("\n");
 
     await alertFn(lines);

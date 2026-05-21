@@ -1,10 +1,16 @@
 import {
   db, tradeLogTable, tradeMemoryTable, paperTradesTable, botStateTable,
+  tradingRulesTable, ruleOverridesTable, type TradingRule,
 } from "@workspace/db";
-import { desc, isNotNull, and, eq, isNull, asc, gte, lte } from "drizzle-orm";
+import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
 import { getClosedPnl as bybitGetClosedPnl }  from "../brokers/bybit";
+
+// ─── Rule alert notifier ──────────────────────────────────────────────────────
+
+let _ruleAlertFn: ((msg: string) => Promise<void>) | null = null;
+export function registerRuleAlertFn(fn: (msg: string) => Promise<void>): void { _ruleAlertFn = fn; }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -76,6 +82,10 @@ export async function logClosedTrade(params: ClosedTradeParams): Promise<void> {
   generateReflection({ symbol, direction, entryPrice, exitPrice, pnl, pnlPct, reasoning,
     entryAt: entryAt ?? new Date(), exitAt: new Date() })
     .catch(e => console.error("[tradeMemory] reflection failed:", e));
+
+  updateRuleStatsForTrade(pnlPct > 0).catch(() => {});
+  updatePendingOverrides(symbol, pnlPct).catch(() => {});
+  checkAndGenerateRules().catch(() => {});
 }
 
 // ─── Core reflection engine ───────────────────────────────────────────────────
@@ -317,6 +327,211 @@ export async function logPartialClose(params: {
   }).catch(e => console.error("[tradeMemory] logPartialClose failed:", e));
 }
 
+// ─── Trading rules helpers ────────────────────────────────────────────────────
+
+export async function getActiveRules(): Promise<TradingRule[]> {
+  return db.select()
+    .from(tradingRulesTable)
+    .where(eq(tradingRulesTable.active, true))
+    .orderBy(asc(tradingRulesTable.ruleNumber))
+    .catch(() => [] as TradingRule[]);
+}
+
+async function getLastRuleGenerationDate(): Promise<Date> {
+  const [row] = await db.select({ updatedAt: tradingRulesTable.updatedAt })
+    .from(tradingRulesTable)
+    .orderBy(desc(tradingRulesTable.updatedAt))
+    .limit(1)
+    .catch(() => []);
+  return row?.updatedAt ?? new Date(0);
+}
+
+async function updateRuleStatsForTrade(won: boolean): Promise<void> {
+  const rules = await getActiveRules();
+  if (!rules.length) return;
+  for (const rule of rules) {
+    const update = won
+      ? { winsFollowing: rule.winsFollowing + 1, updatedAt: new Date() }
+      : { lossesFollowing: rule.lossesFollowing + 1, updatedAt: new Date() };
+    await db.update(tradingRulesTable)
+      .set(update)
+      .where(eq(tradingRulesTable.id, rule.id))
+      .catch(() => {});
+  }
+}
+
+async function updatePendingOverrides(symbol: string, pnlPct: number): Promise<void> {
+  const pending = await db.select()
+    .from(ruleOverridesTable)
+    .where(and(eq(ruleOverridesTable.symbol, symbol), eq(ruleOverridesTable.tradeResult, "pending")))
+    .catch(() => [] as typeof ruleOverridesTable.$inferSelect[]);
+
+  for (const override of pending) {
+    const [rule] = await db.select()
+      .from(tradingRulesTable)
+      .where(eq(tradingRulesTable.id, override.ruleId))
+      .limit(1)
+      .catch(() => []);
+    if (!rule) continue;
+
+    const won = pnlPct > 0;
+    const levels = ["LOW", "MEDIUM", "HIGH"] as const;
+    const curIdx  = levels.indexOf(rule.confidence as typeof levels[number]);
+    const newIdx  = won
+      ? Math.max(0, curIdx - 1)   // override + WIN  → confidence drops (rule was probably right)
+      : Math.min(2, curIdx + 1);  // override + LOSS → confidence rises (rule was validated)
+    const newConf = levels[newIdx]!;
+
+    await db.update(ruleOverridesTable)
+      .set({ tradeResult: won ? "win" : "loss", pnlPct: String(pnlPct.toFixed(4)), confidenceAfter: newConf })
+      .where(eq(ruleOverridesTable.id, override.id))
+      .catch(() => {});
+
+    if (newConf !== rule.confidence) {
+      await db.update(tradingRulesTable)
+        .set({ confidence: newConf, updatedAt: new Date() })
+        .where(eq(tradingRulesTable.id, rule.id))
+        .catch(() => {});
+      console.log(`[rules] Rule ${rule.ruleNumber} confidence: ${rule.confidence} → ${newConf} (override ${won ? "won" : "lost"} on ${symbol})`);
+    }
+  }
+}
+
+export async function generateTradingRules(): Promise<void> {
+  // Only generate if 20+ new closed trades since last generation
+  const lastGenDate = await getLastRuleGenerationDate();
+  const newTrades   = await db.select({ id: tradeLogTable.id })
+    .from(tradeLogTable)
+    .where(and(isNotNull(tradeLogTable.exitAt), gt(tradeLogTable.exitAt, lastGenDate)))
+    .catch(() => [] as Array<{ id: string }>);
+
+  if (newTrades.length < 20) {
+    console.log(`[rules] Only ${newTrades.length}/20 new trades since last generation — skipping`);
+    return;
+  }
+
+  const [reflections, existingRules] = await Promise.all([
+    db.select()
+      .from(tradeMemoryTable)
+      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+      .orderBy(desc(tradeMemoryTable.createdAt))
+      .limit(60)
+      .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]),
+    getActiveRules(),
+  ]);
+
+  if (reflections.length < 10) {
+    console.log(`[rules] Insufficient reflections (${reflections.length}) — skipping`);
+    return;
+  }
+
+  const reflStr = reflections.map(r => {
+    const pct = parseFloat(r.pnlPct ?? "0");
+    return [
+      `${r.symbol} | P/L: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
+      r.entryQuality      ? `  Entry: ${r.entryQuality} timing=${r.entryTiming}` : "",
+      r.mistakeType       ? `  Mistake: ${r.mistakeType}` : "",
+      r.signalsThatWorked ? `  Worked: ${r.signalsThatWorked}` : "",
+      r.signalsThatFailed ? `  Failed: ${r.signalsThatFailed}` : "",
+      r.lessonsLearned    ? `  Lesson: ${r.lessonsLearned}` : "",
+      r.nextTimeWouldDo   ? `  Next: ${r.nextTimeWouldDo}` : "",
+    ].filter(Boolean).join("\n");
+  }).join("\n---\n");
+
+  const existingStr = existingRules.map(r =>
+    `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}\n  Wins: ${r.winsFollowing} | Losses: ${r.lossesFollowing}`
+  ).join("\n");
+
+  const prompt = [
+    `Analyse ${reflections.length} trade reflections and generate exactly 5 actionable trading rules.`,
+    ``,
+    `Requirements per rule:`,
+    `- Minimum 3 trade occurrences as evidence`,
+    `- Clear causal logic (not just correlation)`,
+    `- Cross-check: funding positive = longs crowded = short bias; price above EMA = bullish; high volume breakout = real move`,
+    `- Flag if rule contradicts market fundamentals`,
+    `- Confidence: HIGH (5+ occurrences) | MEDIUM (3-4) | LOW (<3)`,
+    ``,
+    `Trade reflections (${reflections.length} trades):`,
+    reflStr,
+    ``,
+    existingRules.length ? `Current active rules:\n${existingStr}` : "No existing rules.",
+    ``,
+    `Return ONLY valid JSON:`,
+    `{"rules":[{"ruleNumber":1,"ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
+  ].join("\n");
+
+  type RuleGenResult = {
+    rules: Array<{
+      ruleNumber: number; ruleText: string; evidence: string;
+      causalLogic: string; confidence: string; occurrences: number;
+      contradictsFundamentals: boolean; flagNote: string | null;
+    }>;
+    patternsFound: string;
+  };
+
+  const res = await llm.json<RuleGenResult>({
+    taskType:      "rule_generation",
+    systemContext: "You are a trading performance analyst. Generate evidence-based rules from trade data. Reply JSON only.",
+    prompt,
+    schema: { type: "object", properties: { rules: { type: "array" }, patternsFound: { type: "string" } }, required: ["rules"] },
+    fallback: { rules: [], patternsFound: "" },
+  });
+
+  let generated = 0;
+  for (const rule of res.data.rules) {
+    if (rule.occurrences < 3) {
+      console.log(`[rules] Rule ${rule.ruleNumber} insufficient evidence (${rule.occurrences}<3) — skipped`);
+      continue;
+    }
+    if (rule.contradictsFundamentals) {
+      console.log(`[rules] Rule ${rule.ruleNumber} flags fundamentals contradiction: ${rule.flagNote ?? "unspecified"}`);
+    }
+    await db.insert(tradingRulesTable)
+      .values({
+        ruleNumber:      rule.ruleNumber,
+        ruleText:        rule.ruleText,
+        evidence:        rule.evidence,
+        causalLogic:     rule.causalLogic,
+        confidence:      rule.confidence,
+        occurrences:     rule.occurrences,
+        winsFollowing:   0,
+        lossesFollowing: 0,
+        active:          true,
+        createdAt:       new Date(),
+        updatedAt:       new Date(),
+      })
+      .onConflictDoUpdate({
+        target: tradingRulesTable.ruleNumber,
+        set: {
+          ruleText:    rule.ruleText,
+          evidence:    rule.evidence,
+          causalLogic: rule.causalLogic,
+          confidence:  rule.confidence,
+          occurrences: rule.occurrences,
+          active:      true,
+          updatedAt:   new Date(),
+        },
+      })
+      .catch(e => console.error(`[rules] Upsert rule ${rule.ruleNumber}:`, e));
+    generated++;
+    console.log(`[rules] Rule ${rule.ruleNumber} [${rule.confidence}]: ${rule.ruleText.slice(0, 80)}`);
+  }
+
+  console.log(`[rules] Generated/updated ${generated} rules from ${reflections.length} reflections`);
+  await _ruleAlertFn?.(
+    `🧠 <b>Trading rules updated (${generated} rules)</b>\nBased on ${reflections.length} trade reflections\nUse /rules to see current rules`
+  ).catch(() => {});
+}
+
+async function checkAndGenerateRules(): Promise<void> {
+  try {
+    await generateTradingRules();
+  } catch (e) {
+    console.error("[rules] checkAndGenerateRules:", e);
+  }
+}
+
 // ─── Recent memory for scan prompt ───────────────────────────────────────────
 
 export async function getRecentMemory(limit = 15): Promise<string> {
@@ -405,6 +620,55 @@ export async function getRecentMemory(limit = 15): Promise<string> {
     if (topMistakes) lines.push(`Top mistakes: ${topMistakes}`);
     lines.push(`\nAPPLY THESE LESSONS NOW. Do not repeat identified mistakes.`);
   }
+
+  // ── Version B successful entries ──
+  try {
+    const vbWins = await db.select({
+      symbol:          paperTradesTable.symbol,
+      direction:       paperTradesTable.direction,
+      entryPrice:      paperTradesTable.entryPrice,
+      signalTime:      paperTradesTable.signalTime,
+      wouldHavePnlPct: paperTradesTable.wouldHavePnlPct,
+      tp1:             paperTradesTable.tp1,
+      stopLoss:        paperTradesTable.stopLoss,
+      whyNow:          paperTradesTable.whyNow,
+    }).from(paperTradesTable)
+      .where(and(
+        inArray(paperTradesTable.status, ["tp1_hit", "tp2_hit"]),
+        gt(paperTradesTable.wouldHavePnlPct, 2),
+      ))
+      .orderBy(desc(paperTradesTable.signalTime))
+      .limit(5);
+
+    if (vbWins.length) {
+      lines.push(`\n═══ VERSION B SUCCESSFUL ENTRIES (learn from these) ═══`);
+      for (const w of vbWins) {
+        const pct = w.wouldHavePnlPct ?? 0;
+        lines.push(`${w.symbol} ${w.direction} entry $${w.entryPrice.toFixed(4)} → +${pct.toFixed(2)}% (TP hit)`);
+        if (w.whyNow) lines.push(`  What worked: ${w.whyNow}`);
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  // ── Active trading rules ──
+  try {
+    const rules = await getActiveRules();
+    if (rules.length) {
+      lines.push(`\n═══ ACTIVE TRADING RULES ═══`);
+      lines.push(`(Generated from trade reflections — these are SOFT rules, you may override with stated reason)`);
+      for (const rule of rules) {
+        const winRate = (rule.winsFollowing + rule.lossesFollowing) > 0
+          ? Math.round(rule.winsFollowing / (rule.winsFollowing + rule.lossesFollowing) * 100) : null;
+        const track = winRate !== null
+          ? `Track record: ${rule.winsFollowing}W/${rule.lossesFollowing}L (${winRate}%)`
+          : "Track record: no data yet";
+        lines.push(`Rule ${rule.ruleNumber} [${rule.confidence}]: ${rule.ruleText}`);
+        if (rule.evidence) lines.push(`  Evidence: ${rule.evidence}`);
+        if (rule.causalLogic) lines.push(`  Logic: ${rule.causalLogic}`);
+        lines.push(`  ${track}`);
+      }
+    }
+  } catch { /* non-fatal */ }
 
   return lines.join("\n");
 }
@@ -687,4 +951,9 @@ export async function closeOpenTrade(params: {
     tp1:       openTrade.tp1,
     tp2:       openTrade.tp2,
   }).catch(e => console.error("[tradeMemory] reflection failed:", e));
+
+  // Rule tracking — update rule win/loss stats + resolve pending overrides
+  updateRuleStatsForTrade(pnlPct > 0).catch(() => {});
+  updatePendingOverrides(params.symbol, pnlPct).catch(() => {});
+  checkAndGenerateRules().catch(() => {});
 }

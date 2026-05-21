@@ -3,7 +3,7 @@ import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
 import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, type BybitKline, type BybitPosition } from "../brokers/bybit";
-import { getRecentMemory, getPerformanceSummary } from "./tradeMemoryLib";
+import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
 import { db, profileTable }                  from "@workspace/db";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
@@ -413,12 +413,13 @@ export async function runScan(): Promise<ScanResult> {
     // ── Phase 0: Regime + basic data ─────────────────────────────────────────
     const regime = await detectMarketRegime();
 
-    const [watchlist, profile, bybitPositions, tradeMemory, perfSummary] = await Promise.all([
+    const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules] = await Promise.all([
       getWatchlist(),
       db.select().from(profileTable).limit(1).then(r => r[0]),
       bybitGetPositions().catch(() => [] as BybitPosition[]),
       getRecentMemory(20).catch(() => ""),
       getPerformanceSummary().catch(() => ""),
+      getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>),
     ]);
 
     const classMap  = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
@@ -576,7 +577,7 @@ export async function runScan(): Promise<ScanResult> {
       riskDirective,
       regimeScoring,
       scoringWeights,
-      `ATR targets: TP1=entry±ATR, TP2=entry±2ATR, SL=entry±1.5ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
+      `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must be 1-3× 4h ATR. If structural level >3× ATR = too far, use next closest level. If <1× ATR = too tight, use level beyond it. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed by ATR range. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
       `Orders: LIMIT(GTC) mid-range at nearest S/R; MARKET(IOC) only on confirmed volume breakout. Max position: $${maxPosition.toFixed(0)}.`,
       `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
       `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
@@ -604,6 +605,16 @@ export async function runScan(): Promise<ScanResult> {
       ``,
       tradeMemory ? `Trade memory (last reflections):\n${tradeMemory}` : "",
       perfSummary ? `\n${perfSummary}` : "",
+      activeRules.length ? [
+        `\n═══ ACTIVE TRADING RULES ═══`,
+        `(Generated from trade reflections — SOFT rules: state which rule you override and why)`,
+        ...activeRules.map(r => {
+          const tot = r.winsFollowing + r.lossesFollowing;
+          const wr  = tot > 0 ? `${Math.round(r.winsFollowing / tot * 100)}%` : "no data";
+          return `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}\n  Logic: ${r.causalLogic ?? "see evidence"} | Track record: ${r.winsFollowing}W/${r.lossesFollowing}L (${wr})`;
+        }),
+        `If overriding a rule, include "ruleOverridden": <number>, "overrideReason": "<specific reason>" in your response.`,
+      ].join("\n") : "",
     ].filter(Boolean).join("\n");
 
     const res = await llm.json<ScanResult>({

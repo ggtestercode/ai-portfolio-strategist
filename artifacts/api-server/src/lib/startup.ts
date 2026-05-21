@@ -58,7 +58,7 @@ async function applyAtrSlTp(
   positionIdx: number,
   originalQty: number,
 ): Promise<void> {
-  const klines = await getKlines(symbol, "60", 50).catch(() => [] as BybitKline[]);
+  const klines = await getKlines(symbol, "240", 28).catch(() => [] as BybitKline[]);
   const atr    = calcATR(klines, 14);
 
   if (atr === 0) {
@@ -304,7 +304,7 @@ async function setSlTpForExistingPositions(): Promise<void> {
     }
 
     const direction = pos.side === "Buy" ? "long" : "short" as "long" | "short";
-    const klines    = await getKlines(pos.symbol, "60", 50).catch(() => [] as BybitKline[]);
+    const klines    = await getKlines(pos.symbol, "240", 28).catch(() => [] as BybitKline[]);
     const atr       = calcATR(klines, 14);
 
     if (atr === 0) {

@@ -5,7 +5,7 @@ import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
-import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose } from "./tradeMemoryLib";
+import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose, getActiveRules } from "./tradeMemoryLib";
 import { llm }                         from "./llmRouter";
 import {
   getPositions    as bybitGetPositions,
@@ -22,7 +22,7 @@ import {
   type BybitPosition,
   type BybitKline,
 } from "../brokers/bybit";
-import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, type PositionMeta, type PositionMonitorState } from "@workspace/db";
+import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, tradingRulesTable, ruleOverridesTable, type PositionMeta, type PositionMonitorState } from "@workspace/db";
 import { eq, and, desc, isNull } from "drizzle-orm";
 
 // ── Technical helpers ─────────────────────────────────────────────────────────
@@ -708,9 +708,11 @@ async function wasAlreadyScaled(symbol: string): Promise<boolean> {
 // ── Position review (HOLD / ADD / CUT existing positions) ────────────────────
 
 interface PositionDecision {
-  symbol: string;
-  action: "HOLD" | "ADD" | "CUT";
-  reason: string;
+  symbol:         string;
+  action:         "HOLD" | "ADD" | "CUT";
+  reason:         string;
+  ruleOverridden?: number;
+  overrideReason?: string;
 }
 
 function bybitSym(sym: string): string {
@@ -724,6 +726,7 @@ async function makePositionReview(
   bybitBalance:  number,
 ): Promise<{ positions: PositionDecision[] }> {
   if (!livePositions.length) return { positions: [] };
+  const activeRules = await getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>);
 
   const signalContext = opps.slice(0, 5)
     .map(s => {
@@ -792,6 +795,15 @@ async function makePositionReview(
     ? `ADD rule: balance $${bybitBalance.toFixed(2)} < $200 — NEVER ADD to existing positions. Return HOLD instead of ADD always. Single-entry precision only.`
     : `ADD rule: balance $${bybitBalance.toFixed(2)} >= $200 — ADD only on strongest conviction (+3% P/L) with clear trend continuation, not already scaled.`;
 
+  const rulesSection = activeRules.length
+    ? [
+        "",
+        "═══ ACTIVE TRADING RULES ═══",
+        ...activeRules.map(r => `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}`),
+        "These are SOFT rules. If overriding one, include ruleOverridden (number) and overrideReason in your JSON response.",
+      ].join("\n")
+    : "";
+
   const systemContext = [
     "You are a disciplined quant managing a Bybit live futures account. Respond JSON only.",
     "",
@@ -802,7 +814,8 @@ async function makePositionReview(
     "NEVER apply long logic to short positions or vice versa.",
     "",
     addRule,
-    "CUT if P/L < -8% OR opposite-direction reversal confirmed. HOLD otherwise.",
+    "CUT is only justified if: (1) loss exceeds -8%, OR (2) opposing signal scores >=80, OR (3) price breaks key support/resistance with volume >3× average (structural break). Minor adverse moves (-0.2% to -2%) with no structural break = HOLD. Let SL do its job.",
+    rulesSection,
   ].join("\n");
 
   const prompt = [
@@ -824,9 +837,11 @@ async function makePositionReview(
           items: {
             type: "object", required: ["symbol", "action", "reason"],
             properties: {
-              symbol: { type: "string" },
-              action: { type: "string", enum: ["HOLD", "ADD", "CUT"] },
-              reason: { type: "string" },
+              symbol:         { type: "string" },
+              action:         { type: "string", enum: ["HOLD", "ADD", "CUT"] },
+              reason:         { type: "string" },
+              ruleOverridden: { type: "number" },
+              overrideReason: { type: "string" },
             },
           },
         },
@@ -853,6 +868,26 @@ async function handlePositionDecision(
   if (!pos) {
     console.log(`[cronScanner] ${sym} position not found for action ${decision.action}`);
     return;
+  }
+
+  // Store rule override if Claude reported one
+  if (decision.ruleOverridden) {
+    const [rule] = await db.select({ id: tradingRulesTable.id, confidence: tradingRulesTable.confidence })
+      .from(tradingRulesTable)
+      .where(and(eq(tradingRulesTable.ruleNumber, decision.ruleOverridden), eq(tradingRulesTable.active, true)))
+      .limit(1)
+      .catch(() => []);
+    if (rule) {
+      await db.insert(ruleOverridesTable).values({
+        ruleId:           rule.id,
+        symbol:           sym,
+        direction:        pos.side === "Buy" ? "long" : "short",
+        overrideReason:   decision.overrideReason ?? decision.reason,
+        tradeResult:      "pending",
+        confidenceBefore: rule.confidence,
+      }).catch(() => {});
+      console.log(`[cronScanner] Rule ${decision.ruleOverridden} overridden on ${sym}: ${(decision.overrideReason ?? decision.reason).slice(0, 80)}`);
+    }
   }
 
   if (decision.action === "HOLD") {
@@ -1433,14 +1468,16 @@ async function checkPositionMonitor(): Promise<void> {
                       4  * 3_600_000;
 
     // Fetch fresh data for trigger checks
-    const [frRes, klRes, oiRes] = await Promise.allSettled([
+    const [frRes, klRes, oiRes, kl4hRes] = await Promise.allSettled([
       getFundingRate(pos.symbol),
       getKlines(pos.symbol, "60", 25),
       getOpenInterest(pos.symbol),
+      getKlines(pos.symbol, "240", 28),
     ]);
-    const fr     = frRes.status === "fulfilled" ? frRes.value  : null;
-    const klines = klRes.status === "fulfilled"  ? (klRes.value as BybitKline[]) : [] as BybitKline[];
-    const oiVal  = oiRes.status === "fulfilled"  ? (oiRes.value as number)       : null;
+    const fr       = frRes.status   === "fulfilled" ? frRes.value  : null;
+    const klines   = klRes.status   === "fulfilled" ? (klRes.value   as BybitKline[]) : [] as BybitKline[];
+    const oiVal    = oiRes.status   === "fulfilled" ? (oiRes.value   as number)       : null;
+    const klines4h = kl4hRes.status === "fulfilled" ? (kl4hRes.value as BybitKline[]) : [] as BybitKline[];
 
     let trigger: string | null = null;
 
@@ -1488,9 +1525,9 @@ async function checkPositionMonitor(): Promise<void> {
     // ── Trailing SL (runs every tick) ────────────────────────────────────────
     const meta     = posMeta[pos.symbol];
     const isLong   = pos.side === "Buy";
-    const atr      = klines.length >= 15 ? calcATR(klines, 14) : 0;
+    const atr      = klines4h.length >= 15 ? calcATR(klines4h, 14) : (klines.length >= 15 ? calcATR(klines, 14) : 0);
     if (atr > 0 && pnlPct >= 3) {
-      const trailDist   = atr * 0.5;
+      const trailDist   = atr * 1.0;
       // Derive live price from unrealized pnl to avoid an extra API call
       const livePrice   = pos.size > 0
         ? pos.entryPrice + (isLong ? 1 : -1) * (pos.pnl / pos.size)
@@ -1515,7 +1552,7 @@ async function checkPositionMonitor(): Promise<void> {
           await patchPositionMeta(pos.symbol, { sl: newSL, trailingActive: true, lastTrailPrice: livePrice });
           await alertFn?.([
             `🔄 <b>Trailing SL activated — ${pos.symbol}</b>`,
-            `SL moved to $${newSL.toFixed(4)} (ATR×0.5 trail)`,
+            `SL moved to $${newSL.toFixed(4)} (ATR×1.0 trail, 4h)`,
             `Current profit locked: +${pnlPct.toFixed(2)}%`,
           ].join("\n")).catch(() => {});
           console.log(`[posMonitor] ${pos.symbol} trailing SL activated: $${newSL.toFixed(4)} live=$${livePrice.toFixed(4)} ATR=$${atr.toFixed(4)}`);

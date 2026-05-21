@@ -53,7 +53,7 @@ import {
   registerLeverageAlert,
 } from "../lib/leverageManager";
 import { startWatchdog, registerWatchdogAlert } from "../lib/watchdog";
-import { getRecentTrades, getOpenTrades, getRecentMemory, getDailyPnl } from "../lib/tradeMemoryLib";
+import { getRecentTrades, getOpenTrades, getRecentMemory, getDailyPnl, getActiveRules, generateTradingRules, registerRuleAlertFn } from "../lib/tradeMemoryLib";
 import {
   db,
   profileTable,
@@ -254,6 +254,7 @@ export function startPolling(): void {
   registerAlertNotifier(alertHandler);
   registerLeverageAlert(alertHandler);
   registerWatchdogAlert(alertHandler);
+  registerRuleAlertFn(alertHandler);
   startWatchdog();
 
   registerReviewNotifier(async (symbol, decision, reason, pnlPctStr, reviewId) => {
@@ -1436,6 +1437,78 @@ export function startPolling(): void {
       ].filter(Boolean).join("\n");
 
       await b.sendMessage(chatId, lines, { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /rules — show active trading rules ──────────────────────────────────
+  b.onText(/^\/rules(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const rules = await getActiveRules();
+      if (!rules.length) {
+        await b.sendMessage(chatId, [
+          `🧠 <b>Active Trading Rules</b>`,
+          ``,
+          `No rules generated yet.`,
+          `Rules auto-generate after every 20 closed trades.`,
+          ``,
+          `<i>Use /forceRules to generate now (if 10+ reflections exist)</i>`,
+        ].join("\n"), { parse_mode: "HTML" });
+        return;
+      }
+
+      const totalFollowed = rules.reduce((s, r) => s + r.winsFollowing + r.lossesFollowing, 0);
+      const totalWins     = rules.reduce((s, r) => s + r.winsFollowing, 0);
+      const followWinRate = totalFollowed > 0 ? Math.round(totalWins / totalFollowed * 100) : null;
+
+      const ruleBlocks = rules.map(r => {
+        const tot = r.winsFollowing + r.lossesFollowing;
+        const wr  = tot > 0 ? `${Math.round(r.winsFollowing / tot * 100)}%` : "no data";
+        const confEmoji = r.confidence === "HIGH" ? "✅" : r.confidence === "MEDIUM" ? "⚠️" : "🔵";
+        return [
+          `<b>Rule ${r.ruleNumber} [${r.confidence}]</b> ${confEmoji}`,
+          escapeHtml(r.ruleText),
+          r.evidence   ? `Evidence: ${escapeHtml(r.evidence)}`   : "",
+          r.causalLogic ? `Logic: ${escapeHtml(r.causalLogic)}` : "",
+          `Track record: ${r.winsFollowing}W/${r.lossesFollowing}L when followed (${wr} win rate)`,
+        ].filter(Boolean).join("\n");
+      }).join("\n\n");
+
+      const lines = [
+        `🧠 <b>Active Trading Rules</b>`,
+        `Generated from trade reflections | ${rules.length} active rules`,
+        ``,
+        ruleBlocks,
+        ``,
+        `📊 <b>Overall Rule Performance:</b>`,
+        followWinRate !== null
+          ? `Trades while rules active: ${totalFollowed} | Win rate: ${followWinRate}%`
+          : `No trade data yet`,
+        ``,
+        `<i>Rules update every 20 closed trades</i>`,
+      ].join("\n");
+
+      await b.sendMessage(chatId, lines, { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /forceRules — manually trigger rule generation ───────────────────────
+  b.onText(/^\/forceRules(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      await b.sendMessage(chatId, `⏳ Generating rules from reflections…`);
+      await generateTradingRules();
+      const rules = await getActiveRules();
+      await b.sendMessage(chatId, rules.length
+        ? `✅ Rule generation complete — ${rules.length} rules active. Use /rules to view.`
+        : `ℹ️ No rules generated (insufficient evidence — need 3+ occurrences per rule).`
+      );
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
