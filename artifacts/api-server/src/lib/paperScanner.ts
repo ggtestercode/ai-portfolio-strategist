@@ -56,7 +56,18 @@ async function addPaperCosts(fees: number, funding: number, slippage: number): P
     .catch(e => console.warn("[paperScanner] cost tracking failed:", e.message));
 }
 
-let lastPaperFundingAt = 0;  // epoch ms — reset on process restart
+let lastPaperFundingAt    = 0;  // epoch ms — reset on process restart
+let _paperAlertFn: ((msg: string) => Promise<void>) | null = null;
+let _lastDbWriteAlertAt   = 0;
+
+function dbWriteAlert(context: string, err: unknown): void {
+  const now = Date.now();
+  if (now - _lastDbWriteAlertAt < 10 * 60_000) return;  // 10-min cooldown
+  _lastDbWriteAlertAt = now;
+  const msg = err instanceof Error ? err.message : String(err);
+  void _paperAlertFn?.(`🚨 DB write failed — check Neon limits\n<b>${context}</b>\n${msg.slice(0, 150)}`).catch(() => {});
+}
+
 import cron from "node-cron";
 
 // ── Market data helpers (mirror of marketScanner internals) ──────────────────
@@ -322,7 +333,7 @@ export async function runPaperScan(): Promise<void> {
               exitTime:        new Date(),
               exitReason:      "claude_close",
             }).where(eq(paperTradesTable.id, trade.id))
-              .catch(e => console.warn(`[paperScanner] CLOSE ${trade.symbol}:`, e.message));
+              .catch(e => { console.warn(`[paperScanner] CLOSE ${trade.symbol}:`, e.message); dbWriteAlert(`CLOSE ${trade.symbol}`, e); });
             balanceFromClosures += margin + pnlUsd - closeFee;
             totalFeesThisScan   += closeFee;
             console.log(`[paperTrade] Version B CLOSE ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}% returned=$${(margin + pnlUsd - closeFee).toFixed(2)} | ${rv.reasoning.slice(0, 80)}`);
@@ -337,7 +348,7 @@ export async function runPaperScan(): Promise<void> {
               marginUsed: margin - closedMgn,
               exitReason: "claude_partial",
             }).where(eq(paperTradesTable.id, trade.id))
-              .catch(e => console.warn(`[paperScanner] PARTIAL_CLOSE ${trade.symbol}:`, e.message));
+              .catch(e => { console.warn(`[paperScanner] PARTIAL_CLOSE ${trade.symbol}:`, e.message); dbWriteAlert(`PARTIAL_CLOSE ${trade.symbol}`, e); });
             balanceFromClosures += closedMgn + closedPnl - closeFee;
             totalFeesThisScan   += closeFee;
             console.log(`[paperTrade] Version B PARTIAL_CLOSE ${trade.symbol} ${(pct * 100).toFixed(0)}% pnl=${pnlPct.toFixed(2)}% returned=$${(closedMgn + closedPnl - closeFee).toFixed(2)}`);
@@ -449,7 +460,7 @@ export async function runPaperScan(): Promise<void> {
         status:     "open",
         version:    "B",
         marginUsed: tradeMargin,
-      }).catch(e => console.warn(`[paperScanner] DB insert ${entry.symbol}:`, e.message));
+      }).catch(e => { console.warn(`[paperScanner] DB insert ${entry.symbol}:`, e.message); dbWriteAlert(`insert ${entry.symbol}`, e); });
 
       console.log(
         `[paperTrade] Version B would enter: ${entry.symbol} ${entry.direction} ` +
@@ -469,7 +480,7 @@ export async function runPaperScan(): Promise<void> {
         ...(totalSlippageThisScan > 0 ? { paperTotalSlippage: sql`paper_total_slippage + ${totalSlippageThisScan}` } : {}),
         lastUpdated: new Date(),
       }).where(eq(botStateTable.id, 1))
-        .catch(e => console.warn("[paperScanner] balance update:", e.message));
+        .catch(e => { console.warn("[paperScanner] balance update:", e.message); dbWriteAlert("balance update", e); });
     }
 
     console.log(`[paperScanner] Version B complete — ${logged} new entries, balance=$${finalBalance.toFixed(2)}, freed=$${balanceFromClosures.toFixed(2)} (${res.data.opportunities.length} scan signals)`);
@@ -594,7 +605,7 @@ export async function updatePaperTradesPnl(): Promise<void> {
         ...(totalFundingCost > 0 ? { paperTotalFunding: sql`paper_total_funding + ${totalFundingCost}` } : {}),
         lastUpdated: new Date(),
       }).where(eq(botStateTable.id, 1))
-        .catch(e => console.warn("[paperScanner] balance return:", e.message));
+        .catch(e => { console.warn("[paperScanner] balance return:", e.message); dbWriteAlert("monitor balance return", e); });
     }
   } catch (err) {
     console.error("[paperScanner] P/L update failed:", err);
@@ -719,6 +730,7 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
 // Runs regardless of whether the main scan succeeds
 
 export function startPaperMonitorCron(alertFn?: (msg: string) => Promise<void>): void {
+  if (alertFn) _paperAlertFn = alertFn;  // store for DB write failure alerts
   // every 5 minutes
   cron.schedule("*/5 * * * *", () => {
     void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));

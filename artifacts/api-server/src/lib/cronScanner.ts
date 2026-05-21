@@ -2044,7 +2044,21 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
   }, MONITOR_INTERVAL_MS);
   if (alertFn) startWeeklyAbReportCron(alertFn);
   startPaperMonitorCron(alertFn);
+
+  // 9am SGT (= 1am UTC) daily Neon DB health check
+  cron.schedule("0 1 * * *", async () => {
+    try {
+      await db.select({ id: botStateTable.id }).from(botStateTable).limit(1);
+      await alertFn?.("✅ DB healthy — Neon connection OK").catch(() => {});
+      console.log("[dbHealth] Daily check: OK");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await alertFn?.(`⚠️ DB connection failed — check Neon limits\n${msg.slice(0, 200)}`).catch(() => {});
+      console.error("[dbHealth] Daily check FAILED:", e);
+    }
+  });
   console.log("[posMonitor] Started — checks every 5 min");
+  console.log("[dbHealth] Daily 9am SGT Neon health check scheduled");
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
