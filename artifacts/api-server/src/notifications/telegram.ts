@@ -124,9 +124,15 @@ async function buildContext(): Promise<AssistantContext> {
   });
 }
 
+const TELEGRAM_CHAR_LIMIT = 4096;
+
 async function send(text: string, opts?: TelegramBot.SendMessageOptions): Promise<void> {
   const chatId = process.env["TELEGRAM_CHAT_ID"];
   if (!chatId) throw new Error("TELEGRAM_CHAT_ID env var is required");
+  if (text.length > TELEGRAM_CHAR_LIMIT) {
+    const cut = text.lastIndexOf("\n", TELEGRAM_CHAR_LIMIT - 120);
+    text = text.slice(0, cut > 0 ? cut : TELEGRAM_CHAR_LIMIT - 120) + "\n\n<i>…truncated</i>";
+  }
   await getBot().sendMessage(chatId, text, opts);
 }
 
