@@ -1522,9 +1522,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, maxPositions, filteredSignals.length, result.opportunities);
     await alertFn?.(summary).catch(() => {});
 
-    // Extract Watch list coins and start 30-min rescan
+    // Merge new near-threshold coins into the watch list (don't overwrite existing watches)
     const watchThreshLow = execThreshold - 10;
-    const watchCoins: WatchCoin[] = cryptoOpps
+    const newWatchCoins: WatchCoin[] = cryptoOpps
       .filter(o => {
         const s = o.score ?? 0;
         const dir = o.direction ?? "neutral";
@@ -1541,19 +1541,39 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         addedAt:   new Date().toISOString(),
       }));
 
-    await saveBotState({ watchList: watchCoins, watchListUpdatedAt: new Date() }).catch(() => {});
+    // Load existing watch list and merge: update score for existing coins, add new ones.
+    // Remove any coin that is now in position (existingSyms) or scored in this scan below 55.
+    const prevWatch = (await loadBotState().catch(() => null))?.watchList ?? [] as WatchCoin[];
+    const scanScores = new Map(cryptoOpps.map(o => [bybitSym(o.symbol), o.score ?? 0]));
+    const mergedWatch: WatchCoin[] = [
+      // Keep previous watches not in this scan OR still near-threshold in this scan
+      ...prevWatch.filter(w => {
+        if (existingSyms.has(w.symbol)) return false; // now in position
+        const freshScore = scanScores.get(w.symbol);
+        if (freshScore !== undefined && freshScore < 55) return false; // setup invalidated
+        return true; // keep watching (not in this scan's top-10, or still ok)
+      }).map(w => {
+        const freshScore = scanScores.get(w.symbol);
+        return freshScore !== undefined ? { ...w, score: freshScore } : w; // update score if rescanned
+      }),
+      // Add newly near-threshold coins not already in the list
+      ...newWatchCoins.filter(nw => !prevWatch.some(pw => pw.symbol === nw.symbol)),
+    ];
 
-    if (watchCoins.length) {
-      console.log(`[watchScan] ${watchCoins.length} coins added to watch list: ${watchCoins.map(w => w.symbol).join(", ")}`);
+    await saveBotState({ watchList: mergedWatch, watchListUpdatedAt: new Date() }).catch(() => {});
+
+    const addedSyms = newWatchCoins.filter(nw => !prevWatch.some(pw => pw.symbol === nw.symbol));
+    if (addedSyms.length) {
+      console.log(`[watchScan] ${addedSyms.length} coins added to watch list: ${addedSyms.map(w => w.symbol).join(", ")}`);
+    }
+    if (mergedWatch.length) {
       const watchMsg = [
-        `👀 <b>Watch list active (${watchCoins.length} coins):</b>`,
-        ...watchCoins.map(w => `  • ${w.symbol} ${w.direction.toUpperCase()} — score ${w.score} (need ${execThreshold})`),
+        `👀 <b>Watch list (${mergedWatch.length} coins):</b>`,
+        ...mergedWatch.map(w => `  • ${w.symbol} ${w.direction.toUpperCase()} — score ${w.score} (need ${execThreshold})`),
         `Rescanning every 30 min...`,
       ].join("\n");
       await alertFn?.(watchMsg).catch(() => {});
       startWatchScan();
-    } else {
-      await saveBotState({ watchList: [] }).catch(() => {});
     }
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);
