@@ -199,41 +199,195 @@ export async function runPaperScan(): Promise<void> {
       return;
     }
 
-    // ── Log non-neutral signals to paper_trades (never execute) ─────────────
-    let logged = 0;
-
-    // Deduct margin already locked in open paper trades before accepting new ones
-    const openPaperTrades = await db.select({ id: paperTradesTable.id })
+    // ── Fetch open trades for position review ─────────────────────────────────
+    const openTrades = await db.select()
       .from(paperTradesTable)
       .where(eq(paperTradesTable.status, "open"))
-      .catch(() => [] as Array<{ id: string }>);
-    const marginInUse   = openPaperTrades.length * Math.max(5, paperBalance * 0.05);
-    const availableBalance = paperBalance - marginInUse;
+      .catch(() => [] as typeof paperTradesTable.$inferSelect[]);
+
+    // ── Position review (only when there are open positions) ──────────────────
+    interface PortfolioReview {
+      positionReviews: Array<{ symbol: string; decision: "HOLD" | "PARTIAL_CLOSE" | "CLOSE"; closePercent: number; reasoning: string }>;
+      newEntries:      Array<{ symbol: string; direction: string; reasoning: string }>;
+      portfolioReasoning: string;
+    }
+    const emptyReview: PortfolioReview = { positionReviews: [], newEntries: [], portfolioReasoning: "" };
+    let portfolioDecision  = emptyReview;
+    let balanceFromClosures = 0;
+
+    if (openTrades.length > 0) {
+      // Fetch live prices for open positions
+      const openSymbols = [...new Set(openTrades.map(t => `${t.symbol}USDT`.replace(/USDTUSDT$/, "USDT")))];
+      const livePrice   = new Map<string, number>();
+      await Promise.allSettled(openSymbols.map(async sym => {
+        const p = await getTicker(sym).then(t => t.lastPrice).catch(() => 0);
+        if (p > 0) livePrice.set(sym, p);
+      }));
+
+      // Build position context
+      const posLines = openTrades.map(t => {
+        const sym    = `${t.symbol}USDT`.replace(/USDTUSDT$/, "USDT");
+        const cur    = livePrice.get(sym) ?? t.entryPrice;
+        const isLong = t.direction === "long";
+        const pnlPct = isLong
+          ? (cur - t.entryPrice) / t.entryPrice * 100
+          : (t.entryPrice - cur) / t.entryPrice * 100;
+        const ageH   = (Date.now() - new Date(t.signalTime as unknown as string).getTime()) / 3_600_000;
+        const tp1Dist = t.tp1
+          ? `${((isLong ? t.tp1 - cur : cur - t.tp1) / cur * 100).toFixed(1)}% to TP1`
+          : "no TP1";
+        return `${t.symbol} ${t.direction.toUpperCase()} entry=${t.entryPrice} now=${cur.toFixed(4)} pnl=${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% age=${ageH.toFixed(1)}h margin=${(t.marginUsed ?? 5).toFixed(2)} SL=${t.stopLoss ?? "—"} TP1=${t.tp1 ?? "—"}(${tp1Dist}) TP2=${t.tp2 ?? "—"} | ${t.whyNow ?? "no thesis"}`;
+      }).join("\n");
+
+      // New signals summary (give Claude the technical context)
+      const newSigLines = (res.data.opportunities as ScanOpportunity[])
+        .filter(o => o.direction && o.direction !== "neutral")
+        .map(o => `${o.symbol} ${o.direction} score=${o.score ?? "?"} setup=${o.setupType ?? "?"} rr=${o.riskRewardRatio?.toFixed(1) ?? "?"} entry=${o.entry ?? "?"} sl=${o.stopLoss ?? "?"} tp1=${o.tp1 ?? "?"}`)
+        .join("\n") || "none";
+
+      const reviewRes = await llm.json<PortfolioReview>({
+        taskType: "position_review",
+        systemContext: [
+          "You are Version B paper trading bot — portfolio manager role. Respond with ONLY valid JSON.",
+          "Review each open position: HOLD / PARTIAL_CLOSE / CLOSE.",
+          "CLOSE when: thesis broken, price near SL with no recovery, or held >36h flat.",
+          "PARTIAL_CLOSE (closePercent=50) when: partial profit makes sense, keep core exposure.",
+          "HOLD when: thesis intact, within expected range, let it run.",
+          "newEntries: from the new scan signals, list any you want opened. Empty list is fine.",
+          `Capital: paper balance $${paperBalance.toFixed(2)} | Each new entry uses 5% of balance.`,
+          "JSON RULES: no double-quotes inside strings, no backslash, no newlines inside strings.",
+        ].join("\n"),
+        prompt: [
+          `=== OPEN POSITIONS (${openTrades.length}) ===`,
+          posLines,
+          ``,
+          `=== NEW SCAN SIGNALS ===`,
+          newSigLines,
+          ``,
+          `Regime: ${regime.regime} | UTC: ${new Date().toISOString()}`,
+        ].join("\n"),
+        schema: {
+          type: "object",
+          properties: {
+            positionReviews:    { type: "array" },
+            newEntries:         { type: "array" },
+            portfolioReasoning: { type: "string" },
+          },
+          required: ["positionReviews", "newEntries", "portfolioReasoning"],
+        },
+        fallback: emptyReview,
+      });
+
+      if (reviewRes.parseSuccess) {
+        portfolioDecision = reviewRes.data;
+
+        // Execute CLOSE / PARTIAL_CLOSE decisions
+        for (const rv of portfolioDecision.positionReviews) {
+          const trade = openTrades.find(t =>
+            t.symbol === rv.symbol || t.symbol === rv.symbol.replace(/USDT$/, "")
+          );
+          if (!trade) continue;
+
+          const sym    = `${trade.symbol}USDT`.replace(/USDTUSDT$/, "USDT");
+          const cur    = livePrice.get(sym) ?? trade.entryPrice;
+          const isLong = trade.direction === "long";
+          const pnlPct = isLong
+            ? (cur - trade.entryPrice) / trade.entryPrice * 100
+            : (trade.entryPrice - cur) / trade.entryPrice * 100;
+          const margin = trade.marginUsed ?? 5;
+          const pnlUsd = margin * 10 * (pnlPct / 100);
+
+          if (rv.decision === "CLOSE") {
+            await db.update(paperTradesTable).set({
+              status:          "closed",
+              exitPrice:       cur,
+              wouldHavePnl:    pnlUsd,
+              wouldHavePnlPct: pnlPct,
+              exitTime:        new Date(),
+              exitReason:      "claude_close",
+            }).where(eq(paperTradesTable.id, trade.id))
+              .catch(e => console.warn(`[paperScanner] CLOSE ${trade.symbol}:`, e.message));
+            balanceFromClosures += margin + pnlUsd;
+            console.log(`[paperTrade] Version B CLOSE ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}% returned=$${(margin + pnlUsd).toFixed(2)} | ${rv.reasoning.slice(0, 80)}`);
+
+          } else if (rv.decision === "PARTIAL_CLOSE") {
+            const pct       = Math.min(Math.max((rv.closePercent ?? 50) / 100, 0.1), 0.9);
+            const closedMgn = margin * pct;
+            const closedPnl = closedMgn * 10 * (pnlPct / 100);
+            await db.update(paperTradesTable).set({
+              marginUsed: margin - closedMgn,
+              exitReason: "claude_partial",
+            }).where(eq(paperTradesTable.id, trade.id))
+              .catch(e => console.warn(`[paperScanner] PARTIAL_CLOSE ${trade.symbol}:`, e.message));
+            balanceFromClosures += closedMgn + closedPnl;
+            console.log(`[paperTrade] Version B PARTIAL_CLOSE ${trade.symbol} ${(pct * 100).toFixed(0)}% pnl=${pnlPct.toFixed(2)}% returned=$${(closedMgn + closedPnl).toFixed(2)}`);
+          }
+          // HOLD: no action
+        }
+
+        console.log(`[paperScanner] Portfolio review: ${portfolioDecision.positionReviews.length} decisions, $${balanceFromClosures.toFixed(2)} freed | ${portfolioDecision.portfolioReasoning.slice(0, 150)}`);
+      }
+    }
+
+    // ── Open new entries ───────────────────────────────────────────────────────
+    let logged = 0;
+
+    // Recalculate open count after CLOSE decisions (PARTIAL_CLOSE stays open)
+    const closedByReview = new Set(
+      portfolioDecision.positionReviews
+        .filter(rv => rv.decision === "CLOSE")
+        .map(rv => rv.symbol)
+    );
+    const stillOpenCount = openTrades.filter(t =>
+      !closedByReview.has(t.symbol) && !closedByReview.has(t.symbol.replace(/USDT$/, ""))
+    ).length;
+
+    const effectivePaperBalance = paperBalance + balanceFromClosures;
+    const marginInUse           = stillOpenCount * Math.max(5, effectivePaperBalance * 0.05);
+    const availableBalance      = effectivePaperBalance - marginInUse;
+
     if (availableBalance < 5) {
-      console.log(`[paperTrade] Insufficient paper balance ($${availableBalance.toFixed(2)} available, ${openPaperTrades.length} open trades using $${marginInUse.toFixed(2)}) — skip`);
+      console.log(`[paperTrade] Insufficient paper balance ($${availableBalance.toFixed(2)} available after review) — skip new entries`);
+      if (balanceFromClosures > 0) {
+        await setPaperBalance(Math.max(0, effectivePaperBalance))
+          .catch(e => console.warn("[paperScanner] balance update:", e.message));
+      }
+      console.log(`[paperScanner] Version B complete — 0 new entries, $${balanceFromClosures.toFixed(2)} freed from closures`);
       return;
     }
     let runningBalance = availableBalance;
 
-    for (const sig of res.data.opportunities as ScanOpportunity[]) {
-      if (!sig.direction || sig.direction === "neutral") continue;
-      if (!sig.entry || sig.entry <= 0) continue;
+    // Use portfolio review's chosen entries when available; fall back to scan signals
+    const oppMap = new Map((res.data.opportunities as ScanOpportunity[]).map(o => [o.symbol, o]));
+    const entriesToProcess: Array<{ symbol: string; direction: string; reasoning: string }> =
+      portfolioDecision.newEntries.length > 0
+        ? portfolioDecision.newEntries
+        : (res.data.opportunities as ScanOpportunity[])
+            .filter(o => o.direction && o.direction !== "neutral")
+            .map(o => ({ symbol: o.symbol, direction: o.direction!, reasoning: o.whyNow ?? "" }));
 
+    for (const entry of entriesToProcess) {
       if (runningBalance < 5) {
         console.log(`[paperTrade] Paper balance $${runningBalance.toFixed(2)} below $5 minimum — stopped`);
         break;
       }
 
-      // FIX 1: Deduplicate — skip if same symbol+direction already open
+      const opp = oppMap.get(entry.symbol) ?? oppMap.get(entry.symbol.replace(/USDT$/, "")) ?? oppMap.get(entry.symbol + "USDT");
+      if (!opp || !opp.entry || opp.entry <= 0) {
+        console.log(`[paperTrade] Skipping ${entry.symbol} — no entry price from scan`);
+        continue;
+      }
+
+      // Deduplicate — skip if same symbol+direction already open
       const existing = await db.select({ id: paperTradesTable.id })
         .from(paperTradesTable)
         .where(and(
-          eq(paperTradesTable.symbol, sig.symbol),
-          eq(paperTradesTable.direction, sig.direction),
+          eq(paperTradesTable.symbol, entry.symbol),
+          eq(paperTradesTable.direction, entry.direction),
           eq(paperTradesTable.status, "open"),
         )).limit(1).catch(() => [] as Array<{ id: number }>);
       if (existing.length > 0) {
-        console.log(`[paperTrade] Skipping duplicate — ${sig.symbol} ${sig.direction} already open`);
+        console.log(`[paperTrade] Skipping duplicate — ${entry.symbol} ${entry.direction} already open`);
         continue;
       }
 
@@ -241,35 +395,39 @@ export async function runPaperScan(): Promise<void> {
       runningBalance -= tradeMargin;
 
       await db.insert(paperTradesTable).values({
-        symbol:    sig.symbol,
-        direction: sig.direction,
-        entryPrice: sig.entry ?? sig.price,
-        stopLoss:  sig.stopLoss   ?? null,
-        tp1:       sig.tp1        ?? null,
-        tp2:       sig.tp2        ?? null,
-        rr:        sig.riskRewardRatio ?? null,
-        regime:    regime.regime,
-        score:     sig.score      ?? null,
-        whyNow:    sig.whyNow     ?? null,
-        setupType: sig.setupType  ?? null,
+        symbol:     entry.symbol,
+        direction:  entry.direction,
+        entryPrice: opp.entry ?? opp.price,
+        stopLoss:   opp.stopLoss         ?? null,
+        tp1:        opp.tp1              ?? null,
+        tp2:        opp.tp2              ?? null,
+        rr:         opp.riskRewardRatio  ?? null,
+        regime:     regime.regime,
+        score:      opp.score            ?? null,
+        whyNow:     entry.reasoning || opp.whyNow || null,
+        setupType:  opp.setupType        ?? null,
         signalTime: new Date(),
-        status:    "open",
-        version:   "B",
+        status:     "open",
+        version:    "B",
         marginUsed: tradeMargin,
-      }).catch(e => console.warn(`[paperScanner] DB insert ${sig.symbol}:`, e.message));
+      }).catch(e => console.warn(`[paperScanner] DB insert ${entry.symbol}:`, e.message));
 
       console.log(
-        `[paperTrade] Version B would enter: ${sig.symbol} ${sig.direction} ` +
-        `at $${sig.entry} margin=$${tradeMargin.toFixed(2)} balance=$${runningBalance.toFixed(2)} score=${sig.score} regime=${regime.regime}`
+        `[paperTrade] Version B would enter: ${entry.symbol} ${entry.direction} ` +
+        `at $${opp.entry} margin=$${tradeMargin.toFixed(2)} balance=$${runningBalance.toFixed(2)} score=${opp.score} regime=${regime.regime}`
       );
       logged++;
     }
 
-    if (runningBalance !== paperBalance) {
-      await setPaperBalance(runningBalance).catch(e => console.warn("[paperScanner] balance update:", e.message));
+    // Single balance write: effectivePaperBalance minus new trade spend
+    const newTradeSpend  = availableBalance - runningBalance;
+    const finalBalance   = effectivePaperBalance - newTradeSpend;
+    if (finalBalance !== paperBalance) {
+      await setPaperBalance(Math.max(0, finalBalance))
+        .catch(e => console.warn("[paperScanner] balance update:", e.message));
     }
 
-    console.log(`[paperScanner] Version B complete — ${logged} signals logged, balance=$${runningBalance.toFixed(2)} (${res.data.opportunities.length} total)`);
+    console.log(`[paperScanner] Version B complete — ${logged} new entries, balance=$${finalBalance.toFixed(2)}, freed=$${balanceFromClosures.toFixed(2)} (${res.data.opportunities.length} scan signals)`);
   } catch (err) {
     console.error("[paperScanner] Scan failed:", err);
   }
