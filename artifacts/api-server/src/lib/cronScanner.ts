@@ -992,7 +992,8 @@ async function clearPositionMeta(symbol: string): Promise<void> {
 
 // ── Position metadata patch (merges partial updates) ─────────────────────────
 async function patchPositionMeta(symbol: string, updates: Partial<PositionMeta>): Promise<void> {
-  const state = await loadBotState();  // uses cache — no DB read
+  _botStateCache = null; // force fresh DB read — storePositionMeta (startup.ts) writes directly to DB without updating this cache
+  const state = await loadBotState();
   const meta  = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), ...updates };
   if (_botStateCache) _botStateCache = { ..._botStateCache, positionMetadata: meta } as typeof _botStateCache;
@@ -1003,7 +1004,8 @@ async function patchPositionMeta(symbol: string, updates: Partial<PositionMeta>)
 
 // ── Entry source tagging ──────────────────────────────────────────────────────
 async function patchEntrySource(symbol: string, source: "manual_nl" | "auto_scan"): Promise<void> {
-  const state = await loadBotState();  // uses cache — no DB read
+  _botStateCache = null; // force fresh DB read — same race as patchPositionMeta
+  const state = await loadBotState();
   const meta  = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   meta[symbol] = { ...(meta[symbol] ?? {} as PositionMeta), entrySource: source };
   if (_botStateCache) _botStateCache = { ..._botStateCache, positionMetadata: meta } as typeof _botStateCache;
@@ -1326,6 +1328,20 @@ async function runWatchScan(): Promise<void> {
             stopLoss:  signal.stopLoss,
             takeProfit: signal.takeProfit,
           }).catch(() => {});
+
+          // Patch trade_log with TP1/TP2/SL — durable fallback for checkPartialExits
+          await db.update(tradeLogTable)
+            .set({
+              tp1:       signal.tp1      ? String(signal.tp1)      : null,
+              tp2:       signal.tp2      ? String(signal.tp2)      : null,
+              sl:        signal.stopLoss ? String(signal.stopLoss) : null,
+              atr:       signal.atr      ? String(signal.atr)      : null,
+              setupType: signal.setupType ?? null,
+              score:     signal.score    ? String(signal.score)    : null,
+              whyNow:    signal.whyNow   ?? null,
+            })
+            .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+            .catch(e => console.warn(`[watchScan] trade_log tp patch ${sym}:`, e.message));
 
           await alertFn?.([
             `⚡ <b>Watch list entry — ${sym} ${(signal.direction ?? "?").toUpperCase()}</b>`,
@@ -1685,6 +1701,7 @@ const lastAdjustSlNotifyAt: Record<string, number> = {};
 const ADJUST_SL_NOTIFY_COOLDOWN_MS = 2 * 3_600_000; // at most once per 2h per position
 // Symbols that had open positions on the previous monitor tick (for close detection)
 const prevPositionSymbols = new Set<string>();
+const selfHealAttempted   = new Set<string>(); // prevent repeated ATR fallback per session
 let monitorRunning = false;
 
 async function checkPositionMonitor(): Promise<void> {
@@ -1713,6 +1730,7 @@ async function checkPositionMonitor(): Promise<void> {
   for (const sym of prevPositionSymbols) {
     if (!currentSymbols.has(sym)) {
       await clearPositionMeta(sym).catch(() => {});
+      selfHealAttempted.delete(sym); // allow fresh heal attempt if symbol reopens
       if (posMeta[sym]?.trailingActive) {
         const closed = await bybitGetClosedPnl(5).catch(() => []);
         const trade  = closed.find(c => c.symbol === sym);
@@ -1733,6 +1751,19 @@ async function checkPositionMonitor(): Promise<void> {
   for (const pos of positions) {
     const pnlPct = pos.pnlPct ?? 0;
     const state  = monitorState[pos.symbol] ?? { lastReviewAt: 0, lastFundingRate: 0, lastOI: 0, lastRSI1h: 0 };
+
+    // ── Self-healing metadata check (runs every tick until fixed) ─────────────
+    const selfMeta = posMeta[pos.symbol];
+    const selfRequired: (keyof PositionMeta)[] = ["tp1", "sl", "originalQty"];
+    const selfMissing = selfRequired.filter(f => !selfMeta?.[f as keyof PositionMeta]);
+    if (selfMissing.length > 0 && !selfHealAttempted.has(pos.symbol)) {
+      selfHealAttempted.add(pos.symbol);
+      console.log(`[posMonitor] ⚠️ ${pos.symbol} missing: ${selfMissing.join(",")} — self-healing`);
+      const healDir = pos.side === "Buy" ? "long" : "short" as "long" | "short";
+      applyAtrSlTp(pos.symbol, healDir, pos.entryPrice, pos.positionIdx, pos.size)
+        .then(() => { _botStateCache = null; }) // clear cache so next tick picks up healed metadata
+        .catch(e => console.warn(`[posMonitor] self-heal ${pos.symbol}:`, (e as Error).message));
+    }
 
     // ── Large profit exits (no Claude needed — zero cost) ─────────────────────
     if (pnlPct >= LARGE_PROFIT_CLOSE_PCT) {
