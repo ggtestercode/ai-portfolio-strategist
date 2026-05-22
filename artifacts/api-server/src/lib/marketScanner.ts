@@ -541,6 +541,7 @@ async function runPhase2(
     `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
     `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
     `RS data: >+5% vs BTC=long candidate +5pts; <-5%=short candidate +5pts; set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
+    `EXISTING POSITIONS: Do not suggest opening a position on any symbol that already has an open position (shown in "Bybit live positions" above). This applies regardless of direction — no adding a short on a symbol where a long is already open, and vice versa.`,
   ].join("\n");
 
   const prompt = [

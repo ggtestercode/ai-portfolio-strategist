@@ -1205,7 +1205,7 @@ async function runWatchScan(): Promise<void> {
     const sym       = bybitSym(signal.symbol);
     const watchCoin = watchCoins.find(w => bybitSym(w.symbol) === sym);
     if (!watchCoin) continue;
-    if (existingSyms.has(sym)) { await removeFromWatchList(signal.symbol); continue; } // already in position
+    if (existingSyms.has(sym)) { console.log(`[watchScan] Skipping ${sym} — already have open position`); await removeFromWatchList(signal.symbol); continue; }
 
     if ((signal.score ?? 0) >= threshold) {
       // Score crossed threshold — execute
@@ -1241,6 +1241,9 @@ async function runWatchScan(): Promise<void> {
           return { action: "failed" as const, proposal, message: String(e), orderId: undefined };
         });
 
+        if (gateResult.action === "executed" || gateResult.action === "queued") {
+          existingSyms.add(sym); // prevent a second contradictory signal for same symbol in this loop
+        }
         if (gateResult.action === "executed") {
           patchEntrySource(sym, "auto_scan").catch(() => {});
           await logOpenTrade({
