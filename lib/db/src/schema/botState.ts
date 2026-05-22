@@ -22,6 +22,7 @@ export interface PositionMeta {
   tp2:              number;
   openedAt:         number; // epoch ms
   entrySource?:     "manual_nl" | "auto_scan";
+  score?:           number;  // Claude signal score at open
   trailingActive?:  boolean; // trailing SL has been activated
   lastTrailPrice?:  number;  // price at which trail was last updated
 }

@@ -1199,13 +1199,62 @@ async function runWatchScan(): Promise<void> {
 
   const regime    = result.regime;
   const threshold = getRegimeThreshold(regime?.regime);
-  const existingSyms = new Set(positions.map(p => bybitSym(p.symbol)));
+  const executedSyms = new Set<string>(); // intra-run dedup
+  const posMeta = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
 
   for (const signal of result.opportunities) {
     const sym       = bybitSym(signal.symbol);
     const watchCoin = watchCoins.find(w => bybitSym(w.symbol) === sym);
     if (!watchCoin) continue;
-    if (existingSyms.has(sym)) { console.log(`[watchScan] Skipping ${sym} — already have open position`); await removeFromWatchList(signal.symbol); continue; }
+
+    // Intra-run dedup: symbol was executed/queued earlier in this watchScan loop
+    if (executedSyms.has(sym)) {
+      console.log(`[watchScan] Skipping ${sym} — already executed in this run`);
+      continue;
+    }
+
+    const existingPos = positions.find(p => bybitSym(p.symbol) === sym);
+    if (existingPos) {
+      const existingDir = existingPos.side === "Buy" ? "long" : "short";
+      const signalDir   = signal.direction ?? "long";
+
+      if (existingDir === signalDir) {
+        console.log(`[watchScan] Skipping duplicate — ${sym} ${signalDir} already open`);
+        await removeFromWatchList(signal.symbol);
+        continue;
+      }
+
+      // Opposite direction conflict
+      const existingPnlPct  = existingPos.pnlPct;
+      const existingScore   = posMeta[sym]?.score ?? 0;
+      const scoreDiff       = (signal.score ?? 0) - existingScore;
+
+      if (existingPnlPct > 0 && scoreDiff < 15) {
+        console.log(`[watchScan] Skipping ${sym} ${signalDir} — existing ${existingDir} profitable (${existingPnlPct.toFixed(1)}%) and new score (${signal.score}) not significantly better than existing (${existingScore})`);
+        continue;
+      }
+
+      if (existingPnlPct < -5 || scoreDiff >= 15) {
+        const rec = existingPnlPct > 0
+          ? "Keep existing — still profitable"
+          : "Consider switching — existing is losing";
+        await alertFn?.([
+          `⚠️ <b>Direction conflict — ${sym}</b>`,
+          ``,
+          `Existing: <b>${existingDir.toUpperCase()}</b>  P/L: ${existingPnlPct.toFixed(1)}%  Score: ${existingScore}`,
+          `New signal: <b>${signalDir.toUpperCase()}</b>  Score: ${signal.score}`,
+          `Why: ${signal.whyNow ?? (signal.reasoning ?? "").slice(0, 120)}`,
+          ``,
+          `Recommendation: ${rec}`,
+        ].join("\n")).catch(() => {});
+        console.log(`[watchScan] Conflict notification sent for ${sym}`);
+        continue;
+      }
+
+      // Slight loss, low score diff — no strong case to flip
+      console.log(`[watchScan] Skipping ${sym} ${signalDir} — existing position present, no strong case to flip`);
+      continue;
+    }
 
     if ((signal.score ?? 0) >= threshold) {
       // Score crossed threshold — execute
@@ -1242,10 +1291,11 @@ async function runWatchScan(): Promise<void> {
         });
 
         if (gateResult.action === "executed" || gateResult.action === "queued") {
-          existingSyms.add(sym); // prevent a second contradictory signal for same symbol in this loop
+          executedSyms.add(sym);
         }
         if (gateResult.action === "executed") {
           patchEntrySource(sym, "auto_scan").catch(() => {});
+          patchPositionMeta(sym, { score: signal.score ?? 0 }).catch(() => {});
           await logOpenTrade({
             symbol:    sym,
             broker:    "bybit",
@@ -1437,8 +1487,8 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       });
 
       if (gateResult.action === "executed") {
-        // Tag as auto_scan so position review gating knows its origin
         patchEntrySource(sym, "auto_scan").catch(e => console.warn(`[cronScanner] patchEntrySource ${sym}:`, e.message));
+        patchPositionMeta(sym, { score: opp.score ?? 0 }).catch(() => {});
 
         // Verify actual direction from live Bybit position — signal direction can differ from what Bybit opened
         const signalDirection = opp.direction === "short" ? "short" : "long";
