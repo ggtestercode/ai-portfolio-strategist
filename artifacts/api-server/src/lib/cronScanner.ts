@@ -1048,7 +1048,6 @@ function formatScanSummary(
   dailyPnl:       number,
   balance:        number,
   openPositions:  number,
-  maxPositions:   number,
   signalsPassed:  number,
   opps:           ScanOpportunity[],
 ): string {
@@ -1145,7 +1144,7 @@ function formatScanSummary(
 
   lines.push(``);
   lines.push(`💰 Daily P/L: ${dailyTag}`);
-  lines.push(`💼 Positions: ${openPositions}/${maxPositions} slots | Balance: $${balance.toFixed(2)}`);
+  lines.push(`💼 Positions: ${openPositions} open | Balance: $${balance.toFixed(2)}`);
 
   return lines.join("\n");
 }
@@ -1182,10 +1181,9 @@ async function runWatchScan(): Promise<void> {
     syncTotalCapitalToDB().catch(() => null),
   ]);
   const bybitBalance = (balances?.bybit ?? 0) > 0 ? balances!.bybit : 41;
-  const maxPos = bybitBalance < 200 ? 3 : Math.floor(bybitBalance / 10);
 
-  if (positions.length >= maxPos) {
-    console.log("[watchScan] All slots filled — stopping");
+  if (bybitBalance < 5) {
+    console.log(`[watchScan] Balance $${bybitBalance.toFixed(2)} < $5 — stopping`);
     stopWatchScan();
     return;
   }
@@ -1357,14 +1355,6 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     // Crypto-only signals
     const cryptoOpps = result.opportunities.filter(o => !EQUITY_CLASSES.has(o.assetClass ?? ""));
 
-    // ── Layer 4: Portfolio allocator ──────────────────────────────────────────
-    const maxPositions    = bybitBalance < 200 ? 3 : Math.floor(bybitBalance / 10);
-    const availableSlots  = Math.max(0, maxPositions - livePositions.length);
-
-    if (livePositions.length >= maxPositions) {
-      console.log(`[cronScanner] ⚠️ Max positions reached (${livePositions.length}/${maxPositions}) — skipping new entries`);
-    }
-
     // Position review for existing positions
     const posReview = await makePositionReview(cryptoOpps, livePositions, bybitBalance);
     for (const posDecision of posReview.positions) {
@@ -1399,10 +1389,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       console.log(`[cronScanner] Filtered out: ${rejected.map(r => `${r.symbol}(${r.reason})`).join(", ")}`);
     }
 
-    // Layer 4: rank by score, take top available slots
-    const rankedSignals = filteredSignals
+    // Rank by score; balance < $5 is the only hard stop
+    if (bybitBalance < 5) {
+      console.log(`[cronScanner] Balance $${bybitBalance.toFixed(2)} < $5 — skipping new entries`);
+    }
+    const rankedSignals = bybitBalance < 5 ? [] : filteredSignals
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-      .slice(0, availableSlots)
       .slice(0, MAX_AUTO_TRADES);
 
     for (const opp of rankedSignals) {
@@ -1519,7 +1511,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     // Telegram summary
     const dailyPnl = await getDailyPnl().catch(() => 0);
-    const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, maxPositions, filteredSignals.length, result.opportunities);
+    const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, filteredSignals.length, result.opportunities);
     await alertFn?.(summary).catch(() => {});
 
     // Merge new near-threshold coins into the watch list (don't overwrite existing watches)
