@@ -306,12 +306,23 @@ export function startPolling(): void {
 
     // ── Position review gate callbacks ───────────────────────────────────────
     if (action === "review_approve" || action === "review_reject") {
-      const approved = action === "review_approve";
-      resolveReview(proposalId, approved);
-      await b.editMessageText(
-        approved
+      const approved  = action === "review_approve";
+      const resolved  = resolveReview(proposalId, approved);
+      let reviewReply: string;
+      if (!resolved) {
+        reviewReply = [
+          `⚠️ <b>Approval expired — no action taken</b>`,
+          `Request was older than 15 min`,
+          `Position still open`,
+          `Next review at next scan cycle`,
+          `<i>${utcNow()}</i>`,
+        ].join("\n");
+      } else {
+        reviewReply = approved
           ? `✅ <b>Review approved</b> — executing now\n<i>${utcNow()}</i>`
-          : `⏹ <b>Review rejected</b> — HOLD maintained\n<i>${utcNow()}</i>`,
+          : `⏹ <b>Review rejected</b> — HOLD maintained\n<i>${utcNow()}</i>`;
+      }
+      await b.editMessageText(reviewReply,
         { chat_id: chatId, message_id: msgId, parse_mode: "HTML" },
       ).catch(() => {});
       return;

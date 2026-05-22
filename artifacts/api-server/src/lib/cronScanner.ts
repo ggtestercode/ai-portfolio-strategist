@@ -93,12 +93,13 @@ interface PendingReview {
 }
 const pendingReviews = new Map<string, PendingReview>();
 
-export function resolveReview(reviewId: string, approved: boolean): void {
+export function resolveReview(reviewId: string, approved: boolean): boolean {
   const r = pendingReviews.get(reviewId);
-  if (!r) return;
+  if (!r) return false; // already timed out or never existed
   clearTimeout(r.timer);
   pendingReviews.delete(reviewId);
   r.resolve(approved);
+  return true;
 }
 
 const SCAN_INTERVAL     = process.env["SCAN_INTERVAL"] ?? "*/30 * * * *";
