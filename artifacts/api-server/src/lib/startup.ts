@@ -5,6 +5,7 @@ import {
   openPosition    as bybitOpen,
   setOneWayMode   as bybitSetOneWayMode,
   getPositions    as bybitGetPositions,
+  getBalance      as bybitGetBalance,
   setStopLoss     as bybitSetStopLoss,
   setTakeProfit   as bybitSetTakeProfit,
   getKlines,
@@ -165,6 +166,18 @@ export async function initBrokers(): Promise<void> {
         console.warn(`[startup] ${p.symbol} Claude TP $${tp} >= entry ~$${refPrice} for SHORT — ATR fallback`);
         tp = undefined;
       }
+    }
+
+    // Re-check live position count at execution time to close the approval-gate race window
+    const [livePosNow, bybitBalNow] = await Promise.all([
+      bybitGetPositions().catch(() => [] as Awaited<ReturnType<typeof bybitGetPositions>>),
+      bybitGetBalance().then(b => b.totalEquity).catch(() => 0),
+    ]);
+    const maxPosNow = bybitBalNow < 200 ? 3 : Math.floor(bybitBalNow / 10);
+    if (livePosNow.length >= maxPosNow) {
+      console.warn(`[startup] ${p.symbol} execution blocked — live positions ${livePosNow.length}/${maxPosNow} at approval time`);
+      sendAlert(`⚠️ <b>Trade blocked at execution</b>\n${p.symbol} ${bSide} — already at max ${livePosNow.length}/${maxPosNow} positions`).catch(() => {});
+      throw new Error(`Max positions reached (${livePosNow.length}/${maxPosNow}) — trade blocked`);
     }
 
     console.log(`[startup] Opening position with SL/TP: ${p.symbol} ${bSide}`, { sl: sl ?? "none", tp: tp ?? "none" });
