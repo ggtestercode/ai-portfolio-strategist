@@ -3,6 +3,7 @@ import { runScan, runFocusedScan, type ScanResult, type ScanOpportunity, calcATR
 import { runPaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
+import { applyAtrSlTp }               from "./startup";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
 import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose, getActiveRules } from "./tradeMemoryLib";
@@ -1296,6 +1297,24 @@ async function runWatchScan(): Promise<void> {
         if (gateResult.action === "executed") {
           patchEntrySource(sym, "auto_scan").catch(() => {});
           patchPositionMeta(sym, { score: signal.score ?? 0 }).catch(() => {});
+
+          // Verify metadata completeness — atr excluded: startup stores atr=0 for Claude SL/TP
+          setTimeout(async () => {
+            const s2   = await loadBotState().catch(() => null);
+            const pm   = ((s2?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
+            const required: (keyof PositionMeta)[] = ["tp1", "sl", "originalQty"];
+            const missing = required.filter(f => !pm?.[f as keyof PositionMeta]);
+            if (missing.length > 0) {
+              console.log(`[watchScan] ⚠️ Missing metadata for ${sym}: ${missing.join(", ")} — applying ATR fallback`);
+              const livePos = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+              const pos2    = livePos.find(p => p.symbol === sym);
+              if (pos2) {
+                const dir = pos2.side === "Buy" ? "long" : "short" as "long" | "short";
+                await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size)
+                  .catch(e => console.warn(`[watchScan] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
+              }
+            }
+          }, 5000);
           await logOpenTrade({
             symbol:    sym,
             broker:    "bybit",
@@ -1489,6 +1508,24 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       if (gateResult.action === "executed") {
         patchEntrySource(sym, "auto_scan").catch(e => console.warn(`[cronScanner] patchEntrySource ${sym}:`, e.message));
         patchPositionMeta(sym, { score: opp.score ?? 0 }).catch(() => {});
+
+        // Verify metadata completeness — atr excluded: startup stores atr=0 for Claude SL/TP
+        setTimeout(async () => {
+          const s2   = await loadBotState().catch(() => null);
+          const pm   = ((s2?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
+          const required: (keyof PositionMeta)[] = ["tp1", "sl", "originalQty"];
+          const missing = required.filter(f => !pm?.[f as keyof PositionMeta]);
+          if (missing.length > 0) {
+            console.log(`[cronScanner] ⚠️ Missing metadata for ${sym}: ${missing.join(", ")} — applying ATR fallback`);
+            const liveAfterCheck = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+            const pos2           = liveAfterCheck.find(p => p.symbol === sym);
+            if (pos2) {
+              const dir = pos2.side === "Buy" ? "long" : "short" as "long" | "short";
+              await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size)
+                .catch(e => console.warn(`[cronScanner] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
+            }
+          }
+        }, 5000);
 
         // Verify actual direction from live Bybit position — signal direction can differ from what Bybit opened
         const signalDirection = opp.direction === "short" ? "short" : "long";

@@ -51,7 +51,7 @@ async function storePositionMeta(symbol: string, meta: PositionMeta): Promise<vo
 }
 
 // ── ATR-based SL/TP after every position open ────────────────────────────────
-async function applyAtrSlTp(
+export async function applyAtrSlTp(
   symbol:      string,
   direction:   "long" | "short",
   entryPrice:  number,
