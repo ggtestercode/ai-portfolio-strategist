@@ -371,11 +371,10 @@ export function startPolling(): void {
         ];
 
         if (isBybit) {
-          const mode = (process.env["BYBIT_TRADING_MODE"] ?? "testnet") === "live" ? "Live" : "Testnet";
           lines.push(`Amount: $${p.amountUsd} at ${leverage}x`);
           lines.push(`Exposure: $${exposure}`);
           if (unitsStr)  lines.push(`Units: ${unitsStr}`);
-          lines.push(`Broker: Bybit ${mode}`);
+          lines.push(`Broker: Bybit`);
           if (priceStr)  lines.push(`Price: ${priceStr}`);
         } else if (isOKX) {
           const okxMode = okxPaperMode ? "Paper" : (process.env["OKX_TRADING_MODE"] === "demo" ? "Demo" : "Live");
