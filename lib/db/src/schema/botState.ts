@@ -25,6 +25,8 @@ export interface PositionMeta {
   score?:           number;  // Claude signal score at open
   trailingActive?:  boolean; // trailing SL has been activated
   lastTrailPrice?:  number;  // price at which trail was last updated
+  tp1Executed?:     boolean; // TP1 partial has been executed
+  tp2Executed?:     boolean; // TP2 partial has been executed
 }
 
 export interface PositionMonitorState {

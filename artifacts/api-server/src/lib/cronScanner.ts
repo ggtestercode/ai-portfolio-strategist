@@ -592,13 +592,14 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
       continue;
     }
 
-    // Tier 1: price reached TP1 and no partial yet
-    if (currentTier === 0 && effectiveTp1 > 0) {
+    // TP1: price reached TP1 and flag not yet set (ignores tier — fires regardless of manual partials)
+    if (effectiveTp1 > 0 && !(pm.tp1Executed || currentTier >= 1)) {
       const tp1Reached = pos.side === "Buy" ? currentPrice >= effectiveTp1 : currentPrice <= effectiveTp1;
       if (tp1Reached) {
-        console.log(`[cronScanner] Tier 1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${effectiveTp1}`);
+        console.log(`[cronScanner] TP1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${effectiveTp1}`);
         try {
           await closePercentPosition(pos.symbol, 30);
+          await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
           // Move SL to breakeven
           await bybitSetStopLoss(pos.symbol, pm.entryPrice, pos.positionIdx)
             .catch(e => console.warn(`[cronScanner] Breakeven SL failed ${pos.symbol}:`, e.message));
@@ -608,7 +609,7 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
           const remainMargin  = pos.margin * 0.70;
           const dustLine      = remainMargin < 1 ? `⚠️ Remaining margin < $1 — consider closing` : null;
           await alertFn?.([
-            `💰 Tier 1 profit banked — ${pos.symbol}`,
+            `💰 TP1 profit banked — ${pos.symbol}`,
             `Closed: 30% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
             `SL moved to breakeven: $${pm.entryPrice.toFixed(4)}`,
@@ -618,29 +619,30 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
           const pnlPctTp1 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
           logPartialClose({ symbol: pos.symbol, partialType: "tp1", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp1, remainingPct: 70 }).catch(() => {});
         } catch (e) {
-          console.error(`[cronScanner] Tier 1 exit ${pos.symbol} failed:`, (e as Error).message);
+          console.error(`[cronScanner] TP1 exit ${pos.symbol} failed:`, (e as Error).message);
         }
         continue;
       }
     }
 
-    // Tier 2: price reached TP2 and tier 1 already done
-    if (currentTier === 1 && effectiveTp2 > 0) {
+    // TP2: price reached TP2, TP1 already executed (flag or tier), and TP2 flag not yet set
+    if (effectiveTp2 > 0 && (pm.tp1Executed || currentTier >= 1) && !pm.tp2Executed && currentTier < 2) {
       const tp2Reached = pos.side === "Buy" ? currentPrice >= effectiveTp2 : currentPrice <= effectiveTp2;
       if (tp2Reached) {
-        console.log(`[cronScanner] Tier 2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${effectiveTp2}`);
+        console.log(`[cronScanner] TP2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${effectiveTp2}`);
         try {
           // Close 30% of original qty (another 30%, total 60% out)
           const qty30pctOfOrig = origQty * 0.30;
           const closePctTp2 = Math.round((qty30pctOfOrig / pos.size) * 100);
           await closePercentPosition(pos.symbol, closePctTp2);
+          await patchPositionMeta(pos.symbol, { tp2Executed: true }).catch(() => {});
           const banked        = pos.pnl * 0.30;
           const base2         = pos.symbol.replace(/USDT$/, "");
           const remainQty2    = +(pos.size - qty30pctOfOrig).toFixed(4);
           const remainMargin2 = remainQty2 * pos.entryPrice / Math.max(pos.leverage, 1);
           const dustLine2     = remainMargin2 < 1 ? `⚠️ Remaining margin < $1 — consider closing` : null;
           await alertFn?.([
-            `💰 Tier 2 profit banked — ${pos.symbol}`,
+            `💰 TP2 profit banked — ${pos.symbol}`,
             `Closed: another 30% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
             `Remaining: ${remainQty2} ${base2} ($${remainMargin2.toFixed(2)} margin) with trailing SL`,
@@ -649,7 +651,7 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
           const pnlPctTp2 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
           logPartialClose({ symbol: pos.symbol, partialType: "tp2", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp2, remainingPct: 40 }).catch(() => {});
         } catch (e) {
-          console.error(`[cronScanner] Tier 2 exit ${pos.symbol} failed:`, (e as Error).message);
+          console.error(`[cronScanner] TP2 exit ${pos.symbol} failed:`, (e as Error).message);
         }
       }
     }
@@ -834,8 +836,25 @@ async function makePositionReview(
       ].join("\n")
     : "";
 
+  const signalTruthTable = [
+    "SIGNAL TRUTH TABLE — direction-aware interpretation (MUST apply before any decision):",
+    "  Price at support       → LONG: HOLD (thesis intact) | SHORT: WARNING (bounce risk)",
+    "  Price at resistance    → LONG: WARNING (rejection risk) | SHORT: HOLD (thesis intact)",
+    "  RSI > 70               → LONG: caution (overbought) | SHORT: HOLD (still bearish pressure)",
+    "  RSI < 30               → LONG: HOLD (still bullish pressure) | SHORT: caution (oversold bounce risk)",
+    "  Funding rate positive  → LONG: WARNING (squeeze risk) | SHORT: GOOD (being paid to hold)",
+    "  Funding rate negative  → LONG: GOOD (being paid to hold) | SHORT: WARNING (squeeze risk)",
+    "  OI rising + price up   → LONG: bullish (real demand) | SHORT: PAIN (conviction needed to hold)",
+    "  OI rising + price down → LONG: bearish (real supply) | SHORT: BULLISH (genuine selling)",
+    "  BTC green              → LONG: tailwind | SHORT: headwind",
+    "  BTC red                → LONG: headwind | SHORT: tailwind",
+    "NEVER apply LONG signal logic to a SHORT position or vice versa. A bearish signal is GOOD for shorts.",
+  ].join("\n");
+
   const systemContext = [
     "You are a disciplined quant managing a Bybit live futures account. Respond JSON only.",
+    "",
+    signalTruthTable,
     "",
     "LONG position: profitable when price rises. HOLD if: bullish momentum intact, price above support, funding supports long.",
     "SHORT position: profitable when price falls. HOLD if: bearish momentum intact, price at/below resistance, funding supports short, NO bullish reversal.",
@@ -1993,6 +2012,17 @@ async function runPositionReview(
   const fundingStr   = fr ? `${(fr.rate * 100).toFixed(4)}%` : "unknown";
   const isRanging    = regime?.toUpperCase().includes("RANGING") ?? false;
 
+  // FIX 2: Skip early reviews when trade is still healthy
+  const positionAgeHours = meta?.openedAt ? (Date.now() - meta.openedAt) / 3_600_000 : 999;
+  const slVal = typeof sl === "number" ? sl : parseFloat(String(sl) || "0");
+  const slDistancePct = slVal > 0 && pos.entryPrice > 0
+    ? Math.abs((slVal - pos.entryPrice) / pos.entryPrice * 100) : 0;
+  const slConsumedPct = slDistancePct > 0 ? Math.abs(pnlPct) / slDistancePct * 100 : 0;
+  if (positionAgeHours < 4 && pnlPct > -5 && slConsumedPct < 30) {
+    console.log(`[posMonitor] Skipping ${pos.symbol} review — age ${positionAgeHours.toFixed(1)}h, P/L ${pnlPct.toFixed(2)}%, SL consumed ${slConsumedPct.toFixed(0)}% — too early`);
+    return;
+  }
+
   // Direction-aware thesis signals
   const thesisCheck = isLong ? [
     `LONG thesis SUPPORTING signals (each one you see adds conviction):`,
@@ -2032,11 +2062,15 @@ async function runPositionReview(
 
   const prompt = [
     `Position: ${pos.symbol} ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Current: $${currentPrice.toFixed(4)}`,
-    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${heldH}h | Regime: ${regime ?? "unknown"}`,
+    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${positionAgeHours < 999 ? positionAgeHours.toFixed(1) + "h" : heldH + "h"} | Regime: ${regime ?? "unknown"}`,
     `RSI(14): ${rsi.toFixed(1)} | EMA20: $${ema20.toFixed(4)} | EMA50: $${ema50.toFixed(4)}`,
     `Funding: ${fundingStr}`,
     oi != null ? `OI: ${oi}` : null,
-    `SL: ${sl ? "$" + sl.toFixed(4) : "not set"} | TP1: ${tp1 ? "$" + tp1.toFixed(4) : "not set"} | TP2: ${tp2 ? "$" + tp2.toFixed(4) : "not set"}`,
+    `SL: ${sl ? "$" + (typeof sl === "number" ? sl.toFixed(4) : sl) : "not set"} | TP1: ${tp1 ? "$" + (typeof tp1 === "number" ? tp1.toFixed(4) : tp1) : "not set"} | TP2: ${tp2 ? "$" + tp2.toFixed(4) : "not set"}`,
+    meta?.score != null ? `Original signal score: ${meta.score}/100` : null,
+    (meta as any)?.setupType ? `Setup type: ${(meta as any).setupType}${(meta as any).whyNow ? " — " + (meta as any).whyNow : ""}` : null,
+    slConsumedPct > 0 ? `SL consumed: ${slConsumedPct.toFixed(0)}% of total SL distance` : null,
+    `Bias: if original entry signals are still present, lean HOLD. Only suggest CLOSE/PARTIAL if thesis is completely reversed, loss > -8%, or an opposing signal scores ≥ 80.`,
     trigger ? `\nIMMEDIATE TRIGGER: ${trigger}` : null,
     `\n── CONFIDENCE-BASED DECISION FRAMEWORK ──`,
     ...thesisCheck,
@@ -2064,9 +2098,26 @@ async function runPositionReview(
     `Do NOT use HOLD if your reasoning says the thesis is broken or mixed.`,
   ].filter(Boolean).join("\n");
 
+  const reviewSystemCtx = [
+    `You are a patient, disciplined futures position manager. You manage conviction, not just stops. When the thesis weakens, you reduce size first — not panic-close. You find the right exit: tighten stops to key levels, take partials when conviction drops, and only market-close when the thesis is fully broken AND loss is accelerating with no recovery signal. Never exit a short at support or a long at resistance — those are the worst prices. Your job is to manage conviction in tiers.`,
+    ``,
+    `SIGNAL TRUTH TABLE — direction-aware interpretation (apply before any decision):`,
+    `  Price at support       → LONG: HOLD (thesis intact) | SHORT: WARNING (bounce risk)`,
+    `  Price at resistance    → LONG: WARNING (rejection risk) | SHORT: HOLD (thesis intact)`,
+    `  RSI > 70               → LONG: caution (overbought) | SHORT: HOLD (still bearish pressure)`,
+    `  RSI < 30               → LONG: HOLD (still bullish pressure) | SHORT: caution (oversold bounce risk)`,
+    `  Funding rate positive  → LONG: WARNING (squeeze risk) | SHORT: GOOD (being paid to hold)`,
+    `  Funding rate negative  → LONG: GOOD (being paid to hold) | SHORT: WARNING (squeeze risk)`,
+    `  OI rising + price up   → LONG: bullish (real demand) | SHORT: PAIN (conviction needed)`,
+    `  OI rising + price down → LONG: bearish (real supply) | SHORT: BULLISH (genuine selling)`,
+    `  BTC green              → LONG: tailwind | SHORT: headwind`,
+    `  BTC red                → LONG: headwind | SHORT: tailwind`,
+    `NEVER apply LONG signal logic to a SHORT position or vice versa. A bearish signal is GOOD for shorts.`,
+  ].join("\n");
+
   const resp = await llm.chat({
     taskType: "trade_decision",
-    systemContext: `You are a patient, disciplined futures position manager. You manage conviction, not just stops. When the thesis weakens, you reduce size first — not panic-close. You find the right exit: tighten stops to key levels, take partials when conviction drops, and only market-close when the thesis is fully broken AND loss is accelerating with no recovery signal. Never exit a short at support or a long at resistance — those are the worst prices. Your job is to manage conviction in tiers.`,
+    systemContext: reviewSystemCtx,
     userMessage: prompt,
   }).catch(() => null);
   if (!resp) return;

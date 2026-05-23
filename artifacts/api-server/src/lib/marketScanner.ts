@@ -528,8 +528,24 @@ async function runPhase2(
         "  Minimum score to recommend: 65 — only return signals scoring ≥65",
       ].join("\n");
 
+  const signalTruthTable = [
+    "SIGNAL TRUTH TABLE — direction-aware (apply before scoring any opportunity):",
+    "  Price at support       → LONG: valid entry zone | SHORT: risky, expect bounce",
+    "  Price at resistance    → LONG: risky, expect rejection | SHORT: valid entry zone",
+    "  RSI > 70               → LONG: overbought caution (-5pts) | SHORT: still bearish pressure",
+    "  RSI < 30               → LONG: still bullish pressure | SHORT: oversold caution (-5pts)",
+    "  Funding rate positive  → LONG: longs crowded, squeeze risk (-3pts) | SHORT: being paid, +3pts",
+    "  Funding rate negative  → LONG: being paid, +3pts | SHORT: shorts crowded, squeeze risk (-3pts)",
+    "  OI rising + price up   → LONG: bullish confirmation +5pts | SHORT: pain trade, -3pts",
+    "  OI rising + price down → LONG: distribution, -3pts | SHORT: genuine selling +5pts",
+    "  BTC green              → LONG: tailwind | SHORT: headwind (-3pts if strong)",
+    "  BTC red                → LONG: headwind (-3pts if strong) | SHORT: tailwind",
+    "NEVER apply LONG signal interpretation to SHORT setups or vice versa.",
+  ].join("\n");
+
   const systemContext = [
     "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
+    signalTruthTable,
     `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","riskRewardRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
     `Rank exactly 5. LONGS: ≥80=STRONG BUY(strong_buy), 60-79=BUY(high). SHORTS: ≥80=STRONG SELL(strong_sell), 60-79=SELL(high). 40-59=WATCH, <40=AVOID. Include ≥1 short per scan — look for coins rejecting resistance or lagging BTC.`,
     `Funding: |rate|<0.03% neutral; 0.03-0.07% directional +3pts; >0.07% crowded -5pts. OI up+price up=bullish +5pts; OI down+price up=weak +2pts; OI up+price down=bearish +5pts; OI down+price down=-3pts.`,
