@@ -602,14 +602,19 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
           // Move SL to breakeven
           await bybitSetStopLoss(pos.symbol, pm.entryPrice, pos.positionIdx)
             .catch(e => console.warn(`[cronScanner] Breakeven SL failed ${pos.symbol}:`, e.message));
-          const banked = pos.pnl * 0.30;
+          const banked        = pos.pnl * 0.30;
+          const base          = pos.symbol.replace(/USDT$/, "");
+          const remainQty     = +(pos.size * 0.70).toFixed(4);
+          const remainMargin  = pos.margin * 0.70;
+          const dustLine      = remainMargin < 1 ? `⚠️ Remaining margin < $1 — consider closing` : null;
           await alertFn?.([
             `💰 Tier 1 profit banked — ${pos.symbol}`,
             `Closed: 30% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
             `SL moved to breakeven: $${pm.entryPrice.toFixed(4)}`,
-            `Remaining: 70% position running`,
-          ].join("\n")).catch(() => {});
+            `Remaining: ${remainQty} ${base} ($${remainMargin.toFixed(2)} margin)`,
+            dustLine,
+          ].filter(Boolean).join("\n")).catch(() => {});
           const pnlPctTp1 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
           logPartialClose({ symbol: pos.symbol, partialType: "tp1", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp1, remainingPct: 70 }).catch(() => {});
         } catch (e) {
@@ -629,13 +634,18 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
           const qty30pctOfOrig = origQty * 0.30;
           const closePctTp2 = Math.round((qty30pctOfOrig / pos.size) * 100);
           await closePercentPosition(pos.symbol, closePctTp2);
-          const banked = pos.pnl * 0.30;
+          const banked        = pos.pnl * 0.30;
+          const base2         = pos.symbol.replace(/USDT$/, "");
+          const remainQty2    = +(pos.size - qty30pctOfOrig).toFixed(4);
+          const remainMargin2 = remainQty2 * pos.entryPrice / Math.max(pos.leverage, 1);
+          const dustLine2     = remainMargin2 < 1 ? `⚠️ Remaining margin < $1 — consider closing` : null;
           await alertFn?.([
             `💰 Tier 2 profit banked — ${pos.symbol}`,
             `Closed: another 30% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
-            `Remaining: 40% with trailing SL`,
-          ].join("\n")).catch(() => {});
+            `Remaining: ${remainQty2} ${base2} ($${remainMargin2.toFixed(2)} margin) with trailing SL`,
+            dustLine2,
+          ].filter(Boolean).join("\n")).catch(() => {});
           const pnlPctTp2 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
           logPartialClose({ symbol: pos.symbol, partialType: "tp2", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp2, remainingPct: 40 }).catch(() => {});
         } catch (e) {
