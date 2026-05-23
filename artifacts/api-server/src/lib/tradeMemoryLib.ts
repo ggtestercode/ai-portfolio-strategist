@@ -872,6 +872,49 @@ export async function getRecentMemory(limit = 15): Promise<string> {
     }
   } catch { /* non-fatal */ }
 
+  // ── Direction win rate stats (last 14 days) ──
+  try {
+    const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+    const recentClosed = await db.select({
+      direction: tradeLogTable.direction,
+      pnl:       tradeLogTable.pnl,
+      pnlPct:    tradeLogTable.pnlPct,
+    }).from(tradeLogTable)
+      .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.exitAt, cutoff)));
+
+    if (recentClosed.length > 0) {
+      const statsByDir: Record<string, { total: number; wins: number; sumPnlPct: number }> = {};
+      for (const t of recentClosed) {
+        const dir = t.direction;
+        if (!statsByDir[dir]) statsByDir[dir] = { total: 0, wins: 0, sumPnlPct: 0 };
+        statsByDir[dir].total++;
+        if (parseFloat(t.pnl ?? "0") > 0) statsByDir[dir].wins++;
+        statsByDir[dir].sumPnlPct += parseFloat(t.pnlPct ?? "0");
+      }
+
+      let currentRegime = "UNKNOWN";
+      try {
+        const [st] = await db.select({ currentRegime: botStateTable.currentRegime }).from(botStateTable).limit(1);
+        currentRegime = st?.currentRegime ?? "UNKNOWN";
+      } catch { /* non-fatal */ }
+
+      lines.push(`\n═══ PERFORMANCE BY DIRECTION (last 14 days) ═══`);
+      for (const dir of ["long", "short"]) {
+        const s = statsByDir[dir];
+        if (!s) {
+          lines.push(`${dir.toUpperCase()} trades: no data`);
+        } else {
+          const wr    = Math.round(s.wins / s.total * 100);
+          const avgPct = (s.sumPnlPct / s.total).toFixed(2);
+          const sign  = parseFloat(avgPct) >= 0 ? "+" : "";
+          lines.push(`${dir.toUpperCase()} trades: ${s.total} total, ${wr}% win rate, avg ${sign}${avgPct}%`);
+        }
+      }
+      lines.push(`Current regime: ${currentRegime}`);
+      lines.push(`Apply this data to current decisions.`);
+    }
+  } catch { /* non-fatal */ }
+
   return lines.join("\n");
 }
 
