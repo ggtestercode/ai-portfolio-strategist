@@ -5,7 +5,7 @@ import {
 import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
-import { getClosedPnl as bybitGetClosedPnl, getKlines }  from "../brokers/bybit";
+import { getClosedPnl as bybitGetClosedPnl, getKlines, fetchKlines, type BybitKline }  from "../brokers/bybit";
 
 // ─── Rule alert notifier ──────────────────────────────────────────────────────
 
@@ -72,6 +72,86 @@ function getMaxProfitDuringHold(candles: Array<{high: number; low: number}>, ent
     if (pct > best) best = pct;
   }
   return best;
+}
+
+// ─── Candle analysis helpers ──────────────────────────────────────────────────
+
+interface CandleDetail {
+  direction:    "up" | "down";
+  bodyPct:      number;
+  upperWickPct: number;
+  lowerWickPct: number;
+  volumeVsAvg:  number;
+  closePosition: number;
+  isPinBar:     boolean;
+  isDoji:       boolean;
+}
+
+interface CandleAnalysis {
+  pattern:       string[];
+  highs:         number[];
+  lows:          number[];
+  closes:        number[];
+  volumes:       number[];
+  avgVolume:     number;
+  volumeTrend:   "rising" | "falling";
+  nearRecentHigh: boolean;
+  nearRecentLow:  boolean;
+  candles:       CandleDetail[];
+}
+
+function analyseCandles(candles: BybitKline[]): CandleAnalysis {
+  if (!candles.length) return { pattern: [], highs: [], lows: [], closes: [], volumes: [], avgVolume: 0, volumeTrend: "falling", nearRecentHigh: false, nearRecentLow: false, candles: [] };
+
+  const highs   = candles.map(c => c.high);
+  const lows    = candles.map(c => c.low);
+  const closes  = candles.map(c => c.close);
+  const volumes = candles.map(c => c.volume);
+
+  const pattern: string[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1]!;
+    const curr = candles[i]!;
+    const hh = curr.high > prev.high;
+    const hl = curr.low  > prev.low;
+    if (hh && hl)   pattern.push("HH/HL");
+    else if (!hh && !hl) pattern.push("LH/LL");
+    else if (hh)    pattern.push("HH/LL");
+    else            pattern.push("LH/HL");
+  }
+
+  const avgVolume     = volumes.reduce((a, b) => a + b, 0) / volumes.length;
+  const mid           = Math.floor(volumes.length / 2);
+  const firstHalfVol  = volumes.slice(0, mid).reduce((a, b) => a + b, 0);
+  const secondHalfVol = volumes.slice(mid).reduce((a, b) => a + b, 0);
+  const volumeTrend: "rising" | "falling" = secondHalfVol > firstHalfVol ? "rising" : "falling";
+
+  const candleDetails: CandleDetail[] = candles.map(c => {
+    const range        = c.high - c.low;
+    const bodyPct      = range > 0 ? Math.abs(c.close - c.open) / range * 100 : 0;
+    const upperWickPct = range > 0 ? (c.high - Math.max(c.open, c.close)) / range * 100 : 0;
+    const lowerWickPct = range > 0 ? (Math.min(c.open, c.close) - c.low)  / range * 100 : 0;
+    return {
+      direction:     c.close >= c.open ? "up" : "down",
+      bodyPct,
+      upperWickPct,
+      lowerWickPct,
+      volumeVsAvg:   avgVolume > 0 ? c.volume / avgVolume : 1,
+      closePosition: range > 0 ? (c.close - c.low) / range * 100 : 50,
+      isPinBar:      upperWickPct > 60 || lowerWickPct > 60,
+      isDoji:        bodyPct < 10,
+    };
+  });
+
+  const recentHigh    = Math.max(...highs);
+  const recentLow     = Math.min(...lows);
+  const lastClose     = closes[closes.length - 1] ?? 0;
+  return {
+    pattern, highs, lows, closes, volumes, avgVolume, volumeTrend,
+    nearRecentHigh: recentHigh > 0 && Math.abs(lastClose - recentHigh) / recentHigh < 0.005,
+    nearRecentLow:  recentLow  > 0 && Math.abs(lastClose - recentLow)  / recentLow  < 0.005,
+    candles: candleDetails,
+  };
 }
 
 // ─── logClosedTrade (eToro / legacy) ─────────────────────────────────────────
@@ -208,6 +288,123 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     regime = state?.currentRegime ?? "UNKNOWN";
   } catch { /* non-fatal */ }
 
+  // 5a. Pre/entry/post candle data
+  let preCandles1h:  BybitKline[] = [];
+  let preCandles15m: BybitKline[] = [];
+  let btcPreCandles: BybitKline[] = [];
+  let entryCandle1h: BybitKline[] = [];
+  let entryCandle15m: BybitKline[] = [];
+  if (input.entryAt) {
+    try {
+      [preCandles1h, preCandles15m, btcPreCandles, entryCandle1h, entryCandle15m] = await Promise.all([
+        fetchKlines({ symbol: input.symbol, interval: "60", end: input.entryAt, limit: 12 }),
+        fetchKlines({ symbol: input.symbol, interval: "15", end: input.entryAt, limit: 8 }),
+        fetchKlines({ symbol: "BTCUSDT",    interval: "60", end: input.entryAt, limit: 12 }),
+        fetchKlines({ symbol: input.symbol, interval: "60", end: input.entryAt, limit: 1 }),
+        fetchKlines({ symbol: input.symbol, interval: "15", end: input.entryAt, limit: 1 }),
+      ]);
+    } catch { /* non-fatal */ }
+  }
+
+  let postCandles1h:  BybitKline[] = [];
+  let postCandles15m: BybitKline[] = [];
+  let btcPostCandles: BybitKline[] = [];
+  if (input.exitAt) {
+    try {
+      [postCandles1h, postCandles15m, btcPostCandles] = await Promise.all([
+        fetchKlines({ symbol: input.symbol, interval: "60", start: input.exitAt, limit: 24 }),
+        fetchKlines({ symbol: input.symbol, interval: "15", start: input.exitAt, limit: 8 }),
+        fetchKlines({ symbol: "BTCUSDT",    interval: "60", start: input.exitAt, limit: 24 }),
+      ]);
+    } catch { /* non-fatal */ }
+  }
+
+  // 5b. Signal accuracy from past reflections
+  const signalAccMap: Record<string, { worked: number; failed: number }> = {};
+  try {
+    const sigRows = await db.select({
+      signalsThatWorked: tradeMemoryTable.signalsThatWorked,
+      signalsThatFailed: tradeMemoryTable.signalsThatFailed,
+    }).from(tradeMemoryTable)
+      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+      .orderBy(desc(tradeMemoryTable.createdAt))
+      .limit(50);
+    for (const row of sigRows) {
+      for (const s of JSON.parse(row.signalsThatWorked ?? "[]") as string[]) {
+        if (!signalAccMap[s]) signalAccMap[s] = { worked: 0, failed: 0 };
+        signalAccMap[s].worked++;
+      }
+      for (const s of JSON.parse(row.signalsThatFailed ?? "[]") as string[]) {
+        if (!signalAccMap[s]) signalAccMap[s] = { worked: 0, failed: 0 };
+        signalAccMap[s].failed++;
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  // 5c. Candle analysis
+  const preAnalysis1h   = analyseCandles(preCandles1h);
+  const preAnalysis15m  = analyseCandles(preCandles15m);
+  const entryAnal1h     = analyseCandles(entryCandle1h).candles[0];
+  const entryAnal15m    = analyseCandles(entryCandle15m).candles[0];
+  const postAnalysis1h  = analyseCandles(postCandles1h);
+  const postAnalysis15m = analyseCandles(postCandles15m);
+
+  const blankCandle: CandleDetail = { direction: "up", bodyPct: 0, upperWickPct: 0, lowerWickPct: 0, volumeVsAvg: 1, closePosition: 50, isPinBar: false, isDoji: false };
+  const entryC1h  = entryAnal1h  ?? blankCandle;
+  const entryC15m = entryAnal15m ?? blankCandle;
+
+  // 5d. Derived metrics
+  const firstPreClose = preCandles1h[0]?.close ?? input.entryPrice;
+  const lastPreClose  = preCandles1h[preCandles1h.length - 1]?.close ?? input.entryPrice;
+  const preTrendPct   = firstPreClose > 0 ? (lastPreClose - firstPreClose) / firstPreClose * 100 : 0;
+
+  const firstBtcPre  = btcPreCandles[0]?.close ?? 0;
+  const lastBtcPre   = btcPreCandles[btcPreCandles.length - 1]?.close ?? 0;
+  const btcTrendPct  = firstBtcPre > 0 ? (lastBtcPre - firstBtcPre) / firstBtcPre * 100 : 0;
+  const btcVsSymbol  = (preTrendPct >= 0) === (btcTrendPct >= 0) ? "aligned" : "diverging";
+
+  const price1hAfter  = postCandles1h[0]?.close  ?? 0;
+  const price4hAfter  = postCandles1h[3]?.close  ?? 0;
+  const price24hAfter = postCandles1h[23]?.close ?? 0;
+
+  const after4hClose  = price4hAfter  || input.exitPrice;
+  const after24hClose = price24hAfter || input.exitPrice;
+  const immediateReactionPct = input.exitPrice > 0 ? (after4hClose  - input.exitPrice) / input.exitPrice * 100 : 0;
+  const fullMove24hPct       = input.exitPrice > 0 ? (after24hClose - input.exitPrice) / input.exitPrice * 100 : 0;
+
+  const firstBtcPost = btcPostCandles[0]?.close ?? 0;
+  const lastBtcPost  = btcPostCandles[btcPostCandles.length - 1]?.close ?? 0;
+  const btcPostMovePct = firstBtcPost > 0 ? (lastBtcPost - firstBtcPost) / firstBtcPost * 100 : 0;
+
+  const isLong = input.direction === "long";
+  const postHighs = postCandles1h.map(c => c.high);
+  const postLows  = postCandles1h.map(c => c.low);
+  const maxAdditionalLossPct = input.exitPrice > 0 && postCandles1h.length > 0
+    ? (isLong
+       ? (input.exitPrice - Math.min(...postLows))  / input.exitPrice * 100
+       : (Math.max(...postHighs) - input.exitPrice) / input.exitPrice * 100)
+    : 0;
+  const additionalGainPct = input.exitPrice > 0 && postCandles1h.length > 0
+    ? (isLong
+       ? (Math.max(...postHighs) - input.exitPrice) / input.exitPrice * 100
+       : (input.exitPrice - Math.min(...postLows))  / input.exitPrice * 100)
+    : 0;
+
+  const btcContextPre  = btcPreCandles.length > 0
+    ? `BTC ${btcTrendPct >= 0 ? "+" : ""}${btcTrendPct.toFixed(2)}% over 12h pre-entry (${btcVsSymbol} with ${input.symbol})`
+    : "BTC context unavailable";
+  const btcContextPost = btcPostCandles.length > 0
+    ? `BTC ${btcPostMovePct >= 0 ? "+" : ""}${btcPostMovePct.toFixed(2)}% over 24h post-exit`
+    : "BTC context unavailable";
+
+  const signalAccuracyLines = Object.keys(signalAccMap).length > 0
+    ? Object.entries(signalAccMap).map(([sig, s]) => {
+        const total = s.worked + s.failed;
+        const pct = (s.worked / total * 100).toFixed(0);
+        return `${sig}: ${pct}% accurate (${total} samples)`;
+      }).join("\n")
+    : "No signal history yet";
+
   // ── Execution quality checks ──────────────────────────────────────────────
   const tp1Price   = input.tp1   ? parseFloat(input.tp1)  : 0;
   const tp2Price   = input.tp2   ? parseFloat(input.tp2)  : 0;
@@ -282,10 +479,17 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
       }).join("\n")
     : "No partial closes recorded for this position.";
 
-  // 6. Prompt
+  // 6. Enhanced prompt with candle analysis
+  const fmt2 = (n: number) => (n >= 0 ? "+" : "") + n.toFixed(2);
+  const candleRow1h = (c: CandleDetail, i: number) =>
+    `Candle ${i + 1}: ${c.direction} | body:${c.bodyPct.toFixed(0)}% wick↑:${c.upperWickPct.toFixed(0)}% wick↓:${c.lowerWickPct.toFixed(0)}% | vol:${c.volumeVsAvg.toFixed(1)}×avg${c.isPinBar ? " [PIN BAR]" : ""}${c.isDoji ? " [DOJI]" : ""}`;
+  const candleRow15m = (c: CandleDetail, i: number) =>
+    `15m-${i + 1}: ${c.direction} | body:${c.bodyPct.toFixed(0)}% vol:${c.volumeVsAvg.toFixed(1)}×avg${c.isPinBar ? " [PIN BAR]" : ""}`;
+
   const prompt = [
-    `Complete trade record for structured reflection:`,
+    `Complete trade analysis for structured reflection:`,
     ``,
+    `═══ TRADE BASICS ═══`,
     `Symbol: ${input.symbol}`,
     `Direction: ${input.direction} (confirmed from Bybit side field)`,
     `Entry: $${input.entryPrice.toFixed(4)}${input.entryAt ? ` at ${toSGT(input.entryAt)}` : ""}`,
@@ -295,74 +499,115 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
       ? `Gross P/L (Bybit verified): ${bybitTotalPnl >= 0 ? "+" : ""}$${bybitTotalPnl.toFixed(2)} | Est. fees: ~$${estimatedFees.toFixed(2)}`
       : `Gross P/L: ${sign}$${input.pnl.toFixed(2)} | Est. fees: ~$${estimatedFees.toFixed(2)}`,
     `Net P/L: ${sign}${input.pnlPct.toFixed(2)}%`,
+    `Exit method: ${exitMethod}`,
     ``,
-    `Market context at entry:`,
-    `- Regime (current): ${regime}`,
-    `- Score at entry: ${input.score ?? "unknown"}/100`,
-    `- Setup type: ${input.setupType ?? "unknown"}`,
-    `- Why now: ${input.whyNow ?? input.reasoning ?? "unknown"}`,
-    `- SL: ${input.sl ? "$" + parseFloat(input.sl).toFixed(4) : "not set"} | TP1: ${input.tp1 ? "$" + parseFloat(input.tp1).toFixed(4) : "not set"} | TP2: ${input.tp2 ? "$" + parseFloat(input.tp2).toFixed(4) : "not set"}`,
+    `═══ PRE-TRADE CONTEXT (12h before entry) ═══`,
     ``,
-    `Partial close history:`,
-    partialsSection,
+    `1h candle analysis (${preAnalysis1h.candles.length} candles):`,
+    `Price structure pattern: ${preAnalysis1h.pattern.join(" → ") || "n/a"}`,
+    `Overall trend: ${fmt2(preTrendPct)}% over 12h`,
+    `Volume trend: ${preAnalysis1h.volumeTrend}`,
+    `Near recent high: ${preAnalysis1h.nearRecentHigh}`,
+    `Near recent low: ${preAnalysis1h.nearRecentLow}`,
+    preAnalysis1h.candles.length > 0 ? `Key candle observations:\n${preAnalysis1h.candles.map(candleRow1h).join("\n")}` : "",
     ``,
-    `Version B comparison (same symbol, same period):`,
+    `15m candle analysis (${preAnalysis15m.candles.length} candles = 2h before entry):`,
+    `Pattern: ${preAnalysis15m.pattern.join(" → ") || "n/a"}`,
+    `Volume trend: ${preAnalysis15m.volumeTrend}`,
+    preAnalysis15m.candles.length > 0 ? preAnalysis15m.candles.map(candleRow15m).join("\n") : "",
+    ``,
+    `BTC context (same 12h): ${btcContextPre}`,
+    ``,
+    `═══ ENTRY CANDLE ANALYSIS ═══`,
+    ``,
+    `1h entry candle:`,
+    `Direction: ${entryC1h.direction}`,
+    `Body strength: ${entryC1h.bodyPct.toFixed(0)}% of range`,
+    `Upper wick: ${entryC1h.upperWickPct.toFixed(0)}%${entryC1h.upperWickPct > 40 ? " [rejection of highs]" : ""}`,
+    `Lower wick: ${entryC1h.lowerWickPct.toFixed(0)}%${entryC1h.lowerWickPct > 40 ? " [rejection of lows]" : ""}`,
+    `Volume: ${entryC1h.volumeVsAvg.toFixed(1)}× average`,
+    `Close position: ${entryC1h.closePosition.toFixed(0)}% of range`,
+    `Pattern: ${entryC1h.isPinBar ? "PIN BAR" : entryC1h.isDoji ? "DOJI" : "normal"}`,
+    ``,
+    `15m entry candle: ${entryC15m.direction} | body:${entryC15m.bodyPct.toFixed(0)}% | vol:${entryC15m.volumeVsAvg.toFixed(1)}×avg`,
+    ``,
+    `═══ SIGNALS USED IN DECISION ═══`,
+    `Original entry reasoning: ${input.whyNow ?? input.reasoning ?? "unknown"}`,
+    `Setup type: ${input.setupType ?? "unknown"}`,
+    `Score at entry: ${input.score ?? "unknown"}/100`,
+    `Regime: ${regime}`,
+    `SL: ${input.sl ? "$" + parseFloat(input.sl).toFixed(4) : "not set"} | TP1: ${input.tp1 ? "$" + parseFloat(input.tp1).toFixed(4) : "not set"} | TP2: ${input.tp2 ? "$" + parseFloat(input.tp2).toFixed(4) : "not set"}`,
+    ``,
+    `Signal accuracy history (from past trades):`,
+    signalAccuracyLines,
+    ``,
+    `═══ VERSION B COMPARISON ═══`,
     versionBStr,
     ``,
-    `── Execution Analysis ──────────────────────────────`,
-    `TP levels:`,
-    `  TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
-    `  TP2 ($${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"}): reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}${tp2Price > 0 && tp2Reached && !tp2Executed ? " ⚠️ MISSED" : ""}`,
+    `═══ POST-TRADE ANALYSIS (after exit) ═══`,
     ``,
-    `Profit protection:`,
-    `  Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
-    `  5% threshold: triggered=${maxProfitPct >= 5 ? "YES" : "NO"} | executed=${memPartials.some(p => p.partialType === "profit_5pct") ? "YES" : "NO"}`,
-    `  10% threshold: triggered=${maxProfitPct >= 10 ? "YES" : "NO"} | executed=${memPartials.some(p => p.partialType === "profit_10pct") ? "YES" : "NO"}`,
-    `  20% threshold: triggered=${maxProfitPct >= 20 ? "YES" : "NO"} | executed=${memPartials.some(p => p.partialType === "profit_20pct") ? "YES" : "NO"}`,
+    `Price 1h after exit: $${price1hAfter > 0 ? price1hAfter.toFixed(4) : "n/a"}`,
+    `Price 4h after exit: $${price4hAfter > 0 ? price4hAfter.toFixed(4) : "n/a"} (${fmt2(immediateReactionPct)}%)`,
+    `Price 24h after exit: $${price24hAfter > 0 ? price24hAfter.toFixed(4) : "n/a"} (${fmt2(fullMove24hPct)}%)`,
+    `BTC post-exit: ${btcContextPost}`,
     ``,
-    `Fill quality:`,
-    `  Expected exit: $${expectedExitPrice.toFixed(4)}`,
-    `  Actual exit:   $${actualExitPrice.toFixed(4)}`,
-    `  Slippage:      ${slippage.toFixed(3)}%${slippage > 0.5 ? " ⚠️ SIGNIFICANT" : ""}`,
+    postAnalysis1h.candles.length > 0
+      ? `1h candles after exit:\n${postAnalysis1h.candles.slice(0, 8).map((c, i) => `Post-${i + 1}h: ${c.direction} | body:${c.bodyPct.toFixed(0)}% vol:${c.volumeVsAvg.toFixed(1)}×avg`).join("\n")}` : "",
+    postAnalysis15m.candles.length > 0
+      ? `15m immediate reaction:\n${postAnalysis15m.candles.map((c, i) => `Post-15m-${i + 1}: ${c.direction} | body:${c.bodyPct.toFixed(0)}%`).join("\n")}` : "",
     ``,
-    `Stop loss:`,
-    `  Planned: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} | Direction: ${plannedSL > 0 ? (input.direction === "long" ? (plannedSL < input.entryPrice ? "correct (below entry)" : "WRONG (above entry)") : (plannedSL > input.entryPrice ? "correct (above entry)" : "WRONG (below entry)")) : "n/a"}`,
+    exitMethod === "sl_hit"
+      ? `SL EXIT: Max additional loss avoided if SL held: ${maxAdditionalLossPct.toFixed(2)}%\nDid price continue against position? ${maxAdditionalLossPct > 1 ? "YES — SL saved further loss" : "NO — SL may have been premature"}`
+      : `TP EXIT: Additional gain available after exit: ${additionalGainPct.toFixed(2)}%\nDid price continue in our direction? ${additionalGainPct > 2 ? "YES — TP too conservative" : "NO — TP well timed"}`,
     ``,
-    `Partial closes:`,
-    `  Planned:   tp1, tp2`,
-    `  Executed:  ${memPartials.length > 0 ? memPartials.map(p => `${p.partialType ?? "?"}@$${parseFloat(p.priceAtClose ?? "0").toFixed(4)}`).join(", ") : "none"}`,
-    `  Unplanned: ${unplannedPartials.length > 0 ? unplannedPartials.map(p => p.partialType ?? "?").join(", ") : "none"}`,
-    `  Total closes: ${memPartials.length}`,
-    ``,
-    `Exit method: ${exitMethod}`,
+    `═══ EXECUTION ANALYSIS ═══`,
+    `TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
+    `TP2 ($${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"}): reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
+    `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
+    `Slippage: ${slippage.toFixed(3)}%${slippage > 0.5 ? " ⚠️ SIGNIFICANT" : ""}`,
+    `Partial closes: ${memPartials.length > 0 ? memPartials.map(p => `${p.partialType ?? "?"}@$${parseFloat(p.priceAtClose ?? "0").toFixed(4)}`).join(", ") : "none"}`,
     `Execution issues: ${executionIssues.length > 0 ? executionIssues.join("; ") : "none"}`,
     `Failure type: ${failureType.toUpperCase()}`,
+    `Partial close history:\n${partialsSection}`,
     ``,
     failureType === "execution"
-      ? `IMPORTANT: Failure type is EXECUTION. Do NOT blame the strategy. Identify the specific system bug. What code fix is needed?`
+      ? `IMPORTANT: EXECUTION failure. Identify the specific system bug.`
       : failureType === "strategy"
-      ? `IMPORTANT: Failure type is STRATEGY. What was wrong with the analysis? What signals were missed? What to do differently next time?`
+      ? `IMPORTANT: STRATEGY failure. What signals were missed? What to do differently?`
       : failureType === "mixed"
-      ? `IMPORTANT: Failure type is MIXED. Address both execution issues AND strategy quality.`
-      : `IMPORTANT: Trade was successful. Focus on what worked well and reinforce good patterns.`,
+      ? `IMPORTANT: MIXED failure. Address both execution issues AND strategy quality.`
+      : `IMPORTANT: Successful trade. Reinforce what worked.`,
     ``,
-    `Reflect honestly. Be specific about named signals. No generic advice. Return ONLY valid JSON:`,
+    `Review ALL candle data above with hindsight. Return ONLY valid JSON (no markdown):`,
     `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
+    `"entryCandleQuality":"strong|neutral|weak","entryVolumeConfirmed":true,`,
+    `"preTradeWarningsMissed":["string"],"preTradeConfirmationsPresent":["string"],`,
     `"slPlacement":"good|too_tight|too_wide","tpRealism":"good|too_tight|too_ambitious",`,
+    `"slWasCorrect":true,"tpWasConservative":false,"missedGainPct":null,"continuedLossPct":null,`,
     `"sizingCorrect":true,"partialsCorrect":true,"marketContextCorrect":true,`,
     `"mistakeType":"wrong_direction|late_entry|stop_too_tight|stop_too_wide|chasing_extended_move|gave_back_profits|cut_winner_early|position_review_interference|stale_metadata_bug|correct_but_unlucky|null",`,
     `"signalsThatWorked":["specific signal name"],"signalsThatFailed":["specific signal name"],`,
+    `"signalAccuracyInsight":"one sentence about which signals to trust more/less",`,
+    `"candlePatternLesson":"specific candle pattern lesson from this trade",`,
     `"versionBLesson":"string or null","whatWorked":"string","whatDidnt":"string",`,
-    `"lessonsLearned":"one concrete insight","nextTimeWouldDo":"one specific change"}`,
-  ].filter(s => s !== null && s !== undefined).join("\n");
+    `"lessonsLearned":"one concrete insight","nextTimeWouldDo":"one specific change",`,
+    `"failureType":"strategy|execution|mixed|success","executionIssues":["string"]}`,
+  ].filter(s => s !== null && s !== undefined && s !== "").join("\n");
 
   type R = {
     entryQuality: string; directionCorrect: boolean; entryTiming: string;
-    slPlacement: string; tpRealism: string; sizingCorrect: boolean;
-    partialsCorrect: boolean | string; marketContextCorrect: boolean;
-    mistakeType: string | null; signalsThatWorked: string[];
-    signalsThatFailed: string[]; versionBLesson: string | null;
+    entryCandleQuality: string; entryVolumeConfirmed: boolean;
+    preTradeWarningsMissed: string[]; preTradeConfirmationsPresent: string[];
+    slPlacement: string; tpRealism: string;
+    slWasCorrect: boolean | string; tpWasConservative: boolean | string;
+    missedGainPct: number | null; continuedLossPct: number | null;
+    sizingCorrect: boolean; partialsCorrect: boolean | string;
+    marketContextCorrect: boolean; mistakeType: string | null;
+    signalsThatWorked: string[]; signalsThatFailed: string[];
+    signalAccuracyInsight: string; candlePatternLesson: string;
+    versionBLesson: string | null;
     whatWorked: string; whatDidnt: string; lessonsLearned: string; nextTimeWouldDo: string;
+    failureType: string; executionIssues: string[];
   };
 
   const res = await llm.json<R>({
@@ -372,34 +617,52 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     schema: {
       type: "object",
       required: ["entryQuality", "directionCorrect", "entryTiming", "slPlacement", "tpRealism",
-                 "sizingCorrect", "partialsCorrect", "marketContextCorrect",
-                 "signalsThatWorked", "signalsThatFailed", "whatWorked", "whatDidnt",
-                 "lessonsLearned", "nextTimeWouldDo"],
+                 "entryCandleQuality", "preTradeWarningsMissed", "preTradeConfirmationsPresent",
+                 "signalsThatWorked", "signalsThatFailed", "candlePatternLesson",
+                 "signalAccuracyInsight", "whatWorked", "whatDidnt", "lessonsLearned", "nextTimeWouldDo"],
       properties: {
-        entryQuality:         { type: "string" },
-        directionCorrect:     { type: "boolean" },
-        entryTiming:          { type: "string" },
-        slPlacement:          { type: "string" },
-        tpRealism:            { type: "string" },
-        sizingCorrect:        { type: "boolean" },
-        partialsCorrect:      {},
-        marketContextCorrect: { type: "boolean" },
-        mistakeType:          {},
-        signalsThatWorked:    { type: "array", items: { type: "string" } },
-        signalsThatFailed:    { type: "array", items: { type: "string" } },
-        versionBLesson:       {},
-        whatWorked:           { type: "string" },
-        whatDidnt:            { type: "string" },
-        lessonsLearned:       { type: "string" },
-        nextTimeWouldDo:      { type: "string" },
+        entryQuality:                 { type: "string" },
+        directionCorrect:             { type: "boolean" },
+        entryTiming:                  { type: "string" },
+        entryCandleQuality:           { type: "string" },
+        entryVolumeConfirmed:         { type: "boolean" },
+        preTradeWarningsMissed:       { type: "array", items: { type: "string" } },
+        preTradeConfirmationsPresent: { type: "array", items: { type: "string" } },
+        slPlacement:                  { type: "string" },
+        tpRealism:                    { type: "string" },
+        slWasCorrect:                 {},
+        tpWasConservative:            {},
+        missedGainPct:                {},
+        continuedLossPct:             {},
+        sizingCorrect:                { type: "boolean" },
+        partialsCorrect:              {},
+        marketContextCorrect:         { type: "boolean" },
+        mistakeType:                  {},
+        signalsThatWorked:            { type: "array", items: { type: "string" } },
+        signalsThatFailed:            { type: "array", items: { type: "string" } },
+        signalAccuracyInsight:        { type: "string" },
+        candlePatternLesson:          { type: "string" },
+        versionBLesson:               {},
+        whatWorked:                   { type: "string" },
+        whatDidnt:                    { type: "string" },
+        lessonsLearned:               { type: "string" },
+        nextTimeWouldDo:              { type: "string" },
+        failureType:                  { type: "string" },
+        executionIssues:              { type: "array", items: { type: "string" } },
       },
     },
     fallback: {
       entryQuality: "ok", directionCorrect: true, entryTiming: "middle",
-      slPlacement: "good", tpRealism: "good", sizingCorrect: true, partialsCorrect: "na",
-      marketContextCorrect: true, mistakeType: null,
-      signalsThatWorked: [], signalsThatFailed: [],
+      entryCandleQuality: "neutral", entryVolumeConfirmed: false,
+      preTradeWarningsMissed: [], preTradeConfirmationsPresent: [],
+      slPlacement: "good", tpRealism: "good",
+      slWasCorrect: "na", tpWasConservative: false,
+      missedGainPct: null, continuedLossPct: null,
+      sizingCorrect: true, partialsCorrect: "na", marketContextCorrect: true,
+      mistakeType: null, signalsThatWorked: [], signalsThatFailed: [],
+      signalAccuracyInsight: "", candlePatternLesson: "",
       versionBLesson: null, whatWorked: "", whatDidnt: "", lessonsLearned: "", nextTimeWouldDo: "",
+      failureType, executionIssues,
     },
   });
 
@@ -410,6 +673,11 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     d.mistakeType && d.mistakeType !== "null" ? `mistake=${d.mistakeType}` : null,
     d.lessonsLearned || null,
   ].filter(Boolean).join(" | ");
+
+  const slWasCorrectBool = d.slWasCorrect === "na" ? null
+    : d.slWasCorrect === true || d.slWasCorrect === "true";
+  const tpWasConservativeBool = d.tpWasConservative === "na" ? null
+    : d.tpWasConservative === true || d.tpWasConservative === "true";
 
   await db.insert(tradeMemoryTable).values({
     symbol:               input.symbol,
@@ -434,8 +702,8 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     lessonsLearned:       d.lessonsLearned       || null,
     nextTimeWouldDo:      d.nextTimeWouldDo      || null,
     // Execution quality tracking
-    failureType,
-    executionIssues,
+    failureType:            d.failureType || failureType,
+    executionIssues:        d.executionIssues?.length ? d.executionIssues : executionIssues,
     tp1Reached,
     tp2Reached,
     maxProfitPct:           String(maxProfitPct.toFixed(4)),
@@ -444,6 +712,22 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
     excessivePartials:      memPartials.length > 3,
     exitMethod,
     metadataWasStale:       false,
+    // Candle & signal analysis
+    entryCandleQuality:     d.entryCandleQuality     || null,
+    entryVolumeConfirmed:   typeof d.entryVolumeConfirmed === "boolean" ? d.entryVolumeConfirmed : null,
+    preTradeWarningsMissed: d.preTradeWarningsMissed?.length  ? d.preTradeWarningsMissed  : null,
+    preTradeConfirmations:  d.preTradeConfirmationsPresent?.length ? d.preTradeConfirmationsPresent : null,
+    slWasCorrect:           slWasCorrectBool,
+    tpWasConservative:      tpWasConservativeBool,
+    missedGainPct:          d.missedGainPct    != null ? String((d.missedGainPct as number).toFixed(4))    : (additionalGainPct > 0 ? String(additionalGainPct.toFixed(4)) : null),
+    continuedLossPct:       d.continuedLossPct != null ? String((d.continuedLossPct as number).toFixed(4)) : (maxAdditionalLossPct > 0 ? String(maxAdditionalLossPct.toFixed(4)) : null),
+    candlePatternLesson:    d.candlePatternLesson    || null,
+    signalAccuracyInsight:  d.signalAccuracyInsight  || null,
+    btcContextPre,
+    btcContextPost,
+    price1hAfter:           price1hAfter  > 0 ? String(price1hAfter)  : null,
+    price4hAfter:           price4hAfter  > 0 ? String(price4hAfter)  : null,
+    price24hAfter:          price24hAfter > 0 ? String(price24hAfter) : null,
   });
 
   // Alert on execution failures
@@ -848,6 +1132,84 @@ export async function getRecentMemory(limit = 15): Promise<string> {
         const pct = w.wouldHavePnlPct ?? 0;
         lines.push(`${w.symbol} ${w.direction} entry $${w.entryPrice.toFixed(4)} → +${pct.toFixed(2)}% (TP hit)`);
         if (w.whyNow) lines.push(`  What worked: ${w.whyNow}`);
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  // ── Signal accuracy summary ──
+  try {
+    const sigRows = await db.select({
+      signalsThatWorked: tradeMemoryTable.signalsThatWorked,
+      signalsThatFailed: tradeMemoryTable.signalsThatFailed,
+    }).from(tradeMemoryTable)
+      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+      .orderBy(desc(tradeMemoryTable.createdAt))
+      .limit(50);
+
+    const acc: Record<string, { worked: number; failed: number }> = {};
+    for (const row of sigRows) {
+      for (const s of JSON.parse(row.signalsThatWorked ?? "[]") as string[]) {
+        if (!acc[s]) acc[s] = { worked: 0, failed: 0 };
+        acc[s].worked++;
+      }
+      for (const s of JSON.parse(row.signalsThatFailed ?? "[]") as string[]) {
+        if (!acc[s]) acc[s] = { worked: 0, failed: 0 };
+        acc[s].failed++;
+      }
+    }
+
+    if (Object.keys(acc).length > 0) {
+      const sorted = Object.entries(acc)
+        .map(([sig, s]) => ({ sig, total: s.worked + s.failed, pct: s.worked / (s.worked + s.failed) * 100 }))
+        .sort((a, b) => b.pct - a.pct);
+
+      lines.push(`\n═══ YOUR SIGNAL ACCURACY (from trade history) ═══`);
+      for (const { sig, total, pct } of sorted) {
+        const reliability = pct >= 60 ? "✅ reliable" : pct >= 40 ? "⚠️ mixed" : "❌ unreliable";
+        lines.push(`${sig}: ${pct.toFixed(0)}% (${total} trades) ${reliability}`);
+      }
+      const top    = sorted.slice(0, 3).map(s => s.sig).join(", ");
+      const bottom = sorted.slice(-3).reverse().map(s => s.sig).join(", ");
+      if (top)    lines.push(`Most reliable signals (use these): ${top}`);
+      if (bottom) lines.push(`Least reliable signals (question these): ${bottom}`);
+      lines.push(`Apply this knowledge to current scan decisions.`);
+    }
+  } catch { /* non-fatal */ }
+
+  // ── Candle pattern lessons ──
+  try {
+    const patternRows = await db.select({
+      symbol:                 tradeMemoryTable.symbol,
+      candlePatternLesson:    tradeMemoryTable.candlePatternLesson,
+      preTradeWarningsMissed: tradeMemoryTable.preTradeWarningsMissed,
+    }).from(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNotNull(tradeMemoryTable.candlePatternLesson),
+      ))
+      .orderBy(desc(tradeMemoryTable.createdAt))
+      .limit(10)
+      .catch(() => [] as Array<Record<string, unknown>>);
+
+    if (patternRows.length > 0) {
+      lines.push(`\n═══ CANDLE PATTERN LESSONS ═══`);
+      for (const r of patternRows) {
+        if (r.candlePatternLesson)
+          lines.push(`${r.symbol}: ${r.candlePatternLesson}`);
+      }
+      // Extract common pre-entry warnings
+      const warnCounts: Record<string, number> = {};
+      for (const r of patternRows) {
+        for (const w of r.preTradeWarningsMissed ?? []) {
+          warnCounts[w] = (warnCounts[w] ?? 0) + 1;
+        }
+      }
+      const topWarnings = Object.entries(warnCounts)
+        .sort((a, b) => b[1] - a[1]).slice(0, 5)
+        .map(([w, n]) => `- ${w} (${n}x)`).join("\n");
+      if (topWarnings) {
+        lines.push(`\nCommon pre-entry warnings to watch:`);
+        lines.push(topWarnings);
       }
     }
   } catch { /* non-fatal */ }

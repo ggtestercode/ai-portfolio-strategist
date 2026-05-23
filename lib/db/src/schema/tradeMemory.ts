@@ -42,6 +42,22 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   excessivePartials:    boolean("excessive_partials"),
   exitMethod:           text("exit_method"),            // 'review' | 'sl_hit' | 'tp_hit' | '48h_timer' | 'profit_protection' | 'unknown'
   metadataWasStale:     boolean("metadata_was_stale"),
+  // Candle & signal analysis fields — batch 4
+  entryCandleQuality:     text("entry_candle_quality"),             // strong | neutral | weak
+  entryVolumeConfirmed:   boolean("entry_volume_confirmed"),
+  preTradeWarningsMissed: jsonb("pre_trade_warnings_missed").$type<string[]>(),
+  preTradeConfirmations:  jsonb("pre_trade_confirmations").$type<string[]>(),
+  slWasCorrect:           boolean("sl_was_correct"),
+  tpWasConservative:      boolean("tp_was_conservative"),
+  missedGainPct:          decimal("missed_gain_pct",    { precision: 10, scale: 4 }),
+  continuedLossPct:       decimal("continued_loss_pct", { precision: 10, scale: 4 }),
+  candlePatternLesson:    text("candle_pattern_lesson"),
+  signalAccuracyInsight:  text("signal_accuracy_insight"),
+  btcContextPre:          text("btc_context_pre"),
+  btcContextPost:         text("btc_context_post"),
+  price1hAfter:           decimal("price_1h_after",  { precision: 20, scale: 8 }),
+  price4hAfter:           decimal("price_4h_after",  { precision: 20, scale: 8 }),
+  price24hAfter:          decimal("price_24h_after", { precision: 20, scale: 8 }),
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;

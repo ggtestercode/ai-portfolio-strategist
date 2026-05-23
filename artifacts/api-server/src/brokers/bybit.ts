@@ -103,6 +103,22 @@ export async function getKlines(symbol: string, interval: string, limit = 50): P
   })).reverse();
 }
 
+export async function fetchKlines(params: {
+  symbol: string; interval: string; end?: Date; start?: Date; limit?: number;
+}): Promise<BybitKline[]> {
+  const { symbol, interval, end, start, limit = 50 } = params;
+  const query: Record<string, string | number> = {
+    category: "linear", symbol: normalise(symbol), interval, limit,
+  };
+  if (end)   query["end"]   = end.getTime();
+  if (start) query["start"] = start.getTime();
+  const r = await get<{ list: string[][] }>("/v5/market/kline", query);
+  return r.list.map(c => ({
+    ts: parseInt(c[0] ?? "0"), open: parseFloat(c[1] ?? "0"), high: parseFloat(c[2] ?? "0"),
+    low: parseFloat(c[3] ?? "0"), close: parseFloat(c[4] ?? "0"), volume: parseFloat(c[5] ?? "0"),
+  })).reverse();
+}
+
 export async function getAllSymbols(): Promise<string[]> {
   const r = await get<{ list: Array<{ symbol: string; status: string; quoteCoin: string }> }>(
     "/v5/market/instruments-info", { category: "linear", limit: 500 }
