@@ -190,7 +190,7 @@ export async function logClosedTrade(params: ClosedTradeParams): Promise<void> {
 
 // ─── Core reflection engine ───────────────────────────────────────────────────
 
-async function generateReflection(input: ReflectionInput): Promise<void> {
+async function generateReflection(input: ReflectionInput, _retryCount = 0): Promise<void> {
   const sign = input.pnl >= 0 ? "+" : "";
 
   // 1. Fetch Bybit closed-pnl for this symbol within the trade window
@@ -754,14 +754,17 @@ async function generateReflection(input: ReflectionInput): Promise<void> {
   );
   console.log(`[tradeMemory] ${input.symbol} reflection stored — ${outcome} ${sign}${input.pnlPct.toFixed(2)}% mistake=${d.mistakeType ?? "none"}`);
 
-  // Fix 2: Retry once after 60s if critical fields are missing
   if (!isComplete) {
-    console.error(`[reflection] INCOMPLETE — ${input.symbol} missing critical fields. Scheduling retry in 60 seconds.`);
-    setTimeout(() => {
-      generateReflection(input).catch(e =>
-        console.error(`[reflection] retry failed for ${input.symbol}:`, (e as Error).message)
-      );
-    }, 60_000);
+    if (_retryCount < 2) {
+      console.error(`[reflection] INCOMPLETE — ${input.symbol} missing critical fields. Retry ${_retryCount + 1}/2 in 60 seconds.`);
+      setTimeout(() => {
+        generateReflection(input, _retryCount + 1).catch(e =>
+          console.error(`[reflection] retry failed for ${input.symbol}:`, (e as Error).message)
+        );
+      }, 60_000);
+    } else {
+      console.error(`[reflection] INCOMPLETE — ${input.symbol} gave up after 2 retries. Accepting partial reflection.`);
+    }
   }
 }
 
