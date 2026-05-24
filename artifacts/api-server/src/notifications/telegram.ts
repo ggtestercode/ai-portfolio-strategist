@@ -1601,7 +1601,12 @@ export function startPolling(): void {
         healthSection,
       ].join("\n");
 
-      await b.sendMessage(chatId, lines, { parse_mode: "HTML" });
+      let out = lines;
+      if (out.length > 3976) {
+        const cut = out.lastIndexOf("\n", 3976);
+        out = out.slice(0, cut > 0 ? cut : 3976) + "\n... (truncated — full rules in DB)";
+      }
+      await b.sendMessage(chatId, out, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
