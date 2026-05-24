@@ -278,16 +278,48 @@ export async function openPosition(
 
   // Set TP1 as exchange partial TP (30% of position) after order fills
   if (opts?.tp1 && opts.tp1 > 0) {
-    const tp1Str = (Math.round(opts.tp1 / filters.tickSize) * filters.tickSize).toFixed(tickDp);
-    const tp1Qty = (Math.floor(qty * 0.30 / filters.qtyStep) * filters.qtyStep);
+    const tp1Str    = (Math.round(opts.tp1 / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+    const tp1Qty    = (Math.floor(qty * 0.30 / filters.qtyStep) * filters.qtyStep);
     const tp1QtyStr = Math.max(tp1Qty, filters.minQty).toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
-    await bpost("/v5/position/trading-stop", {
-      category: "linear", symbol: sym,
-      takeProfit: tp1Str, tpSize: tp1QtyStr,
-      tpTriggerBy: "LastPrice", tpslMode: "Partial",
-      positionIdx,
-    }).catch(e => console.warn(`[Bybit] TP1 partial set ${sym}: ${e.message}`));
-    console.log(`[Bybit] TP1 partial set ${sym}: 30% (${tp1QtyStr}) at $${tp1Str}`);
+
+    // Wait for position to settle on Bybit before setting partial TP
+    await new Promise(res => setTimeout(res, 600));
+
+    let tp1Set = false;
+    for (let attempt = 1; attempt <= 3 && !tp1Set; attempt++) {
+      try {
+        await bpost("/v5/position/trading-stop", {
+          category: "linear", symbol: sym,
+          takeProfit: tp1Str, tpSize: tp1QtyStr,
+          tpTriggerBy: "LastPrice", tpslMode: "Partial",
+          positionIdx,
+        });
+        tp1Set = true;
+        console.log(`[Bybit] TP1 partial set ${sym}: 30% (${tp1QtyStr}) at $${tp1Str}`);
+      } catch (e) {
+        console.warn(`[Bybit] TP1 partial set ${sym} attempt ${attempt}/3:`, (e as Error).message);
+        if (attempt < 3) await new Promise(res => setTimeout(res, 1000));
+      }
+    }
+
+    // Verify TP was accepted by Bybit — check live position takeProfit field
+    if (tp1Set) {
+      try {
+        const livePos = (await getPositions()).find(p => p.symbol === sym && p.positionIdx === positionIdx);
+        if (livePos && (!livePos.takeProfit || livePos.takeProfit <= 0)) {
+          console.warn(`[Bybit] TP1 verification failed ${sym} — exchange shows no TP; software fallback active`);
+          tp1Set = false;
+        } else if (livePos?.takeProfit) {
+          console.log(`[Bybit] TP1 verified on exchange ${sym}: $${livePos.takeProfit}`);
+        }
+      } catch (e) {
+        console.warn(`[Bybit] TP1 verification check ${sym}:`, (e as Error).message);
+      }
+    }
+
+    if (!tp1Set) {
+      console.error(`[Bybit] TP1 exchange order NOT set for ${sym} — software polling is the only fallback`);
+    }
   }
 
   return { orderId: r.orderId, entryPrice: markPrice, positionIdx, qty };

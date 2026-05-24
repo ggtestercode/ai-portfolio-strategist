@@ -592,8 +592,10 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
       continue;
     }
 
-    // TP1: price reached TP1 and flag not yet set (ignores tier — fires regardless of manual partials)
-    if (effectiveTp1 > 0 && !(pm.tp1Executed || currentTier >= 1)) {
+    // TP1: price reached TP1 and explicit flag not yet set
+    // currentTier is NOT used here — tier inference can false-positive if any prior partial reduced size.
+    // pm.tp1Executed is the sole authoritative gate; it is set explicitly when TP1 fires.
+    if (effectiveTp1 > 0 && !pm.tp1Executed) {
       const tp1Reached = pos.side === "Buy" ? currentPrice >= effectiveTp1 : currentPrice <= effectiveTp1;
       if (tp1Reached) {
         console.log(`[cronScanner] TP1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${effectiveTp1}`);
