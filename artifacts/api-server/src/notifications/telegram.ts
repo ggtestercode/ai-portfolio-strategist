@@ -1641,9 +1641,14 @@ export function startPolling(): void {
           .from(paperTradesTable)
           .where(and(eq(paperTradesTable.status, "closed"), gte(paperTradesTable.signalTime, since)))
           .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
-        db.select({ id: tradeMemoryTable.id })
-          .from(tradeMemoryTable)
-          .where(and(eq(tradeMemoryTable.action, "TRADE_CLOSE"), eq(tradeMemoryTable.tp1Reached, true), gte(tradeMemoryTable.createdAt, since)))
+        db.selectDistinct({ symbol: tradeLogTable.symbol })
+          .from(tradeLogTable)
+          .innerJoin(tradeMemoryTable, and(
+            eq(tradeMemoryTable.symbol, tradeLogTable.symbol),
+            eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+            eq(tradeMemoryTable.tp1Reached, true),
+          ))
+          .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
           .catch(() => []),
       ]);
 
@@ -1667,7 +1672,7 @@ export function startPolling(): void {
       const m3Tp1 = mode3Tp1Raw.length;
       const vBTp1 = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("tp1")).length;
 
-      const fmt    = (n: number) => `${n >= 0 ? "+" : ""}$${Math.abs(n).toFixed(2)}`;
+      const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
       const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
 
       const tooEarly = s3.total < 5 || sB.total < 5;
