@@ -1394,13 +1394,14 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
   for (const trade of closedTrades) {
     if (processed >= max) break;
 
-    // Deduplicate: skip only COMPLETE reflections (have lessonsLearned)
+    // Deduplicate: skip only COMPLETE reflections (have lessonsLearned AND new verdict fields)
     const existingById = await db.select({ id: tradeMemoryTable.id })
       .from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.sourceTradeId, trade.id),
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-        isNotNull(tradeMemoryTable.lessonsLearned),   // complete = has lessons
+        isNotNull(tradeMemoryTable.lessonsLearned),
+        isNotNull(tradeMemoryTable.entryTimingVerdict), // batch-5 verdict fields present
       ))
       .limit(1)
       .catch(() => [] as Array<{ id: string }>);
@@ -1414,7 +1415,8 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
       .where(and(
         eq(tradeMemoryTable.symbol, trade.symbol),
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-        isNotNull(tradeMemoryTable.lessonsLearned),   // complete = has lessons
+        isNotNull(tradeMemoryTable.lessonsLearned),
+        isNotNull(tradeMemoryTable.entryTimingVerdict), // batch-5 verdict fields present
         isNull(tradeMemoryTable.sourceTradeId),
         eq(tradeMemoryTable.pnlPct, pnlPctStr),
       ))
@@ -1455,6 +1457,15 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
         isNull(tradeMemoryTable.entryTiming),
         eq(tradeMemoryTable.pnlPct, pnlPctStr),
+      ))
+      .catch(() => {});
+    // (d) complete records missing batch-5 verdict fields — regenerate to add them
+    await db.delete(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.sourceTradeId, trade.id),
+        eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+        isNotNull(tradeMemoryTable.lessonsLearned),
+        isNull(tradeMemoryTable.entryTimingVerdict),
       ))
       .catch(() => {});
 
