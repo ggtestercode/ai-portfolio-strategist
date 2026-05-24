@@ -1011,16 +1011,59 @@ export async function generateTradingRules(): Promise<void> {
     .map(([issue, count]) => `  - ${issue}: ${count}x`)
     .join("\n") || "  none";
 
+  // Verdict aggregates from batch-5 fields (computed over all reflections, not just strategy)
+  const N = reflections.length;
+  const slTightCount = reflections.filter(r => r.slTooTight === true).length;
+  const slWideCount  = reflections.filter(r => r.slTooWide  === true).length;
+  const tp1VerdictCounts:     Record<string, number> = {};
+  const tp2VerdictCounts:     Record<string, number> = {};
+  const entryTimingCounts:    Record<string, number> = {};
+  const partialTimingCounts:  Record<string, number> = {};
+  const failureTypeCounts:    Record<string, number> = {};
+  let profitMissedSum = 0, profitMissedCount = 0;
+  let opCostSum = 0,       opCostCount = 0;
+  for (const r of reflections) {
+    if (r.tp1Verdict)         tp1VerdictCounts[r.tp1Verdict]         = (tp1VerdictCounts[r.tp1Verdict]         ?? 0) + 1;
+    if (r.tp2Verdict)         tp2VerdictCounts[r.tp2Verdict]         = (tp2VerdictCounts[r.tp2Verdict]         ?? 0) + 1;
+    if (r.entryTimingVerdict) entryTimingCounts[r.entryTimingVerdict] = (entryTimingCounts[r.entryTimingVerdict] ?? 0) + 1;
+    if (r.partialTiming)      partialTimingCounts[r.partialTiming]    = (partialTimingCounts[r.partialTiming]    ?? 0) + 1;
+    if (r.failureType)        failureTypeCounts[r.failureType]        = (failureTypeCounts[r.failureType]        ?? 0) + 1;
+    if (r.profitMissedPct   != null) { profitMissedSum += parseFloat(String(r.profitMissedPct));   profitMissedCount++; }
+    if (r.opportunityCostPct != null) { opCostSum       += parseFloat(String(r.opportunityCostPct)); opCostCount++;       }
+  }
+  const topFailureType  = Object.entries(failureTypeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "unknown";
+  const avgProfitMissed = profitMissedCount > 0 ? (profitMissedSum / profitMissedCount).toFixed(2) : "n/a";
+  const avgOpCost       = opCostCount       > 0 ? (opCostSum       / opCostCount      ).toFixed(2) : "n/a";
+  const fmtCounts = (m: Record<string, number>) => Object.entries(m).sort((a,b) => b[1]-a[1]).map(([k,v]) => `${k}=${v}`).join(", ") || "no data";
+  const verdictAggregates = [
+    `VERDICT AGGREGATES (last ${N} trades):`,
+    `- SL too tight: ${slTightCount}/${N} trades`,
+    `- SL too wide:  ${slWideCount}/${N} trades`,
+    `- TP1 verdict:  ${fmtCounts(tp1VerdictCounts)}`,
+    `- TP2 verdict:  ${fmtCounts(tp2VerdictCounts)}`,
+    `- Entry timing: ${fmtCounts(entryTimingCounts)}`,
+    `- Partial timing: ${fmtCounts(partialTimingCounts)}`,
+    `- Avg profit missed: ${avgProfitMissed}%`,
+    `- Avg opportunity cost: ${avgOpCost}%`,
+    `- Most common failure type: ${topFailureType}`,
+  ].join("\n");
+
   const reflStr = strategyReflections.map(r => {
     const pct = parseFloat(r.pnlPct ?? "0");
+    const slVerdict = r.slTooTight ? "too_tight" : r.slTooWide ? "too_wide" : null;
     return [
       `${r.symbol} | P/L: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
-      r.entryQuality      ? `  Entry: ${r.entryQuality} timing=${r.entryTiming}` : "",
-      r.mistakeType       ? `  Mistake: ${r.mistakeType}` : "",
-      r.signalsThatWorked ? `  Worked: ${r.signalsThatWorked}` : "",
-      r.signalsThatFailed ? `  Failed: ${r.signalsThatFailed}` : "",
-      r.lessonsLearned    ? `  Lesson: ${r.lessonsLearned}` : "",
-      r.nextTimeWouldDo   ? `  Next: ${r.nextTimeWouldDo}` : "",
+      r.entryQuality        ? `  Entry: ${r.entryQuality} timing=${r.entryTiming}` : "",
+      r.entryTimingVerdict  ? `  EntryVerdict: ${r.entryTimingVerdict}` : "",
+      slVerdict             ? `  SL: ${slVerdict}` : "",
+      r.tp1Verdict          ? `  TP1Verdict: ${r.tp1Verdict}` : "",
+      r.tp2Verdict          ? `  TP2Verdict: ${r.tp2Verdict}` : "",
+      r.opportunityCostPct != null ? `  OpportunityCost: ${parseFloat(String(r.opportunityCostPct)).toFixed(2)}%` : "",
+      r.mistakeType         ? `  Mistake: ${r.mistakeType}` : "",
+      r.signalsThatWorked   ? `  Worked: ${r.signalsThatWorked}` : "",
+      r.signalsThatFailed   ? `  Failed: ${r.signalsThatFailed}` : "",
+      r.lessonsLearned      ? `  Lesson: ${r.lessonsLearned}` : "",
+      r.nextTimeWouldDo     ? `  Next: ${r.nextTimeWouldDo}` : "",
     ].filter(Boolean).join("\n");
   }).join("\n---\n");
 
@@ -1034,6 +1077,14 @@ export async function generateTradingRules(): Promise<void> {
     `Execution-only failures excluded from rule generation (${executionOnlyFailures.length} trades):`,
     execSummary,
     `These need code fixes, not strategy rules.`,
+    ``,
+    verdictAggregates,
+    ``,
+    `Rules derived from VERDICT AGGREGATES must be specific and quantified.`,
+    `Good: "SL was too tight in 7/10 losses — widen SL to 2.0× ATR minimum"`,
+    `Bad:  "Consider SL placement more carefully"`,
+    `Good: "TP1 too_ambitious in 8/12 trades — set TP1 at 1.0× ATR not 2.0×"`,
+    `Bad:  "Be more realistic with TP targets"`,
     ``,
     `Analyse ONLY the ${strategyReflections.length} strategy/mixed/success entries below for rule generation:`,
     ``,
