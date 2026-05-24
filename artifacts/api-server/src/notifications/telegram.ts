@@ -67,7 +67,7 @@ import {
   type PositionMeta,
   type WatchCoin,
 } from "@workspace/db";
-import { desc, gt, and, eq, isNotNull, gte } from "drizzle-orm";
+import { desc, gt, and, eq, isNotNull, gte, ne } from "drizzle-orm";
 
 let _bot: TelegramBot | null = null;
 
@@ -1639,7 +1639,7 @@ export function startPolling(): void {
           .catch(() => [] as Array<{ pnl: string | null; pnlPct: string | null }>),
         db.select({ wouldHavePnl: paperTradesTable.wouldHavePnl, exitReason: paperTradesTable.exitReason })
           .from(paperTradesTable)
-          .where(and(eq(paperTradesTable.status, "closed"), gte(paperTradesTable.signalTime, since)))
+          .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, since)))
           .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
         db.selectDistinct({ symbol: tradeLogTable.symbol, exitMethod: tradeMemoryTable.exitMethod, tp1Reached: tradeMemoryTable.tp1Reached })
           .from(tradeLogTable)
