@@ -424,6 +424,7 @@ async function runPhase2(
   // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
   const mtfLines:     string[] = [];
   const fundingLines: string[] = [];
+  const liqLines:     string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
 
@@ -436,12 +437,13 @@ async function runPhase2(
         getKlines(sym, "60", 25).catch(() => [] as BybitKline[]),
       ]);
       const rSign = fr.rate >= 0 ? "+" : "";
+      const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
       mtfLines.push(`${sym} MTF: ${mtf}`);
       fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
+      if (price > 0) liqLines.push(`${sym} liq@10x: long=$${(price * 0.9).toFixed(4)} short=$${(price * 1.1).toFixed(4)}`);
       sweepMap.set(sym, detectLiquiditySweep(klines));
       const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
       const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
-      const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
       squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
     } catch { /* skip */ }
   }));
@@ -576,6 +578,7 @@ async function runPhase2(
     ``,
     mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
     fundingLines.length ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n` : "",
+    liqLines.length    ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
     rsContext ? `\n${rsContext}\n` : "",
     sweepContext   ? `\n${sweepContext}` : "",
     squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",
