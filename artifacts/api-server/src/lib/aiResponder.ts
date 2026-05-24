@@ -291,10 +291,13 @@ interface ParsedTrade {
   assetClass:   string;
   orderType:    "market" | "limit";
   limitPrice:   number | null;
+  stopLoss?:    number;
+  tp1?:         number;
+  tp2?:         number;
 }
 
 async function parseTrade(message: string): Promise<ParsedTrade | null> {
-  const res = await llm.json<{ symbol: string|null; side: string; amountUsd: number|null; broker: string; assetClass: string; orderType: string; limitPrice: number|null }>({
+  const res = await llm.json<{ symbol: string|null; side: string; amountUsd: number|null; broker: string; assetClass: string; orderType: string; limitPrice: number|null; stopLoss: number|null; tp1: number|null; tp2: number|null }>({
     taskType:      "command_parse",
     systemContext: [
       "Extract trade parameters. Reply JSON only.",
@@ -303,8 +306,11 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
       "amountUsd: null if not specified by user.",
       "orderType: 'limit' if user says 'at $X','above $X','below $X','limit $X'. Otherwise 'market'.",
       "limitPrice: the price value for limit orders, null for market orders.",
+      "stopLoss: extract if user says 'SL=X', 'sl X', 'stop X', 'stop loss X'. null if not specified.",
+      "tp1: extract if user says 'TP=X', 'tp1 X', 'target X', 'take profit X'. null if not specified.",
+      "tp2: extract if user says 'TP2=X', 'tp2 X'. null if not specified.",
     ].join(" "),
-    prompt: `Message: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER or null","side":"buy|sell","amountUsd":number or null,"broker":"bybit|etoro|okx","assetClass":"Equity|Crypto|ETF|Commodity","orderType":"market|limit","limitPrice":number or null}`,
+    prompt: `Message: "${message.slice(0, 300)}"\nReturn: {"symbol":"TICKER or null","side":"buy|sell","amountUsd":number or null,"broker":"bybit|etoro|okx","assetClass":"Equity|Crypto|ETF|Commodity","orderType":"market|limit","limitPrice":number or null,"stopLoss":number or null,"tp1":number or null,"tp2":number or null}`,
     schema: {
       type: "object",
       properties: {
@@ -315,9 +321,12 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
         assetClass: { type: "string" },
         orderType:  { type: "string" },
         limitPrice: { type: ["number","null"] },
+        stopLoss:   { type: ["number","null"] },
+        tp1:        { type: ["number","null"] },
+        tp2:        { type: ["number","null"] },
       },
     },
-    fallback: { symbol: null, side: "buy", amountUsd: null, broker: "bybit", assetClass: "Crypto", orderType: "market", limitPrice: null },
+    fallback: { symbol: null, side: "buy", amountUsd: null, broker: "bybit", assetClass: "Crypto", orderType: "market", limitPrice: null, stopLoss: null, tp1: null, tp2: null },
   });
 
   const d = res.data;
@@ -341,6 +350,9 @@ async function parseTrade(message: string): Promise<ParsedTrade | null> {
     assetClass:   d.assetClass ?? "Crypto",
     orderType:    (d.orderType === "limit" ? "limit" : "market"),
     limitPrice:   d.limitPrice ?? null,
+    stopLoss:     d.stopLoss   ?? undefined,
+    tp1:          d.tp1        ?? undefined,
+    tp2:          d.tp2        ?? undefined,
   };
 }
 
@@ -731,13 +743,32 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
     return executeLimitOrder(trade);
   }
 
+  // Hard gate — Bybit market orders must have SL and TP1 defined
+  if (trade.broker === "bybit") {
+    const gateMissing: string[] = [];
+    if (!trade.stopLoss) gateMissing.push("stopLoss");
+    if (!trade.tp1)      gateMissing.push("tp1");
+    if (gateMissing.length > 0) {
+      console.log(`[gate] NL REJECTED ${trade.symbol} — missing required fields: ${gateMissing.join(", ")}`);
+      return [
+        `🚫 Entry rejected — ${trade.symbol}`,
+        `Missing: ${gateMissing.join(", ")}`,
+        `Cannot enter without SL and TP defined.`,
+        `Example: "buy ${trade.symbol} $10 SL=80000 TP1=90000 TP2=95000"`,
+      ].join("\n");
+    }
+  }
+
   const proposal = buildProposal({
-    symbol:     trade.symbol,
-    side:       trade.side,
-    amountUsd:  trade.amountUsd,
-    assetClass: trade.assetClass,
-    rationale:  "NL instruction via assistant",
-    broker:     trade.broker,
+    symbol:          trade.symbol,
+    side:            trade.side,
+    amountUsd:       trade.amountUsd,
+    assetClass:      trade.assetClass,
+    rationale:       "NL instruction via assistant",
+    broker:          trade.broker,
+    stopLossPrice:   trade.stopLoss,
+    takeProfitPrice: trade.tp2 ?? trade.tp1,
+    tp1Price:        trade.tp1,
   });
 
   const result    = await approvalGate.submit(proposal);
@@ -820,6 +851,8 @@ async function executeTrade(trade: ParsedTrade, totalCapital: number): Promise<s
         leverage:   isBybit ? 10 : 1,
         amountUsd:  trade.amountUsd,
         reasoning:  "NL trade instruction",
+        stopLoss:   trade.stopLoss,
+        takeProfit: trade.tp1,
       }).catch(() => {});
     }
 

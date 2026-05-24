@@ -1293,6 +1293,27 @@ async function runWatchScan(): Promise<void> {
       // Score crossed threshold — execute
       if (await isCoinSuspended(signal.symbol)) { await removeFromWatchList(signal.symbol); continue; }
 
+      // Hard gate — SL/TP/setupType/score required before any order
+      {
+        const gateRequired: Record<string, unknown> = {
+          stopLoss:  signal.stopLoss,
+          tp1:       signal.tp1,
+          setupType: signal.setupType,
+          score:     signal.score,
+        };
+        const gateMissing = Object.entries(gateRequired).filter(([, v]) => !v).map(([k]) => k);
+        if (gateMissing.length > 0) {
+          console.log(`[gate] REJECTED ${sym} (watchScan) — missing required fields: ${gateMissing.join(", ")}`);
+          alertFn?.([
+            `🚫 Entry rejected — ${sym}`,
+            `Missing: ${gateMissing.join(", ")}`,
+            `No trade without SL/TP/setup type.`,
+          ].join("\n")).catch(() => {});
+          await removeFromWatchList(signal.symbol);
+          continue;
+        }
+      }
+
       const amountUsd = calcRMultipleSizing(
         bybitBalance,
         signal.entry ?? signal.price,
@@ -1518,6 +1539,26 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     for (const opp of rankedSignals) {
       if (await isCoinSuspended(opp.symbol)) continue;
       const sym = bybitSym(opp.symbol);
+
+      // Hard gate — SL/TP/setupType/score required before any order
+      {
+        const gateRequired: Record<string, unknown> = {
+          stopLoss:  opp.stopLoss,
+          tp1:       opp.tp1,
+          setupType: opp.setupType,
+          score:     opp.score,
+        };
+        const gateMissing = Object.entries(gateRequired).filter(([, v]) => !v).map(([k]) => k);
+        if (gateMissing.length > 0) {
+          console.log(`[gate] REJECTED ${sym} — missing required fields: ${gateMissing.join(", ")}`);
+          alertFn?.([
+            `🚫 Entry rejected — ${sym}`,
+            `Missing: ${gateMissing.join(", ")}`,
+            `No trade without SL/TP/setup type.`,
+          ].join("\n")).catch(() => {});
+          continue;
+        }
+      }
 
       // Layer 4+5: R-multiple sizing
       const amountUsd = calcRMultipleSizing(
