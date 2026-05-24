@@ -1354,20 +1354,29 @@ async function runWatchScan(): Promise<void> {
           patchPositionMeta(sym, { score: signal.score ?? 0 }).catch(() => {});
 
           // Verify metadata completeness — atr excluded: startup stores atr=0 for Claude SL/TP
+          // Also reconcile actual entryPrice and leverage from Bybit fill
           setTimeout(async () => {
             const s2   = await loadBotState().catch(() => null);
             const pm   = ((s2?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
             const required: (keyof PositionMeta)[] = ["tp1", "sl", "originalQty"];
             const missing = required.filter(f => !pm?.[f as keyof PositionMeta]);
+            const livePositions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+            const pos2 = livePositions.find(p => p.symbol === sym);
             if (missing.length > 0) {
               console.log(`[watchScan] ⚠️ Missing metadata for ${sym}: ${missing.join(", ")} — applying ATR fallback`);
-              const livePos = await bybitGetPositions().catch(() => [] as BybitPosition[]);
-              const pos2    = livePos.find(p => p.symbol === sym);
               if (pos2) {
                 const dir = pos2.side === "Buy" ? "long" : "short" as "long" | "short";
                 await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size)
                   .catch(e => console.warn(`[watchScan] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
               }
+            }
+            if (pos2) {
+              const plannedEntry = signal.entry ?? signal.price;
+              await db.update(tradeLogTable)
+                .set({ entryPrice: String(pos2.entryPrice), leverage: pos2.leverage })
+                .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+                .catch(e => console.warn(`[watchScan] entry reconcile ${sym}:`, e.message));
+              console.log(`[trade] Entry price reconciled ${sym}: planned $${plannedEntry} → actual $${pos2.entryPrice} | leverage: ${signal.leverage ?? 10}× → ${pos2.leverage}×`);
             }
           }, 5000);
           await logOpenTrade({
@@ -1619,9 +1628,10 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         // Verify actual direction from live Bybit position — signal direction can differ from what Bybit opened
         const signalDirection = opp.direction === "short" ? "short" : "long";
         let actualDirection: "long" | "short" = signalDirection;
+        let livePos: BybitPosition | undefined;
         try {
           const liveAfterOpen = await bybitGetPositions();
-          const livePos = liveAfterOpen.find(p => p.symbol === sym);
+          livePos = liveAfterOpen.find(p => p.symbol === sym);
           if (livePos) {
             actualDirection = livePos.side === "Buy" ? "long" : "short";
             if (actualDirection !== signalDirection) {
@@ -1657,6 +1667,11 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         console.log(`[rules] Tagged ${sym} with rule IDs: [${appliedRuleIds.join(", ")}]`);
 
         // Patch trade_log row with signal TP1/TP2/SL for durable partial-exit tracking
+        // Also reconcile entryPrice and leverage from actual Bybit fill (livePos already fetched above)
+        if (livePos) {
+          const plannedEntry = opp.entry ?? opp.price;
+          console.log(`[trade] Entry price reconciled ${sym}: planned $${plannedEntry} → actual $${livePos.entryPrice} | leverage: ${opp.leverage ?? 10}× → ${livePos.leverage}×`);
+        }
         await db.update(tradeLogTable)
           .set({
             tp1:            opp.tp1      ? String(opp.tp1)      : null,
@@ -1667,6 +1682,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             score:          opp.score    ? String(opp.score)    : null,
             whyNow:         opp.whyNow   ?? null,
             appliedRuleIds: appliedRuleIds.length ? appliedRuleIds : null,
+            ...(livePos ? { entryPrice: String(livePos.entryPrice), leverage: livePos.leverage } : {}),
           })
           .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
           .catch(e => console.warn(`[cronScanner] trade_log tp patch ${sym}:`, e.message));
