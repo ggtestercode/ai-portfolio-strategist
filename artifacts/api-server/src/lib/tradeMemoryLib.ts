@@ -431,7 +431,7 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
   if (maxProfitPct >= 5  && !memPartials.some(p => p.partialType === "profit_5pct"))  executionIssues.push("5% profit protection missed");
   if (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct")) executionIssues.push("10% profit protection missed");
   if (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct")) executionIssues.push("20% profit protection missed");
-  if (slippage > 0.5)     executionIssues.push(`Significant slippage: ${slippage.toFixed(2)}%`);
+  if (slippage > 1.5)     executionIssues.push(`Significant slippage: ${slippage.toFixed(2)}%`);
   if (plannedSL > 0) {
     const slDirectionOk = input.direction === "long" ? plannedSL < input.entryPrice : plannedSL > input.entryPrice;
     if (!slDirectionOk) executionIssues.push("SL direction wrong");
@@ -573,7 +573,7 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     `TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
     `TP2 ($${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"}): reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
     `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
-    `Slippage: ${slippage.toFixed(3)}%${slippage > 0.5 ? " ⚠️ SIGNIFICANT" : ""}`,
+    `Slippage: ${slippage.toFixed(3)}%${slippage > 1.5 ? " ⚠️ SIGNIFICANT" : ""}`,
     `Partial closes: ${memPartials.length > 0 ? memPartials.map(p => `${p.partialType ?? "?"}@$${parseFloat(p.priceAtClose ?? "0").toFixed(4)}`).join(", ") : "none"}`,
     `Execution issues: ${executionIssues.length > 0 ? executionIssues.join("; ") : "none"}`,
     `Failure type: ${failureType.toUpperCase()}`,
@@ -840,6 +840,8 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
       ``,
       failureType === "execution"
         ? "Strategy was correct — system bug needs a fix"
+        : failureType === "success"
+        ? "Note: slippage on a winning trade — monitor fill quality"
         : "Mixed: strategy + execution issues",
     ].join("\n");
     _ruleAlertFn(msg).catch(() => {});
