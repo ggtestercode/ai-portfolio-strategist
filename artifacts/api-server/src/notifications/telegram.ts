@@ -833,7 +833,12 @@ export function startPolling(): void {
       }
 
       out.push(``, `<i>Live Bybit API · ${now}</i>`);
-      await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
+      let posOut = out.join("\n");
+      if (posOut.length > 3976) {
+        const cut = posOut.lastIndexOf("\n", 3976);
+        posOut = posOut.slice(0, cut > 0 ? cut : 3976) + "\n… (truncated)";
+      }
+      await b.sendMessage(chatId, posOut, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /positions failed: ${escapeHtml(m)}`);
@@ -1409,13 +1414,12 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       const memory = await getRecentMemory(5);
-      await b.sendMessage(chatId, [
-        `🧠 <b>Trade Memory</b>`,
-        ``,
-        escapeHtml(memory),
-        ``,
-        `<i>${utcNow()}</i>`,
-      ].join("\n"), { parse_mode: "HTML" });
+      let memOut = [`🧠 <b>Trade Memory</b>`, ``, escapeHtml(memory), ``, `<i>${utcNow()}</i>`].join("\n");
+      if (memOut.length > 3976) {
+        const cut = memOut.lastIndexOf("\n", 3976);
+        memOut = memOut.slice(0, cut > 0 ? cut : 3976) + "\n… (truncated)";
+      }
+      await b.sendMessage(chatId, memOut, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
@@ -1510,7 +1514,12 @@ export function startPolling(): void {
         `<i>${utcNow()}</i>`,
       ].filter(Boolean).join("\n");
 
-      await b.sendMessage(chatId, lines, { parse_mode: "HTML" });
+      let paperOut = lines;
+      if (paperOut.length > 3976) {
+        const cut = paperOut.lastIndexOf("\n", 3976);
+        paperOut = paperOut.slice(0, cut > 0 ? cut : 3976) + "\n… (truncated)";
+      }
+      await b.sendMessage(chatId, paperOut, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
