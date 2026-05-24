@@ -634,6 +634,11 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     ``,
     `Review ALL candle data above with hindsight. Return ONLY valid JSON (no markdown):`,
     `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
+    `"entryTimingVerdict":"early|good|late|wrong","slTooTight":false,"slTooWide":false,`,
+    `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious",`,
+    `"partialTiming":"correct|too_early|too_late|na","manualCloseVerdict":"correct|wrong|neutral|na",`,
+    `"profitMissedPct":null,"optimalEntryPrice":null,"optimalSlPrice":null,`,
+    `"optimalTp1Price":null,"optimalPnlPct":null,"opportunityCostPct":null,`,
     `"entryCandleQuality":"strong|neutral|weak","entryVolumeConfirmed":true,`,
     `"preTradeWarningsMissed":["string"],"preTradeConfirmationsPresent":["string"],`,
     `"slPlacement":"good|too_tight|too_wide","tpRealism":"good|too_tight|too_ambitious",`,
@@ -645,12 +650,7 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     `"candlePatternLesson":"specific candle pattern lesson from this trade",`,
     `"versionBLesson":"string or null","whatWorked":"string","whatDidnt":"string",`,
     `"lessonsLearned":"one concrete insight","nextTimeWouldDo":"one specific change",`,
-    `"failureType":"strategy|execution|mixed|success","executionIssues":["string"],`,
-    `"entryTimingVerdict":"early|good|late|wrong","slTooTight":false,"slTooWide":false,`,
-    `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious",`,
-    `"partialTiming":"correct|too_early|too_late|na","manualCloseVerdict":"correct|wrong|neutral|na",`,
-    `"profitMissedPct":null,"optimalEntryPrice":null,"optimalSlPrice":null,`,
-    `"optimalTp1Price":null,"optimalPnlPct":null,"opportunityCostPct":null}`,
+    `"failureType":"strategy|execution|mixed|success","executionIssues":["string"]}`,
   ].filter(s => s !== null && s !== undefined && s !== "").join("\n");
 
   type R = {
@@ -686,7 +686,9 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
       required: ["entryQuality", "directionCorrect", "entryTiming", "slPlacement", "tpRealism",
                  "entryCandleQuality", "preTradeWarningsMissed", "preTradeConfirmationsPresent",
                  "signalsThatWorked", "signalsThatFailed", "candlePatternLesson",
-                 "signalAccuracyInsight", "whatWorked", "whatDidnt", "lessonsLearned", "nextTimeWouldDo"],
+                 "signalAccuracyInsight", "whatWorked", "whatDidnt", "lessonsLearned", "nextTimeWouldDo",
+                 "entryTimingVerdict", "slTooTight", "slTooWide", "tp1Verdict", "tp2Verdict",
+                 "partialTiming", "manualCloseVerdict"],
       properties: {
         entryQuality:                 { type: "string" },
         directionCorrect:             { type: "boolean" },
