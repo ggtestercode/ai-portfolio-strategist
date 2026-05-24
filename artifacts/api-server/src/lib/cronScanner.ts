@@ -1732,13 +1732,24 @@ const ADJUST_SL_NOTIFY_COOLDOWN_MS = 2 * 3_600_000; // at most once per 2h per p
 // Symbols that had open positions on the previous monitor tick (for close detection)
 const prevPositionSymbols = new Set<string>();
 const selfHealAttempted   = new Set<string>(); // prevent repeated ATR fallback per session
-let monitorRunning = false;
+let monitorRunning  = false;
+let monitorFirstRun = true; // seed prevPositionSymbols on first tick
 
 async function checkPositionMonitor(): Promise<void> {
   if (monitorRunning) { console.log("[posMonitor] Previous check still running — skipping tick"); return; }
   monitorRunning = true;
   try {
   const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+
+  // First tick after (re)start: seed prevPositionSymbols from live positions and skip
+  // disappearance detection — startup reconciliation handles already-closed positions
+  if (monitorFirstRun) {
+    monitorFirstRun = false;
+    positions.forEach(p => prevPositionSymbols.add(p.symbol));
+    console.log(`[posMonitor] First tick — seeded ${prevPositionSymbols.size} symbols: ${[...prevPositionSymbols].join(", ") || "none"}`);
+    if (!positions.length) return;
+  }
+
   if (!positions.length) return;
 
   // Use in-memory cache for all bot_state reads — no DB call per tick
@@ -1755,23 +1766,31 @@ async function checkPositionMonitor(): Promise<void> {
   const posMeta             = (stateRow?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   const now          = Date.now();
 
-  // ── Trailing SL close detection ────────────────────────────────────────────
+  // ── Position disappearance detection (SL/TP/liquidation) ───────────────────
   const currentSymbols = new Set(positions.map(p => p.symbol));
   for (const sym of prevPositionSymbols) {
     if (!currentSymbols.has(sym)) {
       await clearPositionMeta(sym).catch(() => {});
-      selfHealAttempted.delete(sym); // allow fresh heal attempt if symbol reopens
-      if (posMeta[sym]?.trailingActive) {
-        const closed = await bybitGetClosedPnl(5).catch(() => []);
-        const trade  = closed.find(c => c.symbol === sym);
-        if (trade) {
-          const won = trade.closedPnl >= 0;
-          await alertFn?.([
-            `${won ? "✅" : "🔴"} <b>Position closed — ${sym}</b>`,
-            `Exited at $${trade.avgExitPrice.toFixed(4)}`,
-            `P/L: ${won ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
-          ].join("\n")).catch(() => {});
-        }
+      selfHealAttempted.delete(sym);
+      // Always fetch closed PnL and close trade_log — regardless of trailing state
+      const closed = await bybitGetClosedPnl(10, undefined, sym).catch(() => []);
+      const trade  = closed[0]; // most recent close for this symbol
+      if (trade) {
+        await closeOpenTrade({
+          symbol:             sym,
+          broker:             "bybit",
+          exitPrice:          trade.avgExitPrice,
+          amountUsd:          trade.closedSize * trade.avgEntryPrice,
+          pnlOverride:        trade.closedPnl,
+          entryPriceOverride: trade.avgEntryPrice,
+        }).catch(e => console.warn(`[posMonitor] closeOpenTrade ${sym}:`, (e as Error).message));
+        const won = trade.closedPnl >= 0;
+        await alertFn?.([
+          `${won ? "✅" : "🔴"} <b>Position closed — ${sym}</b>`,
+          `Exit: $${trade.avgExitPrice.toFixed(4)} | P/L: ${won ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
+        ].join("\n")).catch(() => {});
+      } else {
+        console.warn(`[posMonitor] ${sym} disappeared from positions but no closedPnl record found`);
       }
     }
   }

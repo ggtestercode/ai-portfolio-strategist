@@ -1,5 +1,5 @@
 import { approvalGate }           from "./approvalGate";
-import { backfillStructuredReflections } from "./tradeMemoryLib";
+import { backfillStructuredReflections, closeOpenTrade } from "./tradeMemoryLib";
 import { openPosition }            from "../brokers/etoro";
 import {
   openPosition    as bybitOpen,
@@ -7,6 +7,7 @@ import {
   getPositions    as bybitGetPositions,
   setStopLoss     as bybitSetStopLoss,
   setTakeProfit   as bybitSetTakeProfit,
+  getClosedPnl    as bybitGetClosedPnl,
   getKlines,
   getTicker,
   type BybitKline,
@@ -16,8 +17,8 @@ import { openPositionPaper }       from "../brokers/okxPaper";
 import { sendApprovalRequest, sendAlert } from "../notifications/telegram";
 import { syncAllHoldingsToDB }     from "./aiResponder";
 import { syncTotalCapitalToDB }    from "./brokerBalance";
-import { db, botStateTable, type PositionMeta } from "@workspace/db";
-import { eq }                      from "drizzle-orm";
+import { db, botStateTable, tradeLogTable, type PositionMeta } from "@workspace/db";
+import { eq, isNull }              from "drizzle-orm";
 
 export let okxPaperMode = false;
 
@@ -233,8 +234,54 @@ export async function initBrokers(): Promise<void> {
   backfillStructuredReflections(60)
     .catch(e => console.error("[startup] backfill failed:", e));
 
+  // Reconcile any positions closed on Bybit while bot was down
+  reconcileClosedPositions()
+    .catch(e => console.error("[startup] reconcile failed:", e));
+
   console.log("[startup] Broker executors registered: etoro, bybit, okx");
   console.log("[startup] Telegram notifier registered");
+}
+
+async function reconcileClosedPositions(): Promise<void> {
+  const openInDb = await db.select()
+    .from(tradeLogTable)
+    .where(isNull(tradeLogTable.exitAt))
+    .catch(() => [] as typeof tradeLogTable.$inferSelect[]);
+
+  const bybitOpen = openInDb.filter(t => t.broker === "bybit");
+  if (!bybitOpen.length) return;
+
+  const livePositions = await bybitGetPositions().catch(() => []);
+  const liveSymbols   = new Set(livePositions.map(p => p.symbol));
+
+  for (const trade of bybitOpen) {
+    if (liveSymbols.has(trade.symbol)) continue;
+
+    console.log(`[reconcile] ${trade.symbol} open in DB but not on Bybit — fetching closedPnl`);
+    const closed = await bybitGetClosedPnl(5, undefined, trade.symbol).catch(() => []);
+    const record = closed[0];
+
+    if (record) {
+      await closeOpenTrade({
+        symbol:             trade.symbol,
+        broker:             "bybit",
+        exitPrice:          record.avgExitPrice,
+        amountUsd:          record.closedSize * record.avgEntryPrice,
+        pnlOverride:        record.closedPnl,
+        entryPriceOverride: record.avgEntryPrice,
+      }).catch(e => console.warn(`[reconcile] closeOpenTrade ${trade.symbol}:`, (e as Error).message));
+      console.log(`[reconcile] ${trade.symbol} closed — exit $${record.avgExitPrice} pnl $${record.closedPnl.toFixed(2)}`);
+      await sendAlert?.([
+        `🔄 <b>Reconciled: ${trade.symbol}</b>`,
+        `Was open in DB but closed on Bybit`,
+        `Exit: $${record.avgExitPrice.toFixed(4)} | P/L: ${record.closedPnl >= 0 ? "+" : ""}$${record.closedPnl.toFixed(2)}`,
+      ].join("\n")).catch(() => {});
+    } else {
+      console.warn(`[reconcile] ${trade.symbol} — no closedPnl found on Bybit`);
+    }
+  }
+
+  console.log("[reconcile] Startup reconciliation complete");
 }
 
 async function setSlTpForExistingPositions(): Promise<void> {
