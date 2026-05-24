@@ -16,6 +16,27 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
 
+## Deployment
+
+**Always use `./deploy.sh` — never manual ssh one-liners.**
+
+```bash
+# From local machine:
+cd /Users/zhiqitzq/ai-portfolio-strategist
+./deploy.sh
+```
+
+**Never use:**
+```bash
+ssh root@139.180.215.150 "cd /root/ai-portfolio-strategist && git pull && pm2 restart trading-bot-api"
+```
+This skips the build step. The bot runs from a compiled `dist/index.mjs` (gitignored). Without `pnpm build`, `git pull` updates TypeScript source but the server keeps running the old binary — all code changes are silently invisible at runtime.
+
+**Fast equivalent (skips frontend/schema, just rebuilds bot):**
+```bash
+ssh root@139.180.215.150 "cd /root/ai-portfolio-strategist && git pull && cd artifacts/api-server && pnpm build && cd /root/ai-portfolio-strategist && pm2 restart trading-bot-api"
+```
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
