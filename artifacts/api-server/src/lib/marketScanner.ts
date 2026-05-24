@@ -223,14 +223,18 @@ export async function detectMarketRegime(): Promise<MarketRegime> {
   }
 }
 
-async function fetchMTFData(symbol: string): Promise<string> {
+async function fetchMTFData(symbol: string): Promise<{ summary: string; klines1h: BybitKline[]; klines15m: BybitKline[] }> {
   const intervals: Array<[string, string, boolean]> = [
     ["1","1m",false], ["15","15m",false], ["60","1h",true], ["240","4h",true], ["D","1D",false],
   ];
   const parts: string[] = [];
+  let klines1h:  BybitKline[] = [];
+  let klines15m: BybitKline[] = [];
   for (const [iv, label, withEma] of intervals) {
     try {
       const klines = await getKlines(symbol, iv, 50);
+      if (iv === "60")  klines1h  = klines;
+      if (iv === "15")  klines15m = klines;
       const closes = klines.map(k => k.close);
       const rsi    = Math.round(calcRSI(closes, 14));
       const last   = closes[closes.length - 1]?.toFixed(2) ?? "N/A";
@@ -243,7 +247,7 @@ async function fetchMTFData(symbol: string): Promise<string> {
       }
     } catch { parts.push(`${label}:N/A`); }
   }
-  return parts.join("|");
+  return { summary: parts.join("|"), klines1h, klines15m };
 }
 
 // ── Relative strength helpers ─────────────────────────────────────────────────
@@ -408,6 +412,17 @@ function formatRow(d: AssetData, assetClass: string): string {
   return `${d.symbol}|${assetClass}|$${d.price.toFixed(2)}|${d.change7d > 0 ? "+" : ""}${d.change7d}%|${d.change30d > 0 ? "+" : ""}${d.change30d}%|RSI${d.rsi}|${vol}`;
 }
 
+function fmtP(p: number): string {
+  if (p >= 10000) return p.toFixed(1);
+  if (p >= 100)   return p.toFixed(2);
+  if (p >= 1)     return p.toFixed(4);
+  return p.toFixed(6);
+}
+
+function fmtCandle(k: BybitKline): string {
+  return `${fmtP(k.open)},${fmtP(k.high)},${fmtP(k.low)},${fmtP(k.close)},${Math.round(k.volume)}`;
+}
+
 // ── Phase 2 helper: fetch data + LLM signal generation for given symbols ─────
 
 async function runPhase2(
@@ -422,25 +437,30 @@ async function runPhase2(
   activeRules:     Awaited<ReturnType<typeof getActiveRules>>,
 ): Promise<ScanOpportunity[]> {
   // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
-  const mtfLines:     string[] = [];
-  const fundingLines: string[] = [];
-  const liqLines:     string[] = [];
+  const mtfLines:      string[] = [];
+  const fundingLines:  string[] = [];
+  const liqLines:      string[] = [];
+  const candle1hLines: string[] = [];
+  const candle15mLines:string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
 
   await Promise.allSettled(selectedSymbols.map(async sym => {
     try {
-      const [mtf, fr, oi, klines] = await Promise.all([
+      const [mtfResult, fr, oi, klines] = await Promise.all([
         fetchMTFData(sym),
         getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 })),
         getOpenInterest(sym).catch(() => 0),
         getKlines(sym, "60", 25).catch(() => [] as BybitKline[]),
       ]);
+      const { summary: mtf, klines1h, klines15m } = mtfResult;
       const rSign = fr.rate >= 0 ? "+" : "";
       const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
       mtfLines.push(`${sym} MTF: ${mtf}`);
       fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
       if (price > 0) liqLines.push(`${sym} liq@10x: long=$${(price * 0.9).toFixed(4)} short=$${(price * 1.1).toFixed(4)}`);
+      if (klines1h.length  > 0) candle1hLines.push(`${sym} 1h candles (O,H,L,C,V): ${klines1h.slice(-20).map(fmtCandle).join(" | ")}`);
+      if (klines15m.length > 0) candle15mLines.push(`${sym} 15m candles (O,H,L,C,V): ${klines15m.slice(-20).map(fmtCandle).join(" | ")}`);
       sweepMap.set(sym, detectLiquiditySweep(klines));
       const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
       const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
@@ -576,8 +596,10 @@ async function runPhase2(
     `ATR: $${regime.atr.toFixed(0)} vs 30d avg: $${regime.atrAvg30d.toFixed(0)} (${regime.atr > 0 && regime.atrAvg30d > 0 ? (regime.atr / regime.atrAvg30d).toFixed(1) : "?"}×)`,
     `Regime note: ${regime.summary}`,
     ``,
-    mtfLines.length ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n` : "",
-    fundingLines.length ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n` : "",
+    mtfLines.length      ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n`                                          : "",
+    candle1hLines.length ? `1h OHLCV (last 20, oldest→newest):\n${candle1hLines.join("\n")}\n`                       : "",
+    candle15mLines.length? `15m OHLCV (last 20, oldest→newest):\n${candle15mLines.join("\n")}\n`                     : "",
+    fundingLines.length  ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n`                             : "",
     liqLines.length    ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
     rsContext ? `\n${rsContext}\n` : "",
     sweepContext   ? `\n${sweepContext}` : "",
