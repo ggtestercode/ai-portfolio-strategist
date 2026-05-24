@@ -63,10 +63,11 @@ import {
   botStateTable,
   paperTradesTable,
   tradeMemoryTable,
+  tradeLogTable,
   type PositionMeta,
   type WatchCoin,
 } from "@workspace/db";
-import { desc, gt, and, eq } from "drizzle-orm";
+import { desc, gt, and, eq, isNotNull, gte } from "drizzle-orm";
 
 let _bot: TelegramBot | null = null;
 
@@ -1606,6 +1607,80 @@ export function startPolling(): void {
         const cut = out.lastIndexOf("\n", 3976);
         out = out.slice(0, cut > 0 ? cut : 3976) + "\n... (truncated — full rules in DB)";
       }
+      await b.sendMessage(chatId, out, { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /compare — Mode 3 vs Version B stats since May 24 ───────────────────
+  b.onText(/^\/compare(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const since = new Date("2026-05-24T00:00:00Z");
+
+      const [mode3Raw, vBRaw, mode3Tp1Raw] = await Promise.all([
+        db.select({ pnl: tradeLogTable.pnl, pnlPct: tradeLogTable.pnlPct })
+          .from(tradeLogTable)
+          .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
+          .catch(() => [] as Array<{ pnl: string | null; pnlPct: string | null }>),
+        db.select({ wouldHavePnl: paperTradesTable.wouldHavePnl, exitReason: paperTradesTable.exitReason })
+          .from(paperTradesTable)
+          .where(and(eq(paperTradesTable.status, "closed"), gte(paperTradesTable.signalTime, since)))
+          .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
+        db.select({ id: tradeMemoryTable.id })
+          .from(tradeMemoryTable)
+          .where(and(eq(tradeMemoryTable.action, "TRADE_CLOSE"), eq(tradeMemoryTable.tp1Reached, true), gte(tradeMemoryTable.createdAt, since)))
+          .catch(() => []),
+      ]);
+
+      const m3 = mode3Raw.map(r => parseFloat(r.pnl ?? "0"));
+      const vB = vBRaw.map(r => r.wouldHavePnl ?? 0);
+
+      const stats = (vals: number[]) => {
+        const wins   = vals.filter(v => v > 0);
+        const losses = vals.filter(v => v <= 0);
+        return {
+          total:   vals.length,
+          netPnl:  vals.reduce((s, v) => s + v, 0),
+          winRate: vals.length > 0 ? Math.round(wins.length / vals.length * 100) : 0,
+          avgWin:  wins.length   > 0 ? wins.reduce((s, v) => s + v, 0) / wins.length     : null,
+          avgLoss: losses.length > 0 ? losses.reduce((s, v) => s + v, 0) / losses.length : null,
+        };
+      };
+
+      const s3 = stats(m3);
+      const sB = stats(vB);
+      const m3Tp1 = mode3Tp1Raw.length;
+      const vBTp1 = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("tp1")).length;
+
+      const fmt    = (n: number) => `${n >= 0 ? "+" : ""}$${Math.abs(n).toFixed(2)}`;
+      const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
+
+      const tooEarly = s3.total < 5 || sB.total < 5;
+      const verdict  = tooEarly
+        ? "Too early to compare (need 5+ trades each side)"
+        : s3.netPnl > sB.netPnl ? "Mode 3 ahead" : sB.netPnl > s3.netPnl ? "Version B ahead" : "Even";
+
+      const out = [
+        `📊 <b>Mode 3 vs Version B (May 24 → now)</b>`,
+        ``,
+        `🔴 <b>Mode 3 (Live)</b>`,
+        `Trades: ${s3.total} | Win rate: ${s3.winRate}%`,
+        `Net P&L: ${fmt(s3.netPnl)}`,
+        `Avg winner: ${fmtAvg(s3.avgWin, "+")} | Avg loser: ${fmtAvg(s3.avgLoss, "-")}`,
+        `TP1 hit: ${m3Tp1}/${s3.total}`,
+        ``,
+        `📄 <b>Version B (Paper)</b>`,
+        `Trades: ${sB.total} | Win rate: ${sB.winRate}%`,
+        `Net P&L: ${fmt(sB.netPnl)} (after fees/slippage)`,
+        `Avg winner: ${fmtAvg(sB.avgWin, "+")} | Avg loser: ${fmtAvg(sB.avgLoss, "-")}`,
+        `TP1 hit: ${vBTp1}/${sB.total}`,
+        ``,
+        `Verdict: <b>${verdict}</b>`,
+      ].join("\n");
+
       await b.sendMessage(chatId, out, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
