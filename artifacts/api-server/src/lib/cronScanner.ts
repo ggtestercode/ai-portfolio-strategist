@@ -811,18 +811,19 @@ async function makePositionReview(
 
   const positionLines = livePositions.map((p, i) => {
     const pnlStr = `${p.pnl >= 0 ? "+" : ""}$${p.pnl.toFixed(2)} (${p.pnlPct.toFixed(2)}%)`;
-    const slStr  = p.stopLoss   ? ` SL=$${p.stopLoss}`   : "";
-    const tpStr  = p.takeProfit ? ` TP=$${p.takeProfit}`  : "";
+    const slStr  = p.stopLoss  ? ` SL=$${p.stopLoss}`                                          : "";
+    const tpStr  = p.takeProfit ? ` TP=$${p.takeProfit}`                                       : "";
+    const liqStr = p.liqPrice  ? ` Liquidation=$${p.liqPrice.toFixed(4)}`                      : "";
     const ctx    = enriched[i];
     if (ctx?.status === "fulfilled") {
       const { direction, frNote, keyLevelNote } = ctx.value;
       return [
-        `- ${p.symbol} ${direction} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`,
+        `- ${p.symbol} ${direction} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}${liqStr}`,
         `  Key level: ${keyLevelNote}`,
         `  Funding:   ${frNote}`,
       ].join("\n");
     }
-    return `- ${p.symbol} ${p.side === "Buy" ? "LONG" : "SHORT"} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}`;
+    return `- ${p.symbol} ${p.side === "Buy" ? "LONG" : "SHORT"} ${p.leverage}x entry=$${p.entryPrice.toFixed(4)} P/L=${pnlStr}${slStr}${tpStr}${liqStr}`;
   }).join("\n");
 
   const addRule = bybitBalance < 200

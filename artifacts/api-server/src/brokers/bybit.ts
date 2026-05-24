@@ -66,7 +66,7 @@ function normalise(symbol: string): string {
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface BybitTicker  { symbol: string; lastPrice: number; bid: number; ask: number; change24h: number }
-export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; markPrice: number; leverage: number; pnl: number; pnlPct: number; margin: number; stopLoss?: number; takeProfit?: number; positionIdx: number; openTime: number }
+export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; markPrice: number; leverage: number; pnl: number; pnlPct: number; margin: number; stopLoss?: number; takeProfit?: number; liqPrice?: number; positionIdx: number; openTime: number }
 export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string }
 export interface BybitBalance { totalEquity: number; availableBalance: number; usedMargin: number; currency: string }
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
@@ -128,7 +128,7 @@ export async function getAllSymbols(): Promise<string[]> {
 
 // ── Account ───────────────────────────────────────────────────────────────────
 export async function getPositions(): Promise<BybitPosition[]> {
-  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; markPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; positionIdx: number; openTime?: string; createdTime?: string };
+  type RawPos = { symbol: string; side: string; size: string; avgPrice: string; markPrice: string; leverage: string; unrealisedPnl: string; stopLoss: string; takeProfit: string; liqPrice: string; positionIdx: number; openTime?: string; createdTime?: string };
   const r = await get<{ list: RawPos[] }>("/v5/position/list", { category: "linear", settleCoin: "USDT" });
   console.log("[Bybit] Raw positions (settleCoin=USDT):", JSON.stringify(r.list));
 
@@ -142,6 +142,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
     const pnl      = parseFloat(p.unrealisedPnl);
     const sl       = parseFloat(p.stopLoss)   || undefined;
     const tp       = parseFloat(p.takeProfit) || undefined;
+    const liq      = parseFloat(p.liqPrice)   || undefined;
     const margin   = entry > 0 && lev > 0 ? (size * entry) / lev : 0;
     // pnlPct as % price move (direction-aware)
     const pnlPct   = p.side === "Buy"
@@ -149,7 +150,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
       : (entry - mark) / entry * 100;
     // openTime = actual position open time; createdTime is instrument/account creation (can be 2022)
     const openTime = parseInt(p.openTime ?? p.createdTime ?? "0");
-    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size, entryPrice: entry, markPrice: mark, leverage: lev, pnl, pnlPct, margin, stopLoss: sl, takeProfit: tp, positionIdx: p.positionIdx ?? 0, openTime };
+    return { symbol: p.symbol, side: p.side as "Buy" | "Sell", size, entryPrice: entry, markPrice: mark, leverage: lev, pnl, pnlPct, margin, stopLoss: sl, takeProfit: tp, liqPrice: liq, positionIdx: p.positionIdx ?? 0, openTime };
   });
 }
 
