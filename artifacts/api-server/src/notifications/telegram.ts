@@ -1701,7 +1701,7 @@ export function startPolling(): void {
   });
 
   // ── /forceRules — manually trigger rule generation ───────────────────────
-  b.onText(/^\/forceRules(?:@\w+)?$/, async (msg) => {
+  b.onText(/^\/forceRules(?:@\w+)?$/i, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
       await b.sendMessage(chatId, `⏳ Generating rules from reflections…`);
