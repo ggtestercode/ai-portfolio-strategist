@@ -44,6 +44,7 @@ interface ReflectionInput {
   tp2?:          string | null;
   sourceTradeId?: string | null;
   markPriceAtDecision?: number;  // pre-order price the system used
+  suppressAlerts?: boolean;      // true for backfill — don't spam old-trade execution alerts
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -830,8 +831,8 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     opportunityCostPct:     d.opportunityCostPct != null ? String((d.opportunityCostPct as number).toFixed(4)) : null,
   });
 
-  // Alert on execution failures
-  if (executionIssues.length > 0 && _ruleAlertFn) {
+  // Alert on execution failures (suppressed for backfill runs)
+  if (executionIssues.length > 0 && _ruleAlertFn && !input.suppressAlerts) {
     const resultLabel = tradeLost ? "LOSS" : "WIN";
     const msg = [
       `⚠️ <b>Execution issue — ${input.symbol}</b>`,
@@ -1486,22 +1487,23 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
     console.log(`[backfill] Generating reflection for ${trade.symbol} ${trade.direction} ${pnlPct >= 0 ? "WIN" : "LOSS"} ${pnlPct.toFixed(2)}%`);
 
     await generateReflection({
-      symbol:        trade.symbol,
-      direction:     trade.direction,
+      symbol:         trade.symbol,
+      direction:      trade.direction,
       entryPrice,
       exitPrice,
       pnl,
       pnlPct,
-      reasoning:     trade.reasoning ?? undefined,
-      entryAt:       trade.entryAt,
-      exitAt:        trade.exitAt,
-      setupType:     trade.setupType,
-      score:         trade.score,
-      whyNow:        trade.whyNow,
-      sl:            trade.sl,
-      tp1:           trade.tp1,
-      tp2:           trade.tp2,
-      sourceTradeId: trade.id,
+      reasoning:      trade.reasoning ?? undefined,
+      entryAt:        trade.entryAt,
+      exitAt:         trade.exitAt,
+      setupType:      trade.setupType,
+      score:          trade.score,
+      whyNow:         trade.whyNow,
+      sl:             trade.sl,
+      tp1:            trade.tp1,
+      tp2:            trade.tp2,
+      sourceTradeId:  trade.id,
+      suppressAlerts: true,
     }).catch(e => console.error(`[backfill] ${trade.symbol} reflection failed:`, (e as Error).message));
 
     processed++;
