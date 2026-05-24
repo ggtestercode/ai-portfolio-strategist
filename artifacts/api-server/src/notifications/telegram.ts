@@ -1682,8 +1682,9 @@ export function startPolling(): void {
       const m3Sl     = m3Mem.filter(r => r.exit_method === "sl_hit").length;
       const m3Tp1    = m3Mem.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
       const m3Review = m3Mem.filter(r => r.exit_method === "review").length;
-      const vBTp1    = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("tp1")).length;
-      const vBSl     = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("sl")).length;
+      const vBTp1    = vBRaw.filter(r => r.exitReason === "tp1_hit" || r.exitReason === "tp2_hit").length;
+      const vBSl     = vBRaw.filter(r => r.exitReason === "sl_hit").length;
+      const vBReview = vBRaw.filter(r => r.exitReason === "claude_close").length;
       const vBTimer  = vBRaw.filter(r => r.exitReason === "48h_timer").length;
 
       const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
@@ -1707,7 +1708,7 @@ export function startPolling(): void {
         `Trades: ${sB.total} | Win rate: ${sB.winRate}%`,
         `Net P&L: ${fmt(sB.netPnl)} (after fees/slippage)`,
         `Avg winner: ${fmtAvg(sB.avgWin, "+")} | Avg loser: ${fmtAvg(sB.avgLoss, "-")}`,
-        `TP1: ${vBTp1} | SL: ${vBSl} | Timer: ${vBTimer} (of ${sB.total})`,
+        `TP1: ${vBTp1} | SL: ${vBSl} | Review: ${vBReview} | Timer: ${vBTimer} (of ${sB.total})`,
         ``,
         `Verdict: <b>${verdict}</b>`,
       ].join("\n");
