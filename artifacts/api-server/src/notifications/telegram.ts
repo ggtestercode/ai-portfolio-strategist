@@ -67,7 +67,7 @@ import {
   type PositionMeta,
   type WatchCoin,
 } from "@workspace/db";
-import { desc, gt, and, eq, isNotNull, gte, ne } from "drizzle-orm";
+import { desc, gt, and, eq, isNotNull, gte, ne, sql } from "drizzle-orm";
 
 let _bot: TelegramBot | null = null;
 
@@ -1632,7 +1632,7 @@ export function startPolling(): void {
     try {
       const since = new Date("2026-05-24T00:00:00Z");
 
-      const [mode3Raw, vBRaw, mode3MemRaw] = await Promise.all([
+      const [mode3Raw, vBRaw, mode3MemResult] = await Promise.all([
         db.select({ pnl: tradeLogTable.pnl, pnlPct: tradeLogTable.pnlPct })
           .from(tradeLogTable)
           .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
@@ -1641,14 +1641,24 @@ export function startPolling(): void {
           .from(paperTradesTable)
           .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, since)))
           .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
-        db.selectDistinct({ symbol: tradeLogTable.symbol, exitMethod: tradeMemoryTable.exitMethod, tp1Reached: tradeMemoryTable.tp1Reached })
-          .from(tradeLogTable)
-          .innerJoin(tradeMemoryTable, and(
-            eq(tradeMemoryTable.symbol, tradeLogTable.symbol),
-            eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-          ))
-          .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
-          .catch(() => [] as Array<{ symbol: string | null; exitMethod: string | null; tp1Reached: boolean | null }>),
+        // One row per trade_log entry — join to reflection within 4h of exit, prefer sl_hit
+        db.execute<{ exit_method: string | null; tp1_reached: boolean | null }>(sql`
+          SELECT DISTINCT ON (tl.id)
+            COALESCE(tm.exit_method, 'unknown') AS exit_method,
+            tm.tp1_reached
+          FROM trade_log tl
+          LEFT JOIN trade_memory tm
+            ON tm.symbol = tl.symbol
+            AND tm.action = 'TRADE_CLOSE'
+            AND tm.created_at >= tl.exit_at
+            AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
+          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${since}
+          ORDER BY tl.id,
+            CASE WHEN tm.exit_method = 'sl_hit'   THEN 1
+                 WHEN tm.exit_method LIKE 'tp%'   THEN 2
+                 WHEN tm.exit_method = 'review'   THEN 3
+                 ELSE 4 END
+        `).catch(() => ({ rows: [] as Array<{ exit_method: string | null; tp1_reached: boolean | null }> })),
       ]);
 
       const m3 = mode3Raw.map(r => parseFloat(r.pnl ?? "0"));
@@ -1668,11 +1678,13 @@ export function startPolling(): void {
 
       const s3 = stats(m3);
       const sB = stats(vB);
-      // TP1 hit = price reached TP1 AND trade didn't end in SL (partial was meaningful)
-      const m3Tp1 = mode3MemRaw.filter(r => r.tp1Reached === true && r.exitMethod !== "sl_hit").length;
-      const m3Sl  = mode3MemRaw.filter(r => r.exitMethod === "sl_hit").length;
-      const vBTp1 = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("tp1")).length;
-      const vBSl  = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("sl")).length;
+      const m3Mem    = mode3MemResult.rows;
+      const m3Sl     = m3Mem.filter(r => r.exit_method === "sl_hit").length;
+      const m3Tp1    = m3Mem.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
+      const m3Review = m3Mem.filter(r => r.exit_method === "review").length;
+      const vBTp1    = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("tp1")).length;
+      const vBSl     = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("sl")).length;
+      const vBTimer  = vBRaw.filter(r => r.exitReason === "48h_timer").length;
 
       const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
       const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
@@ -1689,13 +1701,13 @@ export function startPolling(): void {
         `Trades: ${s3.total} | Win rate: ${s3.winRate}%`,
         `Net P&L: ${fmt(s3.netPnl)}`,
         `Avg winner: ${fmtAvg(s3.avgWin, "+")} | Avg loser: ${fmtAvg(s3.avgLoss, "-")}`,
-        `TP1 hit: ${m3Tp1}/${s3.total} | SL hit: ${m3Sl}/${s3.total}`,
+        `TP1: ${m3Tp1} | SL: ${m3Sl} | Review: ${m3Review} (of ${s3.total})`,
         ``,
         `📄 <b>Version B (Paper)</b>`,
         `Trades: ${sB.total} | Win rate: ${sB.winRate}%`,
         `Net P&L: ${fmt(sB.netPnl)} (after fees/slippage)`,
         `Avg winner: ${fmtAvg(sB.avgWin, "+")} | Avg loser: ${fmtAvg(sB.avgLoss, "-")}`,
-        `TP1 hit: ${vBTp1}/${sB.total} | SL hit: ${vBSl}/${sB.total}`,
+        `TP1: ${vBTp1} | SL: ${vBSl} | Timer: ${vBTimer} (of ${sB.total})`,
         ``,
         `Verdict: <b>${verdict}</b>`,
       ].join("\n");
