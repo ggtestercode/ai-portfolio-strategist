@@ -1565,9 +1565,10 @@ export async function getOpenTrades(): Promise<typeof tradeLogTable.$inferSelect
 }
 
 export async function getDailyPnl(): Promise<number> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const rows = await db.select({ pnl: tradeLogTable.pnl })
     .from(tradeLogTable)
-    .where(isNotNull(tradeLogTable.exitAt));
+    .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.exitAt, since)));
   return rows.reduce((sum, r) => sum + parseFloat(r.pnl ?? "0"), 0);
 }
 
