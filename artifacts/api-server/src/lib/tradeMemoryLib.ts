@@ -461,6 +461,15 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     || (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct"))
     || (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct"));
 
+  // SL tightness assessment — min/max price during hold
+  const minPriceDuringHold = tradePeriodCandles.length > 0 ? Math.min(...tradePeriodCandles.map(c => c.low)) : 0;
+  const maxPriceDuringHold = tradePeriodCandles.length > 0 ? Math.max(...tradePeriodCandles.map(c => c.high)) : 0;
+  const maxAdverseMoveHoldPct = isLong
+    ? (minPriceDuringHold > 0 && input.entryPrice > 0 ? (input.entryPrice - minPriceDuringHold) / input.entryPrice * 100 : 0)
+    : (maxPriceDuringHold > 0 && input.entryPrice > 0 ? (maxPriceDuringHold - input.entryPrice) / input.entryPrice * 100 : 0);
+  const slDistancePct = plannedSL > 0 && input.entryPrice > 0
+    ? Math.abs(plannedSL - input.entryPrice) / input.entryPrice * 100 : 0;
+
   // 5. Hold duration
   const holdMs      = input.entryAt && input.exitAt
     ? input.exitAt.getTime() - input.entryAt.getTime() : null;
@@ -578,6 +587,51 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
       ? `IMPORTANT: MIXED failure. Address both execution issues AND strategy quality.`
       : `IMPORTANT: Successful trade. Reinforce what worked.`,
     ``,
+    `═══ ENTRY ASSESSMENT ═══`,
+    `Entry direction: ${input.direction.toUpperCase()}`,
+    `Entry price: $${input.entryPrice.toFixed(4)}`,
+    `Pre-trade trend: ${fmt2(preTrendPct)}% over 12h`,
+    `Entry candle: ${entryC1h.direction} body=${entryC1h.bodyPct.toFixed(0)}% vol=${entryC1h.volumeVsAvg.toFixed(1)}×avg${entryC1h.isPinBar ? " [PIN BAR]" : ""}`,
+    `Verdict needed: early (entered before setup confirmed), good (right time/price), late (chased extended move), wrong (entered on wrong side of structure)`,
+    ``,
+    `═══ SL ASSESSMENT ═══`,
+    `Planned SL: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} (${slDistancePct.toFixed(2)}% from entry)`,
+    `Max adverse move DURING hold: ${maxAdverseMoveHoldPct.toFixed(2)}% from entry`,
+    `Was SL hit this trade: ${exitMethod === "sl_hit" ? "YES" : "NO"}`,
+    `Post-exit adverse continuation: ${maxAdditionalLossPct.toFixed(2)}%`,
+    `Verdict needed: too_tight (SL hit but price recovered — premature), good (appropriate), too_wide (absorbed excessive loss)`,
+    ``,
+    `═══ TP ASSESSMENT ═══`,
+    `TP1: $${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"} — reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}`,
+    `TP2: $${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"} — reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
+    `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
+    `Additional gain available after exit: ${additionalGainPct.toFixed(2)}%`,
+    `TP1 verdict: too_tight (hit quickly, price ran far further), good (reasonable), too_ambitious (never reached despite available profit)`,
+    `TP2 verdict: same logic`,
+    ``,
+    `═══ PARTIAL CLOSE ASSESSMENT ═══`,
+    `Exit method: ${exitMethod}`,
+    `Partials: ${memPartials.length > 0 ? memPartials.map(p => `${p.partialType}@$${parseFloat(p.priceAtClose ?? "0").toFixed(4)} (${p.pnlPct ?? "?"}%)`).join(", ") : "none"}`,
+    `Price 4h after exit: ${fmt2(immediateReactionPct)}% | 24h: ${fmt2(fullMove24hPct)}%`,
+    `Verdict needed: correct (reduced risk at right time), too_early (missed larger gain), too_late (gave back profit), na (no partials)`,
+    ``,
+    `═══ MANUAL CLOSE ASSESSMENT ═══`,
+    exitMethod === "review"
+      ? [`Trade closed by posMonitor review (not SL/TP).`,
+         `Price 4h after close: ${fmt2(immediateReactionPct)}%`,
+         `Price 24h after close: ${fmt2(fullMove24hPct)}%`,
+         `Verdict needed: correct (price reversed — right call), wrong (price continued in our direction — should have held), neutral (price moved <1% either way), na`].join("\n")
+      : `Exit method was ${exitMethod} — no manual close to assess. Use "na".`,
+    ``,
+    `═══ OPTIMAL TRADE HINDSIGHT ═══`,
+    `Using ALL data (pre-trade candles, entry candle, trade period, post-exit candles), provide hindsight assessment:`,
+    `- optimalEntryPrice: best entry price based on pre-trade structure and entry candle`,
+    `- optimalSlPrice: SL that would not have been hit by noise but still limits loss`,
+    `- optimalTp1Price: TP1 that was realistically reachable (based on actual max profit ${maxProfitPct.toFixed(2)}%)`,
+    `- optimalPnlPct: P/L% achievable with optimal execution`,
+    `- opportunityCostPct: optimalPnlPct minus actual P/L (${input.pnlPct.toFixed(2)}%) — positive means profit left on table`,
+    `- profitMissedPct: profit missed specifically due to execution (missed TP triggers, premature exits)`,
+    ``,
     `Review ALL candle data above with hindsight. Return ONLY valid JSON (no markdown):`,
     `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
     `"entryCandleQuality":"strong|neutral|weak","entryVolumeConfirmed":true,`,
@@ -591,7 +645,12 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     `"candlePatternLesson":"specific candle pattern lesson from this trade",`,
     `"versionBLesson":"string or null","whatWorked":"string","whatDidnt":"string",`,
     `"lessonsLearned":"one concrete insight","nextTimeWouldDo":"one specific change",`,
-    `"failureType":"strategy|execution|mixed|success","executionIssues":["string"]}`,
+    `"failureType":"strategy|execution|mixed|success","executionIssues":["string"],`,
+    `"entryTimingVerdict":"early|good|late|wrong","slTooTight":false,"slTooWide":false,`,
+    `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious",`,
+    `"partialTiming":"correct|too_early|too_late|na","manualCloseVerdict":"correct|wrong|neutral|na",`,
+    `"profitMissedPct":null,"optimalEntryPrice":null,"optimalSlPrice":null,`,
+    `"optimalTp1Price":null,"optimalPnlPct":null,"opportunityCostPct":null}`,
   ].filter(s => s !== null && s !== undefined && s !== "").join("\n");
 
   type R = {
@@ -608,6 +667,14 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     versionBLesson: string | null;
     whatWorked: string; whatDidnt: string; lessonsLearned: string; nextTimeWouldDo: string;
     failureType: string; executionIssues: string[];
+    entryTimingVerdict: string;
+    slTooTight: boolean; slTooWide: boolean;
+    tp1Verdict: string; tp2Verdict: string;
+    partialTiming: string; manualCloseVerdict: string;
+    profitMissedPct: number | null;
+    optimalEntryPrice: number | null; optimalSlPrice: number | null;
+    optimalTp1Price: number | null; optimalPnlPct: number | null;
+    opportunityCostPct: number | null;
   };
 
   const res = await llm.json<R>({
@@ -649,6 +716,19 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
         nextTimeWouldDo:              { type: "string" },
         failureType:                  { type: "string" },
         executionIssues:              { type: "array", items: { type: "string" } },
+        entryTimingVerdict:           { type: "string" },
+        slTooTight:                   { type: "boolean" },
+        slTooWide:                    { type: "boolean" },
+        tp1Verdict:                   { type: "string" },
+        tp2Verdict:                   { type: "string" },
+        partialTiming:                { type: "string" },
+        manualCloseVerdict:           { type: "string" },
+        profitMissedPct:              {},
+        optimalEntryPrice:            {},
+        optimalSlPrice:               {},
+        optimalTp1Price:              {},
+        optimalPnlPct:                {},
+        opportunityCostPct:           {},
       },
     },
     fallback: {
@@ -663,6 +743,10 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
       signalAccuracyInsight: "", candlePatternLesson: "",
       versionBLesson: null, whatWorked: "", whatDidnt: "", lessonsLearned: "", nextTimeWouldDo: "",
       failureType, executionIssues,
+      entryTimingVerdict: "good", slTooTight: false, slTooWide: false,
+      tp1Verdict: "good", tp2Verdict: "good", partialTiming: "na",
+      manualCloseVerdict: "na", profitMissedPct: null, optimalEntryPrice: null,
+      optimalSlPrice: null, optimalTp1Price: null, optimalPnlPct: null, opportunityCostPct: null,
     },
   });
 
@@ -728,6 +812,20 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     price1hAfter:           price1hAfter  > 0 ? String(price1hAfter)  : null,
     price4hAfter:           price4hAfter  > 0 ? String(price4hAfter)  : null,
     price24hAfter:          price24hAfter > 0 ? String(price24hAfter) : null,
+    // Structured verdict fields — batch 5
+    entryTimingVerdict:     d.entryTimingVerdict  || null,
+    slTooTight:             typeof d.slTooTight  === "boolean" ? d.slTooTight  : null,
+    slTooWide:              typeof d.slTooWide   === "boolean" ? d.slTooWide   : null,
+    tp1Verdict:             d.tp1Verdict         || null,
+    tp2Verdict:             d.tp2Verdict         || null,
+    partialTiming:          d.partialTiming      || null,
+    manualCloseVerdict:     d.manualCloseVerdict || null,
+    profitMissedPct:        d.profitMissedPct   != null ? String((d.profitMissedPct   as number).toFixed(4)) : null,
+    optimalEntryPrice:      d.optimalEntryPrice != null ? String((d.optimalEntryPrice as number).toFixed(8)) : null,
+    optimalSlPrice:         d.optimalSlPrice    != null ? String((d.optimalSlPrice    as number).toFixed(8)) : null,
+    optimalTp1Price:        d.optimalTp1Price   != null ? String((d.optimalTp1Price   as number).toFixed(8)) : null,
+    optimalPnlPct:          d.optimalPnlPct     != null ? String((d.optimalPnlPct     as number).toFixed(4)) : null,
+    opportunityCostPct:     d.opportunityCostPct != null ? String((d.opportunityCostPct as number).toFixed(4)) : null,
   });
 
   // Alert on execution failures
@@ -1203,7 +1301,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
       // Extract common pre-entry warnings
       const warnCounts: Record<string, number> = {};
       for (const r of patternRows) {
-        for (const w of r.preTradeWarningsMissed ?? []) {
+        for (const w of (r.preTradeWarningsMissed as string[] | null) ?? []) {
           warnCounts[w] = (warnCounts[w] ?? 0) + 1;
         }
       }

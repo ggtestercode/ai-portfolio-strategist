@@ -32,7 +32,7 @@ const TASK_CONFIG = {
   market_scan:          { model: "sonnet" as ModelTier, maxTokens: 8000, cache: true  },
   performance_analysis: { model: "sonnet" as ModelTier, maxTokens: 600,  cache: true  },
   deep_research:        { model: "opus"   as ModelTier, maxTokens: 2000, cache: true  },
-  trade_reflection:     { model: "sonnet" as ModelTier, maxTokens: 1500, cache: false },
+  trade_reflection:     { model: "sonnet" as ModelTier, maxTokens: 2000, cache: false },
   rule_generation:      { model: "sonnet" as ModelTier, maxTokens: 1000, cache: false },
 } as const;
 

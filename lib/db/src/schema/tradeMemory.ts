@@ -58,6 +58,20 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   price1hAfter:           decimal("price_1h_after",  { precision: 20, scale: 8 }),
   price4hAfter:           decimal("price_4h_after",  { precision: 20, scale: 8 }),
   price24hAfter:          decimal("price_24h_after", { precision: 20, scale: 8 }),
+  // Structured verdict fields — batch 5
+  entryTimingVerdict:     text("entry_timing_verdict"),   // 'early'|'good'|'late'|'wrong'
+  slTooTight:             boolean("sl_too_tight"),
+  slTooWide:              boolean("sl_too_wide"),
+  tp1Verdict:             text("tp1_verdict"),             // 'too_tight'|'good'|'too_ambitious'
+  tp2Verdict:             text("tp2_verdict"),
+  partialTiming:          text("partial_timing"),          // 'correct'|'too_early'|'too_late'|'na'
+  manualCloseVerdict:     text("manual_close_verdict"),    // 'correct'|'wrong'|'neutral'|'na'
+  profitMissedPct:        decimal("profit_missed_pct",    { precision: 10, scale: 4 }),
+  optimalEntryPrice:      decimal("optimal_entry_price",  { precision: 20, scale: 8 }),
+  optimalSlPrice:         decimal("optimal_sl_price",     { precision: 20, scale: 8 }),
+  optimalTp1Price:        decimal("optimal_tp1_price",    { precision: 20, scale: 8 }),
+  optimalPnlPct:          decimal("optimal_pnl_pct",      { precision: 10, scale: 4 }),
+  opportunityCostPct:     decimal("opportunity_cost_pct", { precision: 10, scale: 4 }),
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;
