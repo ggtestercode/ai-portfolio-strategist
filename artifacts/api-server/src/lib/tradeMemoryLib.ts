@@ -1565,11 +1565,11 @@ export async function getOpenTrades(): Promise<typeof tradeLogTable.$inferSelect
 }
 
 export async function getDailyPnl(): Promise<number> {
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const rows = await db.select({ pnl: tradeLogTable.pnl })
-    .from(tradeLogTable)
-    .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.exitAt, since)));
-  return rows.reduce((sum, r) => sum + parseFloat(r.pnl ?? "0"), 0);
+  // Use Bybit as source of truth — trade_log exitAt can be stamped at reconciliation time
+  // rather than actual Bybit close time, causing false positives in the daily window.
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const closed = await bybitGetClosedPnl(50, since);
+  return closed.reduce((sum, r) => sum + r.closedPnl, 0);
 }
 
 export async function logOpenTrade(params: {
