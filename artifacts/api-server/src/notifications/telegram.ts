@@ -1632,7 +1632,7 @@ export function startPolling(): void {
     try {
       const since = new Date("2026-05-24T00:00:00Z");
 
-      const [mode3Raw, vBRaw, mode3Tp1Raw] = await Promise.all([
+      const [mode3Raw, vBRaw, mode3MemRaw] = await Promise.all([
         db.select({ pnl: tradeLogTable.pnl, pnlPct: tradeLogTable.pnlPct })
           .from(tradeLogTable)
           .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
@@ -1641,15 +1641,14 @@ export function startPolling(): void {
           .from(paperTradesTable)
           .where(and(eq(paperTradesTable.status, "closed"), gte(paperTradesTable.signalTime, since)))
           .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
-        db.selectDistinct({ symbol: tradeLogTable.symbol })
+        db.selectDistinct({ symbol: tradeLogTable.symbol, exitMethod: tradeMemoryTable.exitMethod, tp1Reached: tradeMemoryTable.tp1Reached })
           .from(tradeLogTable)
           .innerJoin(tradeMemoryTable, and(
             eq(tradeMemoryTable.symbol, tradeLogTable.symbol),
             eq(tradeMemoryTable.action, "TRADE_CLOSE"),
-            eq(tradeMemoryTable.tp1Reached, true),
           ))
           .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
-          .catch(() => []),
+          .catch(() => [] as Array<{ symbol: string | null; exitMethod: string | null; tp1Reached: boolean | null }>),
       ]);
 
       const m3 = mode3Raw.map(r => parseFloat(r.pnl ?? "0"));
@@ -1669,8 +1668,11 @@ export function startPolling(): void {
 
       const s3 = stats(m3);
       const sB = stats(vB);
-      const m3Tp1 = mode3Tp1Raw.length;
+      // TP1 hit = price reached TP1 AND trade didn't end in SL (partial was meaningful)
+      const m3Tp1 = mode3MemRaw.filter(r => r.tp1Reached === true && r.exitMethod !== "sl_hit").length;
+      const m3Sl  = mode3MemRaw.filter(r => r.exitMethod === "sl_hit").length;
       const vBTp1 = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("tp1")).length;
+      const vBSl  = vBRaw.filter(r => r.exitReason?.toLowerCase().includes("sl")).length;
 
       const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
       const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
@@ -1687,13 +1689,13 @@ export function startPolling(): void {
         `Trades: ${s3.total} | Win rate: ${s3.winRate}%`,
         `Net P&L: ${fmt(s3.netPnl)}`,
         `Avg winner: ${fmtAvg(s3.avgWin, "+")} | Avg loser: ${fmtAvg(s3.avgLoss, "-")}`,
-        `TP1 hit: ${m3Tp1}/${s3.total}`,
+        `TP1 hit: ${m3Tp1}/${s3.total} | SL hit: ${m3Sl}/${s3.total}`,
         ``,
         `📄 <b>Version B (Paper)</b>`,
         `Trades: ${sB.total} | Win rate: ${sB.winRate}%`,
         `Net P&L: ${fmt(sB.netPnl)} (after fees/slippage)`,
         `Avg winner: ${fmtAvg(sB.avgWin, "+")} | Avg loser: ${fmtAvg(sB.avgLoss, "-")}`,
-        `TP1 hit: ${vBTp1}/${sB.total}`,
+        `TP1 hit: ${vBTp1}/${sB.total} | SL hit: ${vBSl}/${sB.total}`,
         ``,
         `Verdict: <b>${verdict}</b>`,
       ].join("\n");
