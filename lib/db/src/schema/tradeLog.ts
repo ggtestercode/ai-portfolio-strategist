@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, numeric, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, numeric, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
 
 export const tradeLogTable = pgTable("trade_log", {
   id:         uuid("id").primaryKey().defaultRandom(),
@@ -21,7 +21,8 @@ export const tradeLogTable = pgTable("trade_log", {
   atr:       numeric("atr",       { precision: 20, scale: 8 }),
   setupType: text("setup_type"),
   score:     numeric("score",     { precision: 8,  scale: 2 }),
-  whyNow:    text("why_now"),
+  whyNow:         text("why_now"),
+  appliedRuleIds: jsonb("applied_rule_ids").$type<number[]>(),
 });
 
 export type TradeLog       = typeof tradeLogTable.$inferSelect;

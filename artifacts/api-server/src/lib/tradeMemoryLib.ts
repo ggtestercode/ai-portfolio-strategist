@@ -914,17 +914,33 @@ async function getLastRuleGenerationDate(): Promise<Date> {
   return row?.updatedAt ?? new Date(0);
 }
 
-async function updateRuleStatsForTrade(won: boolean): Promise<void> {
-  const rules = await getActiveRules();
-  if (!rules.length) return;
-  for (const rule of rules) {
+async function updateRuleStatsForTrade(won: boolean, tradeId: string): Promise<void> {
+  const [trade] = await db.select({ appliedRuleIds: tradeLogTable.appliedRuleIds })
+    .from(tradeLogTable)
+    .where(eq(tradeLogTable.id, tradeId))
+    .catch(() => []);
+
+  const ruleIds = trade?.appliedRuleIds as number[] | null;
+  if (!ruleIds?.length) {
+    console.log(`[rules] Trade ${tradeId} has no appliedRuleIds — skipping rule stat update`);
+    return;
+  }
+
+  for (const ruleId of ruleIds) {
+    const [rule] = await db.select()
+      .from(tradingRulesTable)
+      .where(eq(tradingRulesTable.id, ruleId))
+      .limit(1)
+      .catch(() => []);
+    if (!rule) continue;
     const update = won
       ? { winsFollowing: rule.winsFollowing + 1, updatedAt: new Date() }
       : { lossesFollowing: rule.lossesFollowing + 1, updatedAt: new Date() };
     await db.update(tradingRulesTable)
       .set(update)
-      .where(eq(tradingRulesTable.id, rule.id))
+      .where(eq(tradingRulesTable.id, ruleId))
       .catch(() => {});
+    console.log(`[rules] Rule ${rule.ruleNumber} ${won ? "WIN" : "LOSS"} — now ${rule.winsFollowing + (won ? 1 : 0)}W/${rule.lossesFollowing + (won ? 0 : 1)}L`);
   }
 }
 
@@ -1729,8 +1745,8 @@ export async function closeOpenTrade(params: {
     tp2:       openTrade.tp2,
   }).catch(e => console.error("[tradeMemory] reflection failed:", e));
 
-  // Rule tracking — update rule win/loss stats + resolve pending overrides
-  updateRuleStatsForTrade(pnlPct > 0).catch(() => {});
+  // Rule tracking — update only rules tagged at entry (appliedRuleIds)
+  updateRuleStatsForTrade(pnlPct > 0, openTrade.id).catch(() => {});
   updatePendingOverrides(params.symbol, pnlPct).catch(() => {});
   checkAndGenerateRules().catch(() => {});
 }

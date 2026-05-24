@@ -1644,16 +1644,29 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           stopLossMethod:  opp.stopLossMethod,
         }).catch(e => console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message));
 
+        // Determine which active rules apply to this trade
+        const activeRulesForTag = await getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>);
+        const appliedRuleIds = activeRulesForTag
+          .filter(r => {
+            // Rule 2: STRONG_TREND confluence — only applies to STRONG_TREND short entries
+            if (r.ruleNumber === 2) return regime?.regime === "STRONG_TREND" && actualDirection === "short";
+            // Rules 1, 3 and any future rules: always apply
+            return true;
+          })
+          .map(r => r.id);
+        console.log(`[rules] Tagged ${sym} with rule IDs: [${appliedRuleIds.join(", ")}]`);
+
         // Patch trade_log row with signal TP1/TP2/SL for durable partial-exit tracking
         await db.update(tradeLogTable)
           .set({
-            tp1:       opp.tp1      ? String(opp.tp1)      : null,
-            tp2:       opp.tp2      ? String(opp.tp2)      : null,
-            sl:        opp.stopLoss ? String(opp.stopLoss) : null,
-            atr:       opp.atr      ? String(opp.atr)      : null,
-            setupType: opp.setupType ?? null,
-            score:     opp.score    ? String(opp.score)    : null,
-            whyNow:    opp.whyNow   ?? null,
+            tp1:            opp.tp1      ? String(opp.tp1)      : null,
+            tp2:            opp.tp2      ? String(opp.tp2)      : null,
+            sl:             opp.stopLoss ? String(opp.stopLoss) : null,
+            atr:            opp.atr      ? String(opp.atr)      : null,
+            setupType:      opp.setupType ?? null,
+            score:          opp.score    ? String(opp.score)    : null,
+            whyNow:         opp.whyNow   ?? null,
+            appliedRuleIds: appliedRuleIds.length ? appliedRuleIds : null,
           })
           .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
           .catch(e => console.warn(`[cronScanner] trade_log tp patch ${sym}:`, e.message));
