@@ -5,6 +5,9 @@ import { initBrokers } from "./lib/startup";
 import { startPolling, sendAlert } from "./notifications/telegram";
 import { startCronScanner, startPositionMonitor } from "./lib/cronScanner";
 
+declare const __BUILD_TIMESTAMP__: string;
+console.log(`[startup] Build timestamp: ${__BUILD_TIMESTAMP__}`);
+
 void initBrokers();
 startPolling();     // registers Telegram notifiers (must be before cronScanner)
 startCronScanner();       // starts cron after Telegram is ready; first scan in 10s
