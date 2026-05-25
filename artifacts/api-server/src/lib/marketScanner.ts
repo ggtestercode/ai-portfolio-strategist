@@ -2,7 +2,7 @@ import { llm }                      from "./llmRouter";
 import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
-import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, type BybitKline, type BybitPosition } from "../brokers/bybit";
+import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, getOrderbook, getFundingHistory, type BybitKline, type BybitPosition } from "../brokers/bybit";
 import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
 import { db, profileTable }                  from "@workspace/db";
 
@@ -437,21 +437,25 @@ async function runPhase2(
   activeRules:     Awaited<ReturnType<typeof getActiveRules>>,
 ): Promise<ScanOpportunity[]> {
   // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
-  const mtfLines:      string[] = [];
-  const fundingLines:  string[] = [];
-  const liqLines:      string[] = [];
-  const candle1hLines: string[] = [];
-  const candle15mLines:string[] = [];
+  const mtfLines:        string[] = [];
+  const fundingLines:    string[] = [];
+  const liqLines:        string[] = [];
+  const candle1hLines:   string[] = [];
+  const candle15mLines:  string[] = [];
+  const orderbookLines:  string[] = [];
+  const fundingHistLines:string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
 
   await Promise.allSettled(selectedSymbols.map(async sym => {
     try {
-      const [mtfResult, fr, oi, klines] = await Promise.all([
+      const [mtfResult, fr, oi, klines, ob, fundingHist] = await Promise.all([
         fetchMTFData(sym),
         getFundingRate(sym).catch(() => ({ rate: 0, nextFundingTime: 0 })),
         getOpenInterest(sym).catch(() => 0),
         getKlines(sym, "60", 25).catch(() => [] as BybitKline[]),
+        getOrderbook(sym, 50).catch(() => ({ bids: [] as Array<[number,number]>, asks: [] as Array<[number,number]> })),
+        getFundingHistory(sym, 24).catch(() => [] as number[]),
       ]);
       const { summary: mtf, klines1h, klines15m } = mtfResult;
       const rSign = fr.rate >= 0 ? "+" : "";
@@ -459,8 +463,16 @@ async function runPhase2(
       mtfLines.push(`${sym} MTF: ${mtf}`);
       fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
       if (price > 0) liqLines.push(`${sym} liq@10x: long=$${(price * 0.9).toFixed(4)} short=$${(price * 1.1).toFixed(4)}`);
-      if (klines1h.length  > 0) candle1hLines.push(`${sym} 1h candles (O,H,L,C,V): ${klines1h.slice(-20).map(fmtCandle).join(" | ")}`);
-      if (klines15m.length > 0) candle15mLines.push(`${sym} 15m candles (O,H,L,C,V): ${klines15m.slice(-20).map(fmtCandle).join(" | ")}`);
+      if (klines1h.length  > 0) candle1hLines.push(`${sym} 1h candles (O,H,L,C,V): ${klines1h.slice(-50).map(fmtCandle).join(" | ")}`);
+      if (klines15m.length > 0) candle15mLines.push(`${sym} 15m candles (O,H,L,C,V): ${klines15m.slice(-50).map(fmtCandle).join(" | ")}`);
+      if (ob.bids.length > 0 && ob.asks.length > 0) {
+        const fmtLevel = ([p, s]: [number, number]) => `${fmtP(p)}×${Math.round(s)}`;
+        orderbookLines.push(`${sym} Bids: ${ob.bids.slice(0,50).map(fmtLevel).join(",")} Asks: ${ob.asks.slice(0,50).map(fmtLevel).join(",")}`);
+      }
+      if (fundingHist.length > 0) {
+        const fmtRate = (r: number) => `${r >= 0 ? "+" : ""}${(r * 100).toFixed(4)}%`;
+        fundingHistLines.push(`${sym} funding hist (oldest→newest): ${fundingHist.map(fmtRate).join(",")}`);
+      }
       sweepMap.set(sym, detectLiquiditySweep(klines));
       const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
       const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
@@ -597,9 +609,11 @@ async function runPhase2(
     `Regime note: ${regime.summary}`,
     ``,
     mtfLines.length      ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n`                                          : "",
-    candle1hLines.length ? `1h OHLCV (last 20, oldest→newest):\n${candle1hLines.join("\n")}\n`                       : "",
-    candle15mLines.length? `15m OHLCV (last 20, oldest→newest):\n${candle15mLines.join("\n")}\n`                     : "",
-    fundingLines.length  ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n`                             : "",
+    candle1hLines.length   ? `1h OHLCV (last 50, oldest→newest):\n${candle1hLines.join("\n")}\n`                       : "",
+    candle15mLines.length  ? `15m OHLCV (last 50, oldest→newest):\n${candle15mLines.join("\n")}\n`                     : "",
+    fundingLines.length    ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n`                             : "",
+    orderbookLines.length  ? `Order book depth (top 50 bids/asks):\n${orderbookLines.join("\n")}\n`                     : "",
+    fundingHistLines.length? `Funding rate history (24 periods, oldest→newest):\n${fundingHistLines.join("\n")}\n`      : "",
     liqLines.length    ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
     rsContext ? `\n${rsContext}\n` : "",
     sweepContext   ? `\n${sweepContext}` : "",

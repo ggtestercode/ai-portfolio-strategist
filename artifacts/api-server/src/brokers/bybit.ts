@@ -384,6 +384,26 @@ export async function getOpenInterest(symbol: string): Promise<number> {
   return parseFloat(r.list[0]?.openInterest ?? "0") || 0;
 }
 
+export async function getOrderbook(symbol: string, limit = 50): Promise<{ bids: Array<[number, number]>; asks: Array<[number, number]> }> {
+  const sym = normalise(symbol);
+  const r = await get<{ b: string[][]; a: string[][] }>(
+    "/v5/market/orderbook", { category: "linear", symbol: sym, limit }
+  ).catch(() => ({ b: [] as string[][], a: [] as string[][] }));
+  return {
+    bids: r.b.map(([p, s]) => [parseFloat(p), parseFloat(s)] as [number, number]),
+    asks: r.a.map(([p, s]) => [parseFloat(p), parseFloat(s)] as [number, number]),
+  };
+}
+
+export async function getFundingHistory(symbol: string, limit = 24): Promise<number[]> {
+  const sym = normalise(symbol);
+  const r = await get<{ list: Array<{ fundingRate: string }> }>(
+    "/v5/market/funding/history", { category: "linear", symbol: sym, limit }
+  ).catch(() => ({ list: [] as Array<{ fundingRate: string }> }));
+  // list is newest-first; reverse to oldest→newest
+  return r.list.map(e => parseFloat(e.fundingRate) || 0).reverse();
+}
+
 // ── Limit order (GTC) ─────────────────────────────────────────────────────────
 export async function openLimitPosition(symbol: string, side: "Buy" | "Sell", amountUsd: number, limitPrice: number, leverage = 10): Promise<{ orderId: string }> {
   if (amountUsd < 5) throw new Error(`Bybit: order amount $${amountUsd} below $5 minimum`);
