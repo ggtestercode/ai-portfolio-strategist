@@ -48,7 +48,7 @@
 - No regime blocks, no score minimum
 - Claude decides freely with portfolio review autonomy (HOLD/PARTIAL_CLOSE/CLOSE)
 - Realistic cost simulation: 0.055% fees, 0.05–0.15% slippage, funding every 8h
-- 48h auto-close for stale positions
+- **No 48h auto-close** — trades run until SL hit, TP hit, or Claude portfolio review close
 - No duplicate symbol+direction positions
 - Balance constraint only ($5 min)
 
@@ -359,7 +359,19 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ---
 
-## 11. June 1 Action Plan
+## 11. Pre-Switch Checklist (before adopting Version B approach for live)
+
+- [x] 48h auto-close removed from Version B — exits now via SL/TP/Claude review only
+- [ ] Hard gate: SL/TP/setupType required before any entry (code enforcement, not just Rule 1)
+- [ ] TIA TP1 miss root cause resolved — limit order staying active after entry
+- [ ] Version B learning gap closed — add `generateReflection()` on paper trade close (with source tag)
+- [ ] Version B rule injection — inject `getActiveRules()` into `runPaperScan()` for symmetric A/B test
+- [ ] A/B test: 5+ closed trades each side with verdict before switching
+- [ ] HYPE/NEAR structural SL assessment — both still have no swing low above liquidation
+
+---
+
+## 12. June 1 Action Plan
 
 1. Neon resets → DB CU-hrs back to 0, full operation resumes automatically
 2. Force rules regeneration from clean post-fix trades (`/forceRules`)
@@ -373,7 +385,7 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ---
 
-## 12. Files & Key Locations
+## 13. Files & Key Locations
 
 | File | Purpose |
 |---|---|
