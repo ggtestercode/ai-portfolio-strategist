@@ -38,16 +38,17 @@ const TASK_CONFIG = {
 
 export type TaskType = keyof typeof TASK_CONFIG;
 
-const COST_PER_M: Record<string, { input: number; output: number; cacheRead: number }> = {
-  [MODELS.haiku]:  { input: 0.80,  output: 4.00,  cacheRead: 0.08  },
-  [MODELS.sonnet]: { input: 3.00,  output: 15.00, cacheRead: 0.30  },
-  [MODELS.opus]:   { input: 15.00, output: 75.00, cacheRead: 1.50  },
+const COST_PER_M: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
+  [MODELS.haiku]:  { input: 0.80,  output: 4.00,  cacheRead: 0.08,  cacheWrite: 1.00  },
+  [MODELS.sonnet]: { input: 3.00,  output: 15.00, cacheRead: 0.30,  cacheWrite: 3.75  },
+  [MODELS.opus]:   { input: 15.00, output: 75.00, cacheRead: 1.50,  cacheWrite: 18.75 },
 };
 
-function estimateCost(m: string, i: number, o: number, c: number): number {
+function estimateCost(m: string, i: number, o: number, cr: number, cw: number): number {
   const r = COST_PER_M[m];
   if (!r) return 0;
-  return ((i - c) / 1e6) * r.input + (c / 1e6) * r.cacheRead + (o / 1e6) * r.output;
+  const nonCached = Math.max(0, i - cr - cw);
+  return (nonCached / 1e6) * r.input + (cr / 1e6) * r.cacheRead + (cw / 1e6) * r.cacheWrite + (o / 1e6) * r.output;
 }
 
 export interface LlmChatRequest {
@@ -112,16 +113,17 @@ class LlmRouter {
     } catch (err: any) {
       this.logToDb({
         taskType: req.taskType, model: modelId, success: false,
-        error: err.message, input: 0, output: 0, cached: 0,
+        error: err.message, input: 0, output: 0, cached: 0, cacheWrite: 0,
         cost: 0, latency: Date.now() - t0,
       });
       throw err;
     }
 
-    const inputTokens  = response.usage.input_tokens;
-    const outputTokens = response.usage.output_tokens;
-    const cachedTokens = (response.usage as any).cache_read_input_tokens ?? 0;
-    const costUsd      = estimateCost(modelId, inputTokens, outputTokens, cachedTokens);
+    const inputTokens      = response.usage.input_tokens;
+    const outputTokens     = response.usage.output_tokens;
+    const cachedTokens     = (response.usage as any).cache_read_input_tokens   ?? 0;
+    const cacheWriteTokens = (response.usage as any).cache_creation_input_tokens ?? 0;
+    const costUsd          = estimateCost(modelId, inputTokens, outputTokens, cachedTokens, cacheWriteTokens);
     const latencyMs    = Date.now() - t0;
     const text         = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
@@ -131,7 +133,7 @@ class LlmRouter {
 
     this.logToDb({
       taskType: req.taskType, model: modelId, success: true,
-      input: inputTokens, output: outputTokens, cached: cachedTokens,
+      input: inputTokens, output: outputTokens, cached: cachedTokens, cacheWrite: cacheWriteTokens,
       cost: costUsd, latency: latencyMs,
     }).catch(console.error);
 
@@ -183,7 +185,7 @@ class LlmRouter {
 
   private async logToDb(args: {
     taskType: string; model: string; success: boolean; error?: string;
-    input: number; output: number; cached: number; cost: number; latency: number;
+    input: number; output: number; cached: number; cacheWrite: number; cost: number; latency: number;
   }): Promise<void> {
     try {
       await db.insert(llmUsageLogs).values({
@@ -192,6 +194,7 @@ class LlmRouter {
         inputTokens:      args.input,
         outputTokens:     args.output,
         cachedTokens:     args.cached,
+        cacheWriteTokens: args.cacheWrite,
         estimatedCostUsd: String(args.cost.toFixed(6)),
         latencyMs:        args.latency,
         success:          args.success,

@@ -64,10 +64,11 @@ import {
   paperTradesTable,
   tradeMemoryTable,
   tradeLogTable,
+  llmUsageLogs,
   type PositionMeta,
   type WatchCoin,
 } from "@workspace/db";
-import { desc, gt, and, eq, isNotNull, gte, ne, sql } from "drizzle-orm";
+import { desc, gt, and, eq, isNotNull, gte, ne, sql, sum } from "drizzle-orm";
 
 let _bot: TelegramBot | null = null;
 
@@ -251,6 +252,7 @@ export function startPolling(): void {
     { command: "rules",           description: "Active trading rules (auto-generated)" },
     { command: "forcerules",      description: "Force rule regeneration now" },
     { command: "compare",         description: "Mode 3 vs Version B P&L comparison (May 24→now)" },
+    { command: "costs",           description: "Claude API spend — today, MTD, top callers, projection" },
     { command: "paperhistory",    description: "Version B paper trade signals (A/B test)" },
     { command: "pending",    description: "Pending trade approvals" },
     { command: "mode",       description: "Operation mode: autonomous | approval" },
@@ -1711,6 +1713,79 @@ export function startPolling(): void {
         `TP1: ${vBTp1} | SL: ${vBSl} | Review: ${vBReview} | Timer: ${vBTimer} (of ${sB.total})`,
         ``,
         `Verdict: <b>${verdict}</b>`,
+      ].join("\n");
+
+      await b.sendMessage(chatId, out, { parse_mode: "HTML" });
+    } catch (err: unknown) {
+      const m = err instanceof Error ? err.message : String(err);
+      await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
+    }
+  });
+
+  // ── /costs — Claude API spend summary ────────────────────────────────────
+  b.onText(/^\/costs(?:@\w+)?$/, async (msg) => {
+    const chatId = String(msg.chat.id);
+    try {
+      const now       = new Date();
+      const todayUTC  = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      const monthUTC  = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const dayOfMonth = now.getUTCDate();
+
+      const [todayRows, mtdRows, topRows] = await Promise.all([
+        // Today by caller
+        db.select({
+          caller:    llmUsageLogs.taskType,
+          cost:      sum(llmUsageLogs.estimatedCostUsd),
+          calls:     sql<number>`count(*)::int`,
+        })
+          .from(llmUsageLogs)
+          .where(gte(llmUsageLogs.calledAt, todayUTC))
+          .groupBy(llmUsageLogs.taskType)
+          .orderBy(desc(sum(llmUsageLogs.estimatedCostUsd))),
+        // MTD total
+        db.select({ cost: sum(llmUsageLogs.estimatedCostUsd) })
+          .from(llmUsageLogs)
+          .where(gte(llmUsageLogs.calledAt, monthUTC)),
+        // Top 3 most expensive callers (MTD)
+        db.select({
+          caller: llmUsageLogs.taskType,
+          cost:   sum(llmUsageLogs.estimatedCostUsd),
+          calls:  sql<number>`count(*)::int`,
+        })
+          .from(llmUsageLogs)
+          .where(gte(llmUsageLogs.calledAt, monthUTC))
+          .groupBy(llmUsageLogs.taskType)
+          .orderBy(desc(sum(llmUsageLogs.estimatedCostUsd)))
+          .limit(3),
+      ]);
+
+      const todayTotal = todayRows.reduce((s, r) => s + parseFloat(r.cost ?? "0"), 0);
+      const mtdTotal   = parseFloat(mtdRows[0]?.cost ?? "0");
+      const dailyAvg   = mtdTotal / dayOfMonth;
+      const daysInMonth = new Date(now.getUTCFullYear(), now.getUTCMonth() + 1, 0).getDate();
+      const projected  = dailyAvg * daysInMonth;
+
+      const $ = (n: number) => `$${n.toFixed(4)}`;
+
+      const todayLines = todayRows.length
+        ? todayRows.map(r => `  ${r.caller}: ${$(parseFloat(r.cost ?? "0"))} (${r.calls}×)`).join("\n")
+        : "  (no calls today)";
+
+      const topLines = topRows.length
+        ? topRows.map((r, i) => `  ${i + 1}. ${r.caller}: ${$(parseFloat(r.cost ?? "0"))} (${r.calls}×)`).join("\n")
+        : "  (no data)";
+
+      const out = [
+        `💰 <b>Claude API Costs</b>`,
+        ``,
+        `<b>Today (UTC)</b>  ${$(todayTotal)}`,
+        todayLines,
+        ``,
+        `<b>Month-to-date</b>  ${$(mtdTotal)}`,
+        `Daily avg: ${$(dailyAvg)} → Projected: ${$(projected)}`,
+        ``,
+        `<b>Top 3 MTD by caller:</b>`,
+        topLines,
       ].join("\n");
 
       await b.sendMessage(chatId, out, { parse_mode: "HTML" });

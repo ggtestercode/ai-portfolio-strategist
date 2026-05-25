@@ -62,6 +62,7 @@ export const llmUsageLogs = pgTable("llm_usage_logs", {
   inputTokens:      integer("input_tokens").notNull().default(0),
   outputTokens:     integer("output_tokens").notNull().default(0),
   cachedTokens:     integer("cached_tokens").notNull().default(0),
+  cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
   estimatedCostUsd: numeric("estimated_cost_usd", { precision: 10, scale: 6 })
                       .notNull().default("0"),
   latencyMs:        integer("latency_ms").notNull().default(0),
