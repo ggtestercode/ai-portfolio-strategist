@@ -553,26 +553,6 @@ export async function updatePaperTradesPnl(): Promise<void> {
 
         console.log(`[paperMonitor] ${trade.symbol} ${trade.direction} entry=${entry} price=${current} tp1=${trade.tp1 ?? "—"} sl=${trade.stopLoss ?? "—"} pnl%=${pnlPct.toFixed(2)}`);
 
-        // 48h auto-close for stale open trades
-        const ageHours = (Date.now() - new Date(trade.signalTime as unknown as string).getTime()) / 3_600_000;
-        if (ageHours > 48) {
-          const finalPnl = (trade.marginUsed ?? 5) * 10 * (pnlPct / 100);
-          const closeFee = (trade.marginUsed ?? 5) * 10 * 0.00055;
-          await db.update(paperTradesTable).set({
-            status:          "closed",
-            exitPrice:       current,
-            wouldHavePnl:    finalPnl,
-            wouldHavePnlPct: pnlPct,
-            exitTime:        now,
-            exitReason:      "48h_timer",
-          }).where(eq(paperTradesTable.id, trade.id));
-          if (trade.marginUsed) totalBalanceReturn += trade.marginUsed + finalPnl;
-          totalCloseFees += closeFee;
-          console.log(`[paperTrade] 48h timer closed ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}%`);
-          console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
-          continue;
-        }
-
         let newStatus = "open";
         let exitPrice: number | null = null;
 
