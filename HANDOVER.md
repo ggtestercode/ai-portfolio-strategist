@@ -361,13 +361,20 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ## 11. Pre-Switch Checklist (before adopting Version B approach for live)
 
-- [x] 48h auto-close removed from Version B — exits now via SL/TP/Claude review only
-- [ ] Hard gate: SL/TP/setupType required before any entry (code enforcement, not just Rule 1)
-- [ ] TIA TP1 miss root cause resolved — limit order staying active after entry
-- [ ] Version B learning gap closed — add `generateReflection()` on paper trade close (with source tag)
-- [ ] Version B rule injection — inject `getActiveRules()` into `runPaperScan()` for symmetric A/B test
-- [ ] A/B test: 5+ closed trades each side with verdict before switching
-- [ ] HYPE/NEAR structural SL assessment — both still have no swing low above liquidation
+- [x] 48h auto-close removed from Version B — exits now via SL/TP/Claude review only (`acec8fb`)
+- [x] Position age injected into review context — `Held: X.Xh` in posMonitor prompt (line 2157 cronScanner)
+- [x] Hard gate active — SL/TP/setupType required before any entry in both cron and watchScan paths (`f398989`)
+- [x] Entry price reconciled from Bybit after fill — actual avgPrice + leverage written to trade_log (`976342b`)
+- [x] Liquidation price in scan prompt — per-symbol estimated liq + live liqPrice from Bybit (`34f522b`, `56de232`)
+- [x] Order book, candle data, funding history in scan — top-50 book, 50 candles, 24-period history (`b5a2d21`)
+- [ ] 5 clean trades closed — /compare reviewed before switching
+- [ ] Rules injected into Version B scan prompt — `getActiveRules()` not called in `runPaperScan()`
+- [ ] Reflections enabled on Version B closes — `generateReflection()` not called in paperScanner
+- [ ] Credit balance topped up
+- [ ] Switch live capital to Version B logic
+- [ ] Keep Mode 3 as paper with fee/slippage simulation
+- [ ] Confirm first Version B live close triggers reflection correctly
+- [ ] Rollback plan confirmed — Mode 3 config preserved
 
 ---
 
