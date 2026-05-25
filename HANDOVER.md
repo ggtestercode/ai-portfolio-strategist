@@ -368,8 +368,8 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 - [x] Liquidation price in scan prompt — per-symbol estimated liq + live liqPrice from Bybit (`34f522b`, `56de232`)
 - [x] Order book, candle data, funding history in scan — top-50 book, 50 candles, 24-period history (`b5a2d21`)
 - [ ] 5 clean trades closed — /compare reviewed before switching
-- [ ] Rules injected into Version B scan prompt — `getActiveRules()` not called in `runPaperScan()`
-- [ ] Reflections enabled on Version B closes — `generateReflection()` not called in paperScanner
+- [x] Rules injected into Version B scan prompt (`85492b9`)
+- [x] Reflections enabled on Version B closes (`85492b9`) — `source='version_b'` in trade_memory
 - [ ] Credit balance topped up
 - [ ] Switch live capital to Version B logic
 - [ ] Keep Mode 3 as paper with fee/slippage simulation
@@ -384,8 +384,8 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 2. Force rules regeneration from clean post-fix trades (`/forceRules`)
 3. Deploy hard gate: SL/TP/setupType required before any entry (code enforcement, not just rule)
 4. Evaluate A/B test results: if Version B sustained outperformance → adopt unconstrained Claude approach for live trading
-5. Consider closing learning loop gap: add `generateReflection()` call when Version B trades close (with source tag to distinguish from Mode 3)
-6. Consider injecting active rules into Version B scan for symmetric comparison
+5. ✅ Closed learning loop gap: `generateReflection()` fires on every Version B close with `source='version_b'`
+6. ✅ Active rules injected into Version B scan for symmetric comparison
 7. Consider adding more capital if performance confirmed
 8. Restore scan to 30min when balance >$50 and stable
 9. Review HYPE/NEAR positions — both have SL above liq but no structural anchor
