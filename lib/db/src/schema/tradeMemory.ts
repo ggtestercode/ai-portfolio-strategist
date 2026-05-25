@@ -72,6 +72,8 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   optimalTp1Price:        decimal("optimal_tp1_price",    { precision: 20, scale: 8 }),
   optimalPnlPct:          decimal("optimal_pnl_pct",      { precision: 10, scale: 4 }),
   opportunityCostPct:     decimal("opportunity_cost_pct", { precision: 10, scale: 4 }),
+  // Source tracking — batch 6
+  source:                 text("source"),  // 'mode_3' | 'version_b'
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;

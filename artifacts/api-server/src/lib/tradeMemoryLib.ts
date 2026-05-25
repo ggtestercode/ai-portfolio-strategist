@@ -45,6 +45,7 @@ interface ReflectionInput {
   sourceTradeId?: string | null;
   markPriceAtDecision?: number;  // pre-order price the system used
   suppressAlerts?: boolean;      // true for backfill — don't spam old-trade execution alerts
+  source?: string | null;        // 'mode_3' | 'version_b'
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -191,7 +192,7 @@ export async function logClosedTrade(params: ClosedTradeParams): Promise<void> {
 
 // ─── Core reflection engine ───────────────────────────────────────────────────
 
-async function generateReflection(input: ReflectionInput, _retryCount = 0): Promise<void> {
+export async function generateReflection(input: ReflectionInput, _retryCount = 0): Promise<void> {
   const sign = input.pnl >= 0 ? "+" : "";
 
   // 1. Fetch Bybit closed-pnl for this symbol within the trade window
@@ -829,6 +830,7 @@ async function generateReflection(input: ReflectionInput, _retryCount = 0): Prom
     optimalTp1Price:        d.optimalTp1Price   != null ? String((d.optimalTp1Price   as number).toFixed(8)) : null,
     optimalPnlPct:          d.optimalPnlPct     != null ? String((d.optimalPnlPct     as number).toFixed(4)) : null,
     opportunityCostPct:     d.opportunityCostPct != null ? String((d.opportunityCostPct as number).toFixed(4)) : null,
+    source:                 input.source ?? null,
   });
 
   // Alert on execution failures (suppressed for backfill runs)

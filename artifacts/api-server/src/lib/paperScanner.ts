@@ -16,7 +16,7 @@ import {
   getPositions as bybitGetPositions,
   type BybitKline,
 } from "../brokers/bybit";
-import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
+import { getRecentMemory, getPerformanceSummary, getActiveRules, generateReflection } from "./tradeMemoryLib";
 import { llm }                   from "./llmRouter";
 import { db, profileTable, paperTradesTable, botStateTable, tradeMemoryTable, ruleOverridesTable } from "@workspace/db";
 import { eq, gt, and, isNull, isNotNull, sql } from "drizzle-orm";
@@ -109,13 +109,14 @@ async function fetchMTFSummary(symbol: string): Promise<string> {
 export async function runPaperScan(): Promise<void> {
   console.log("[paperScanner] Version B scan starting…");
   try {
-    const [regime, watchlist, profile, bybitPositions, tradeMemory, perfSummary] = await Promise.all([
+    const [regime, watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules] = await Promise.all([
       detectMarketRegime(),
       getWatchlist(),
       getCachedProfile(),
       bybitGetPositions().catch(() => []),
       getRecentMemory(20).catch(() => ""),
       getPerformanceSummary().catch(() => ""),
+      getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>),
     ]);
 
     const classMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
@@ -200,6 +201,15 @@ export async function runPaperScan(): Promise<void> {
       ``,
       tradeMemory ? `Trade memory (last 20 reflections):\n${tradeMemory}` : "",
       perfSummary ? `\n${perfSummary}` : "",
+      activeRules.length ? [
+        `\n═══ ACTIVE TRADING RULES (informational — soft rules, not blocks) ═══`,
+        ...activeRules.map(r => {
+          const tot = r.winsFollowing + r.lossesFollowing;
+          const wr  = tot > 0 ? `${Math.round(r.winsFollowing / tot * 100)}%` : "no data";
+          return `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}\n  Logic: ${r.causalLogic ?? "see evidence"} | Track record: ${r.winsFollowing}W/${r.lossesFollowing}L (${wr})`;
+        }),
+        `You may override any rule — state which rule and why in your reasoning.`,
+      ].join("\n") : "",
     ].filter(Boolean).join("\n");
 
     const res = await llm.json<ScanResult>({
@@ -324,13 +334,14 @@ export async function runPaperScan(): Promise<void> {
           const pnlUsd = margin * 10 * (pnlPct / 100);
 
           if (rv.decision === "CLOSE") {
-            const closeFee = margin * 10 * 0.00055;
+            const closeFee  = margin * 10 * 0.00055;
+            const closeTime = new Date();
             await db.update(paperTradesTable).set({
               status:          "closed",
               exitPrice:       cur,
               wouldHavePnl:    pnlUsd,
               wouldHavePnlPct: pnlPct,
-              exitTime:        new Date(),
+              exitTime:        closeTime,
               exitReason:      "claude_close",
             }).where(eq(paperTradesTable.id, trade.id))
               .catch(e => { console.warn(`[paperScanner] CLOSE ${trade.symbol}:`, e.message); dbWriteAlert(`CLOSE ${trade.symbol}`, e); });
@@ -338,6 +349,26 @@ export async function runPaperScan(): Promise<void> {
             totalFeesThisScan   += closeFee;
             console.log(`[paperTrade] Version B CLOSE ${trade.symbol} ${trade.direction} pnl=${pnlPct.toFixed(2)}% returned=$${(margin + pnlUsd - closeFee).toFixed(2)} | ${rv.reasoning.slice(0, 80)}`);
             console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
+            generateReflection({
+              symbol:        trade.symbol,
+              direction:     trade.direction,
+              entryPrice:    trade.entryPrice,
+              exitPrice:     cur,
+              pnl:           pnlUsd,
+              pnlPct,
+              reasoning:     rv.reasoning,
+              entryAt:       trade.signalTime,
+              exitAt:        closeTime,
+              setupType:     trade.setupType ?? null,
+              score:         trade.score != null ? String(trade.score) : null,
+              whyNow:        trade.whyNow ?? null,
+              sl:            trade.stopLoss != null ? String(trade.stopLoss) : null,
+              tp1:           trade.tp1 != null ? String(trade.tp1) : null,
+              tp2:           trade.tp2 != null ? String(trade.tp2) : null,
+              sourceTradeId: String(trade.id),
+              suppressAlerts: true,
+              source:        "version_b",
+            }).catch(e => console.error(`[paperReflection] CLOSE ${trade.symbol}:`, e.message));
 
           } else if (rv.decision === "PARTIAL_CLOSE") {
             const pct        = Math.min(Math.max((rv.closePercent ?? 50) / 100, 0.1), 0.9);
@@ -579,6 +610,25 @@ export async function updatePaperTradesPnl(): Promise<void> {
           totalBalanceReturn += trade.marginUsed + (realizedPnl ?? 0);
           totalCloseFees     += closeFee;
           console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
+          generateReflection({
+            symbol:        trade.symbol,
+            direction:     trade.direction,
+            entryPrice:    entry,
+            exitPrice:     exitPrice ?? current,
+            pnl:           realizedPnl ?? 0,
+            pnlPct:        finalPct,
+            entryAt:       trade.signalTime,
+            exitAt:        now,
+            setupType:     trade.setupType ?? null,
+            score:         trade.score != null ? String(trade.score) : null,
+            whyNow:        trade.whyNow ?? null,
+            sl:            trade.stopLoss != null ? String(trade.stopLoss) : null,
+            tp1:           trade.tp1 != null ? String(trade.tp1) : null,
+            tp2:           trade.tp2 != null ? String(trade.tp2) : null,
+            sourceTradeId: String(trade.id),
+            suppressAlerts: true,
+            source:        "version_b",
+          }).catch(e => console.error(`[paperReflection] ${newStatus} ${trade.symbol}:`, e.message));
         }
       } catch { /* skip individual trade errors */ }
     }
