@@ -351,6 +351,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - ✅ TP2 permanently blocked by tier gate — `currentTier < 2` removed; `!pm.tp2Executed` is sole gate (`5ba1ffc`)
 - ✅ TP1 double-close (exchange limit order + software both fire) — `tp1Executed` set before `closePercentPosition` (`5ba1ffc`)
 - ✅ "TP1 verified on exchange: $5.78" misleading log — now checks partial conditional order separately from Full-mode TP2 (`5ba1ffc`)
+- ✅ Version B portfolio review not executing closes — case-insensitive decision checks, JSON schema enum enforced, `position_review` Haiku→Sonnet 1500 tokens (`34548a6`)
 
 ### Resolved May 24–25
 - ✅ Telegram "text is too long" errors — truncation applied
@@ -458,3 +459,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `85492b9` | feat: Version B rules injection + reflections on every close; source='version_b' |
 | `a65c1ee` | docs: mark rules injection + reflections done in pre-switch checklist |
 | `5ba1ffc` | fix: TP2 tier gate, TP1 double-close prevention, TP1 verification log |
+| `34548a6` | fix: Version B portfolio review — case-insensitive decisions, JSON schema enum, Sonnet 1500t |
