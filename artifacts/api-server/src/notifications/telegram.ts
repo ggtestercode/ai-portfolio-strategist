@@ -1824,9 +1824,13 @@ export function startPolling(): void {
     const msg   = err.message ?? "";
     const cause = err.cause?.code ?? "";
     const is409 = msg.includes("409") || msg.toLowerCase().includes("conflict");
+    const is502 = msg.includes("502");
     if (is409) {
       recordPollingError();
       console.warn(`[telegram] 409 Conflict (consecutive=${consecutivePollingErrors}): another bot instance is polling — check for remote deployments`);
+    } else if (is502) {
+      // 502 Bad Gateway = Telegram server-side outage, self-resolving — don't alarm
+      console.warn(`[telegram] 502 Bad Gateway (Telegram server-side, will retry):`, msg);
     } else {
       recordPollingError();
       console.warn(`[telegram] Polling error (will retry, consecutive=${consecutivePollingErrors}):`, msg || cause || err.code);
