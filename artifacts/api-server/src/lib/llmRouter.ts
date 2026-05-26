@@ -24,7 +24,7 @@ const TASK_CONFIG = {
   portfolio_summary:    { model: "haiku"  as ModelTier, maxTokens: 400,  cache: true  },
   command_parse:        { model: "haiku"  as ModelTier, maxTokens: 150,  cache: false },
   rebalance_check:      { model: "haiku"  as ModelTier, maxTokens: 250,  cache: true  },
-  position_review:      { model: "haiku"  as ModelTier, maxTokens: 1000, cache: false },
+  position_review:      { model: "sonnet" as ModelTier, maxTokens: 1500, cache: false },
   strategy_generation:  { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },
   trade_decision:       { model: "sonnet" as ModelTier, maxTokens: 200,  cache: true  },
   rebalance_plan:       { model: "sonnet" as ModelTier, maxTokens: 2000, cache: true  },

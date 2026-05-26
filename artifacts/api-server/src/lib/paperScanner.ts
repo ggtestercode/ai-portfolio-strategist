@@ -305,7 +305,19 @@ export async function runPaperScan(): Promise<void> {
         schema: {
           type: "object",
           properties: {
-            positionReviews:    { type: "array" },
+            positionReviews: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  symbol:       { type: "string" },
+                  decision:     { type: "string", enum: ["HOLD", "PARTIAL_CLOSE", "CLOSE"] },
+                  closePercent: { type: "number" },
+                  reasoning:    { type: "string" },
+                },
+                required: ["symbol", "decision", "reasoning"],
+              },
+            },
             newEntries:         { type: "array" },
             portfolioReasoning: { type: "string" },
           },
@@ -333,7 +345,7 @@ export async function runPaperScan(): Promise<void> {
           const margin = trade.marginUsed ?? 5;
           const pnlUsd = margin * 10 * (pnlPct / 100);
 
-          if (rv.decision === "CLOSE") {
+          if (rv.decision?.toUpperCase() === "CLOSE") {
             const closeFee  = margin * 10 * 0.00055;
             const closeTime = new Date();
             await db.update(paperTradesTable).set({
@@ -370,7 +382,7 @@ export async function runPaperScan(): Promise<void> {
               source:        "version_b",
             }).catch(e => console.error(`[paperReflection] CLOSE ${trade.symbol}:`, e.message));
 
-          } else if (rv.decision === "PARTIAL_CLOSE") {
+          } else if (rv.decision?.toUpperCase() === "PARTIAL_CLOSE") {
             const pct        = Math.min(Math.max((rv.closePercent ?? 50) / 100, 0.1), 0.9);
             const closedMgn  = margin * pct;
             const closedPnl  = closedMgn * 10 * (pnlPct / 100);
