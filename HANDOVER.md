@@ -352,6 +352,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - ✅ TP1 double-close (exchange limit order + software both fire) — `tp1Executed` set before `closePercentPosition` (`5ba1ffc`)
 - ✅ "TP1 verified on exchange: $5.78" misleading log — now checks partial conditional order separately from Full-mode TP2 (`5ba1ffc`)
 - ✅ Version B portfolio review not executing closes — case-insensitive decision checks, JSON schema enum enforced, `position_review` Haiku→Sonnet 1500 tokens (`34548a6`)
+- ✅ Version B portfolio review missing liquidation price — `Liq(est)=$X` added to position context line, calculated from entry price + 10× leverage, no API call (`d87fea2`)
 
 ### Resolved May 24–25
 - ✅ Telegram "text is too long" errors — truncation applied
@@ -460,3 +461,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `a65c1ee` | docs: mark rules injection + reflections done in pre-switch checklist |
 | `5ba1ffc` | fix: TP2 tier gate, TP1 double-close prevention, TP1 verification log |
 | `34548a6` | fix: Version B portfolio review — case-insensitive decisions, JSON schema enum, Sonnet 1500t |
+| `d87fea2` | feat: Version B portfolio review — add Liq(est) from entry price + 10× leverage |
