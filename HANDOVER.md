@@ -309,19 +309,48 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ---
 
+## 6. Fixes Deployed May 26, 2026
+
+### INJUSDT TP2 miss investigation + three fixes (commit `5ba1ffc`)
+
+**Root cause:** INJUSDT long (entry $5.157, TP1=$5.46, TP2=$5.78, size=10.9 units).
+After TP1 fire + exchange partial limit order both executed simultaneously, position shrank to 1.2 units.
+`originalQty` stayed at 10.9 in positionMeta → ratio 0.11 → tier=3 permanently.
+`currentTier < 2` guard on TP2 blocked software partial for 3+ hours.
+Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Full-mode TP ($5.78) never fired — review beat it. Reflection: `mistake=cut_winner_early`.
+
+**Fix 1 — TP2 tier gate removed (`cronScanner.ts:631`):**
+- Removed `currentTier < 2` from TP2 condition
+- `!pm.tp2Executed` is now the sole gate, matching the TP1 pattern from 96c2b64
+- Stale `originalQty` can no longer permanently block TP2
+
+**Fix 2 — TP1 double-close prevention (`cronScanner.ts:602`):**
+- `patchPositionMeta({ tp1Executed: true })` now runs **before** `closePercentPosition(30)`
+- Exchange partial limit order at TP1 fires asynchronously; software also fires on same polling tick
+- Setting flag first prevents subsequent cycles from double-closing; reduces over-reduction of position
+
+**Fix 3 — TP1 verification log (`bybit.ts:307`):**
+- Was reading `livePos.takeProfit` (= Full-mode TP2, e.g. $5.78) and logging "TP1 verified: $5.78" — wrong
+- Now queries `orderFilter=tpslOrder` to find the actual partial conditional order by trigger price (±0.5%)
+- Logs separately: "TP1 partial verified: qty=X at $Y" and "Position Full-mode TP (TP2): $Z"
+
+---
+
 ## 9. Active Bugs & Open Issues
 
 ### Pending (not yet implemented)
 - **Hard gate for SL/TP** — code enforcement (not just a rule) to reject any signal without SL, TP, and setupType. Agreed but not deployed. Rule 1 covers this as a soft constraint only.
-- **TIA TP1 missed** — TP1 reached but partial never executed. Limit order not staying active after entry. Root cause unresolved.
-- **Version B learning gap** — paper trades isolated from reflection/rule system. Not a bug per se (intentional isolation) but means Version B scans without Mode 3's learned rules, making the A/B test asymmetric.
-- **Version B rule injection** — `getActiveRules` is imported in paperScanner.ts but never called in `runPaperScan()`. Version B scans without rules.
 - **Scan to 30min** — currently 4h for testing stability; restore when balance >$50 and stable
 
 ### Known Constraints
 - Neon DB at 97.76/100 CU-hrs — resets June 1; subscribe if it hits limit before then (~$3-5)
 - Version B paper balance: ~$26-40 — do not reset
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
+
+### Resolved May 26
+- ✅ TP2 permanently blocked by tier gate — `currentTier < 2` removed; `!pm.tp2Executed` is sole gate (`5ba1ffc`)
+- ✅ TP1 double-close (exchange limit order + software both fire) — `tp1Executed` set before `closePercentPosition` (`5ba1ffc`)
+- ✅ "TP1 verified on exchange: $5.78" misleading log — now checks partial conditional order separately from Full-mode TP2 (`5ba1ffc`)
 
 ### Resolved May 24–25
 - ✅ Telegram "text is too long" errors — truncation applied
@@ -340,6 +369,8 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 - ✅ `/compare` exit breakdown incomplete — TP1 | SL | Review | Timer now shown
 - ✅ `cache_write_tokens` untracked — now captured + cost formula corrected
 - ✅ `/costs` command — live, queries existing `llm_usage_logs` table
+- ✅ Version B learning gap — `generateReflection()` now fires on every Version B close with `source='version_b'` (`85492b9`)
+- ✅ Version B rule injection — `getActiveRules()` now called in `runPaperScan()`; rules injected as soft context (`85492b9`)
 
 ---
 
@@ -424,3 +455,6 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 | `3be2c54` | fix: /compare Version B add Review (claude_close) + Timer |
 | `743d3d7` | feat: /costs command + cache_write_tokens + accurate cost calc |
 | `b5a2d21` | feat: scan prompt — 50 candles, order book, funding history |
+| `85492b9` | feat: Version B rules injection + reflections on every close; source='version_b' |
+| `a65c1ee` | docs: mark rules injection + reflections done in pre-switch checklist |
+| `5ba1ffc` | fix: TP2 tier gate, TP1 double-close prevention, TP1 verification log |
