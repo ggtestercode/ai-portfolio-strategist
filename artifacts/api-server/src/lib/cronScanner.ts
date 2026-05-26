@@ -600,8 +600,9 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
       if (tp1Reached) {
         console.log(`[cronScanner] TP1 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp1=$${effectiveTp1}`);
         try {
-          await closePercentPosition(pos.symbol, 30);
+          // Set flag BEFORE close — prevents double-close if exchange partial order already executed
           await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
+          await closePercentPosition(pos.symbol, 30);
           // Move SL to breakeven
           await bybitSetStopLoss(pos.symbol, pm.entryPrice, pos.positionIdx)
             .catch(e => console.warn(`[cronScanner] Breakeven SL failed ${pos.symbol}:`, e.message));
@@ -627,8 +628,10 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
       }
     }
 
-    // TP2: price reached TP2, TP1 already executed (flag or tier), and TP2 flag not yet set
-    if (effectiveTp2 > 0 && (pm.tp1Executed || currentTier >= 1) && !pm.tp2Executed && currentTier < 2) {
+    // TP2: price reached TP2, TP1 already executed (flag or tier), and TP2 flag not yet set.
+    // !pm.tp2Executed is the sole gate — currentTier < 2 removed: stale originalQty can pin tier=3
+    // even after normal TP1 partial, permanently blocking TP2.
+    if (effectiveTp2 > 0 && (pm.tp1Executed || currentTier >= 1) && !pm.tp2Executed) {
       const tp2Reached = pos.side === "Buy" ? currentPrice >= effectiveTp2 : currentPrice <= effectiveTp2;
       if (tp2Reached) {
         console.log(`[cronScanner] TP2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${effectiveTp2}`);

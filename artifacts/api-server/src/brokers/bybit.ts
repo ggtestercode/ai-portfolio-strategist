@@ -303,15 +303,28 @@ export async function openPosition(
       }
     }
 
-    // Verify TP was accepted by Bybit — check live position takeProfit field
+    // Verify TP1 partial order was accepted — query TP/SL orders separately from Full-mode position TP.
+    // NOTE: livePos.takeProfit shows the Full-mode TP (TP2), not the TP1 partial order.
     if (tp1Set) {
       try {
-        const livePos = (await getPositions()).find(p => p.symbol === sym && p.positionIdx === positionIdx);
-        if (livePos && (!livePos.takeProfit || livePos.takeProfit <= 0)) {
-          console.warn(`[Bybit] TP1 verification failed ${sym} — exchange shows no TP; software fallback active`);
+        // Check TP/SL conditional orders for this symbol — TP1 partial appears here, not in position.takeProfit
+        type TpslOrder = { triggerPrice: string; qty: string; reduceOnly: boolean };
+        const tpslRes = await get<{ list: TpslOrder[] }>(
+          "/v5/order/realtime", { category: "linear", symbol: sym, orderFilter: "tpslOrder" }
+        ).catch(() => ({ list: [] as TpslOrder[] }));
+        const tp1Order = tpslRes.list.find(o =>
+          Math.abs(parseFloat(o.triggerPrice) / parseFloat(tp1Str) - 1) < 0.005
+        );
+        if (tp1Order) {
+          console.log(`[Bybit] TP1 partial verified on exchange ${sym}: qty=${tp1Order.qty} at $${tp1Order.triggerPrice} (partial TP order)`);
+        } else {
+          console.warn(`[Bybit] TP1 partial order not found in exchange orders for ${sym} — software polling is fallback`);
           tp1Set = false;
-        } else if (livePos?.takeProfit) {
-          console.log(`[Bybit] TP1 verified on exchange ${sym}: $${livePos.takeProfit}`);
+        }
+        // Separately log the Full-mode position TP (TP2) to distinguish the two
+        const livePos = (await getPositions()).find(p => p.symbol === sym && p.positionIdx === positionIdx);
+        if (livePos?.takeProfit) {
+          console.log(`[Bybit] Position Full-mode TP (TP2) ${sym}: $${livePos.takeProfit}`);
         }
       } catch (e) {
         console.warn(`[Bybit] TP1 verification check ${sym}:`, (e as Error).message);
