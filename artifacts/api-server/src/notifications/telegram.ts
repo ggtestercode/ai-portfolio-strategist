@@ -32,6 +32,7 @@ import {
   getTicker     as bybitGetTicker,
   getOrders,
   getClosedPnl  as bybitGetClosedPnl,
+  closePosition as bybitClosePosition,
 } from "../brokers/bybit";
 import { okxPaperMode } from "../lib/startup";
 import {
@@ -718,51 +719,37 @@ export function startPolling(): void {
     }
   });
 
-  // ── /closedust — close all OKX positions with value < $1 ─────────────────
+  // ── /closedust — close all Bybit positions with notional < $1 ───────────
   b.onText(/^\/closedust(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const okxPos = okxPaperMode
-        ? await getPositionsPaper().catch(() => [])
-        : await okxGetPositions().catch(() => []);
+      const bybitPos = await bybitGetPositions().catch(() => []);
 
-      const dustPos = okxPos.filter(p => (p.entryPrice * p.size + p.pnl) < 1);
+      const dustPos = bybitPos.filter(p => p.markPrice * p.size < 1);
       if (!dustPos.length) {
-        await b.sendMessage(chatId, `✅ No dust positions found (all positions ≥ $1).`);
+        await b.sendMessage(chatId, `✅ No Bybit dust positions found (all ≥ $1 notional).`);
         return;
       }
 
       await b.sendMessage(chatId,
-        `🧹 Closing ${dustPos.length} dust position(s)...`,
+        `🧹 Closing ${dustPos.length} Bybit dust position(s)...`,
         { parse_mode: "HTML" });
-
-      const { closePosition: okxClose } = await import("../brokers/okx");
-      const { closePositionPaper }      = await import("../brokers/okxPaper");
 
       for (const p of dustPos) {
         const sym = escapeHtml(displaySymbol(p.symbol));
-        const val = (p.entryPrice * p.size + p.pnl).toFixed(4);
+        const val = (p.markPrice * p.size).toFixed(4);
         try {
-          if (okxPaperMode) await closePositionPaper(p.symbol);
-          else              await okxClose(p.symbol);
-          await b.sendMessage(chatId, `✅ Closed ${sym} ($${val})`, { parse_mode: "HTML" });
+          await bybitClosePosition(p.symbol);
+          await b.sendMessage(chatId, `✅ Closed ${sym} ($${val} notional)`, { parse_mode: "HTML" });
         } catch (e) {
           const em = e instanceof Error ? e.message : String(e);
-          // Below minimum lot size — OKX cannot close it via API; it will expire worthless
-          if (em.includes("no valid quote currency")) {
-            await b.sendMessage(chatId,
-              `⚠️ ${sym} ($${val}) — below minimum lot size, cannot close via API. Will be ignored in dashboard.`,
-              { parse_mode: "HTML" });
-          } else {
-            await b.sendMessage(chatId,
-              `❌ Failed to close ${sym}: ${escapeHtml(em)}`,
-              { parse_mode: "HTML" });
-          }
+          await b.sendMessage(chatId,
+            `❌ Failed to close ${sym}: ${escapeHtml(em)}`,
+            { parse_mode: "HTML" });
         }
       }
 
-      await syncAllHoldingsToDB().catch(() => {});
-      await b.sendMessage(chatId, `🧹 Done. Use /positions to verify (sub-$1 positions are filtered from display).`);
+      await b.sendMessage(chatId, `🧹 Done. Use /positions to verify.`);
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ /closedust failed: ${escapeHtml(m)}`);
