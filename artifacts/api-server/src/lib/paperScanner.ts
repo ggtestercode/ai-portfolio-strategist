@@ -272,7 +272,11 @@ export async function runPaperScan(): Promise<void> {
         const tp1Dist = t.tp1
           ? `${((isLong ? t.tp1 - cur : cur - t.tp1) / cur * 100).toFixed(1)}% to TP1`
           : "no TP1";
-        return `${t.symbol} ${t.direction.toUpperCase()} entry=${t.entryPrice} now=${cur.toFixed(4)} pnl=${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% age=${ageH.toFixed(1)}h margin=${(t.marginUsed ?? 5).toFixed(2)} SL=${t.stopLoss ?? "—"} TP1=${t.tp1 ?? "—"}(${tp1Dist}) TP2=${t.tp2 ?? "—"} | ${t.whyNow ?? "no thesis"}`;
+        const leverage = 10;
+        const liqEst = isLong
+          ? t.entryPrice * (1 - 1 / leverage)
+          : t.entryPrice * (1 + 1 / leverage);
+        return `${t.symbol} ${t.direction.toUpperCase()} entry=${t.entryPrice} now=${cur.toFixed(4)} pnl=${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% age=${ageH.toFixed(1)}h margin=${(t.marginUsed ?? 5).toFixed(2)} SL=${t.stopLoss ?? "—"} Liq(est)=$${liqEst.toFixed(4)} TP1=${t.tp1 ?? "—"}(${tp1Dist}) TP2=${t.tp2 ?? "—"} | ${t.whyNow ?? "no thesis"}`;
       }).join("\n");
 
       // New signals summary (give Claude the technical context)
