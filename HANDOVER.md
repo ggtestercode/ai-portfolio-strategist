@@ -322,7 +322,7 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ## 6. Fixes Deployed May 27, 2026
 
-### CHOPPY and EXHAUSTION hard blocks removed from `applyHardFilters()` (commit `TBD`)
+### CHOPPY and EXHAUSTION hard blocks removed from `applyHardFilters()` (commit `3b6e5b6`)
 
 **Root cause:** `applyHardFilters()` lines 291–298 had a per-symbol hard veto for `CHOPPY`, `EXHAUSTION`, and `VOLATILE` regimes. Combined with the score threshold removal (`179cd00`), CHOPPY/EXHAUSTION was still vetoing every signal before Claude could evaluate it.
 
@@ -410,7 +410,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
 ### Resolved May 27
-- ✅ CHOPPY/EXHAUSTION hard block in `applyHardFilters()` — removed from Filter 1; only VOLATILE retains hard veto; Claude receives regime in prompt and decides freely for CHOPPY/EXHAUSTION (pending commit)
+- ✅ CHOPPY/EXHAUSTION hard block in `applyHardFilters()` — removed from Filter 1; only VOLATILE retains hard veto; Claude receives regime in prompt and decides freely for CHOPPY/EXHAUSTION (`3b6e5b6`)
 - ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (`179cd00`)
 - ✅ `/compare` updated — new top section: Version B live (May 27 → now); historical May 24–27 below; 4-query parallel fetch, free (`be56090`)
 - ✅ Version B went live May 27 — first trade: TP1 hit +$0.85, reflection confirmed firing
@@ -536,4 +536,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `be56090` | feat: /compare — Version B live baseline May 27 + historical May 24-27 |
 | `2db0ba3` | docs: HANDOVER.md — Version B live May 27, /compare update, first TP1 +$0.85 |
 | `0b89f1e` | fix: /compare live section queries trade_log not paper_trades |
-| pending  | fix: remove CHOPPY/EXHAUSTION hard block from applyHardFilters(); keep VOLATILE |
+| `3b6e5b6` | fix: remove CHOPPY/EXHAUSTION hard block from applyHardFilters(); keep VOLATILE |
