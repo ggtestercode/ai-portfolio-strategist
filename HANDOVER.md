@@ -28,7 +28,9 @@
 5. **Trade Manager** — Claude decides SL/TP structurally, exchange-level TP/SL, profit monitor
 
 ### Entry Score Thresholds (Mode 3)
-- TRENDING: 65 | RANGING: 70 | VOLATILE: 75 | CHOPPY/EXHAUSTION: 80
+- ~~TRENDING: 65 | RANGING: 70 | VOLATILE: 75 | CHOPPY/EXHAUSTION: 80~~ **Removed May 27** — Claude decides freely
+- Score is still required by hard gate (any value) but no minimum blocks entry by regime
+- Removal reason: CHOPPY threshold (80) blocked all entries for 2.5 days post-b5a2d21 despite valid signals
 
 ### Exit System
 - TP1: close 30%, SL → breakeven, set `tp1Executed=true`
@@ -311,6 +313,17 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ## 6. Fixes Deployed May 27, 2026
 
+### Regime score thresholds removed from cron scan (commit `TBD`)
+
+**Root cause:** After b5a2d21 deployed (May 25 13:57 UTC), the market regime was CHOPPY. The hard gate required score ≥ 80 for CHOPPY. No signals reached 80. Result: 0 new Mode 3 entries for the entire 2.5-day window from May 25 16:00 UTC → May 27. Claude was generating signals and assigning scores but every single one was blocked before the hard gate was even reached.
+
+**Fix:** Removed the `score < execThreshold` pre-filter from `runCronScan()` in `cronScanner.ts`.
+- `getRegimeThreshold()` in `marketScanner.ts` is retained (WatchScan still uses it; watchlist display uses it)
+- Hard gate unchanged: `stopLoss`, `tp1`, `setupType`, `score` all still required — score just has no minimum value
+- Claude's own judgment on whether the score justifies entry is now the sole gate
+- Watchlist near-threshold concept removed — only explicit `WATCH` recommendations go to watch list now
+- Telegram scan summary updated: "need X" / "above threshold" language removed
+
 ### `exitMethod` labeling — explicit exit reasons across all close paths (commit `276c7f7`)
 
 **Root cause:** `generateReflection()` derived `exitMethod` from P&L percentage: `pnlPct < -5 → "sl_hit"`, else `"review"`. This mislabeled posMonitor review closes at -7% as `sl_hit`, and tight SL hits at -3% as `review`. The reflection prompt uses `exitMethod` to ask "Was SL hit?", assess manual close quality, and guide Claude's self-assessment — wrong labels corrupt the learning loop.
@@ -373,6 +386,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
 ### Resolved May 27
+- ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (see commit below)
 - ✅ `exitMethod` mislabeled in reflections — `exitReasonOverride` added to `ReflectionInput`; all 7 `closeOpenTrade()` call sites pass explicit reason; P&L heuristic is now fallback only (`276c7f7`)
 
 ### Resolved May 26
@@ -432,7 +446,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - [x] Rules injected into Version B scan prompt (`85492b9`)
 - [x] Reflections enabled on Version B closes (`85492b9`) — `source='version_b'` in trade_memory
 - [ ] Credit balance topped up
-- [ ] Switch live capital to Version B logic
+- [x] Switch live capital to Version B logic — regime thresholds removed, Claude decides freely
 - [ ] Keep Mode 3 as paper with fee/slippage simulation
 - [ ] Confirm first Version B live close triggers reflection correctly
 - [ ] Rollback plan confirmed — Mode 3 config preserved

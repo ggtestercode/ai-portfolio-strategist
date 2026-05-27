@@ -1116,14 +1116,11 @@ function formatScanSummary(
     .filter(o => !executedSyms.has(bybitSym(o.symbol)))
     .slice(0, 5);
   if (top5.length) {
-    lines.push(`📊 <b>Top scores</b> (need ${threshold} in ${regime?.regime ?? "?"}):`)  ;
+    lines.push(`📊 <b>Top scores</b> (${regime?.regime ?? "?"}):`);
     for (const o of top5) {
       const dir   = o.direction === "short" ? "🔻" : o.direction === "long" ? "🔺" : "↔️";
       const label = o.direction === "short" ? "SHORT" : o.direction === "long" ? "LONG" : "WATCH";
-      const nearTag = o.score >= threshold - 5 && o.score < threshold
-        ? ` ⚠️ close (need ${threshold})`
-        : "";
-      lines.push(`  ${o.symbol} ${dir} ${label} — ${o.score}${nearTag}`);
+      lines.push(`  ${o.symbol} ${dir} ${label} — ${o.score}`);
     }
     lines.push(``);
   }
@@ -1158,17 +1155,17 @@ function formatScanSummary(
 
   // New signals result
   if (signalsPassed > 0) {
-    lines.push(`📈 <b>New signals:</b> ${signalsPassed} above threshold → ${newEntries.length} executed`);
+    lines.push(`📈 <b>New signals:</b> ${signalsPassed} passed filters → ${newEntries.length} executed`);
   } else if (signalCount > 0) {
-    lines.push(`📈 <b>New signals:</b> none above threshold (${signalCount} scanned)`);
+    lines.push(`📈 <b>New signals:</b> none passed filters (${signalCount} scanned)`);
   } else {
     lines.push(`📈 <b>New signals:</b> none`);
   }
 
-  // Watch: sweep/squeeze detected but below threshold
+  // Watch: sweep/squeeze detected or explicit WATCH recommendation
   console.log("[scanSummary] Watch candidates:", opps.filter(o => o.sweepDetected || o.squeezeDetected).map(o => `${o.symbol}(sweep=${String(o.sweepDetected)},squeeze=${String(o.squeezeDetected)},score=${o.score})`).join(", ") || "none");
   const watched = [...opps]
-    .filter(o => o.score < threshold && (o.sweepDetected || o.squeezeDetected || o.recommendation === "WATCH"))
+    .filter(o => o.recommendation === "WATCH" || o.sweepDetected || o.squeezeDetected)
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
     .slice(0, 3);
   if (watched.length) {
@@ -1524,16 +1521,11 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     // Log all signals received from Claude for diagnostics
     console.log(`[cronScanner] Signals from Claude: ${cryptoOpps.map(o => `${o.symbol}(score=${o.score},dir=${o.direction ?? "?"},conv=${o.conviction ?? "?"}`).join(", ")}`);
 
-    // Pre-filter: score >= regime threshold, skip already-held symbols
-    const execThreshold = getRegimeThreshold(regime?.regime);
+    // Pre-filter: skip already-held symbols — no regime score gate, Claude decides freely
+    const execThreshold = getRegimeThreshold(regime?.regime); // kept for watchlist display only
     const preRejected: Array<{ symbol: string; reason: string }> = [];
     const newSignals = cryptoOpps.filter(o => {
       if (existingSyms.has(bybitSym(o.symbol))) return false; // already in position
-      const score = o.score ?? 0;
-      if (score < execThreshold) {
-        preRejected.push({ symbol: o.symbol, reason: `score ${score} below threshold (${execThreshold})` });
-        return false;
-      }
       return true;
     });
 
@@ -1727,14 +1719,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, filteredSignals.length, result.opportunities);
     await alertFn?.(summary).catch(() => {});
 
-    // Merge new near-threshold coins into the watch list (don't overwrite existing watches)
-    const watchThreshLow = execThreshold - 10;
+    // Merge new WATCH-recommendation coins into the watch list (don't overwrite existing watches)
     const newWatchCoins: WatchCoin[] = cryptoOpps
       .filter(o => {
-        const s = o.score ?? 0;
         const dir = o.direction ?? "neutral";
         return (
-          (o.recommendation === "WATCH" || (s >= watchThreshLow && s < execThreshold)) &&
+          o.recommendation === "WATCH" &&
           dir !== "neutral" &&
           !existingSyms.has(bybitSym(o.symbol))
         );
@@ -1774,7 +1764,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     if (mergedWatch.length) {
       const watchMsg = [
         `👀 <b>Watch list (${mergedWatch.length} coins):</b>`,
-        ...mergedWatch.map(w => `  • ${w.symbol} ${w.direction.toUpperCase()} — score ${w.score} (need ${execThreshold})`),
+        ...mergedWatch.map(w => `  • ${w.symbol} ${w.direction.toUpperCase()} — score ${w.score}`),
         `Rescanning every 30 min...`,
       ].join("\n");
       await alertFn?.(watchMsg).catch(() => {});
