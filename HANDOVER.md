@@ -22,7 +22,7 @@
 
 ### 5-Layer Signal System (Mode 3)
 1. **Market Regime Detection** — BTC ADX, DI+/-, ATR vs 30d avg
-2. **Hard Filters** — extreme funding, HTF resistance, EMA misalignment, low liquidity; **VOLATILE regime hard-blocked** (CHOPPY/EXHAUSTION passed to Claude — Claude decides)
+2. **Hard Filters** — extreme funding, HTF resistance, EMA misalignment, low liquidity; **no regime hard block** — Claude receives regime label in prompt and decides freely
 3. **Weighted Scoring** — dynamic weights by regime, funding nonlinear, OI+price context, signal freshness decay
 4. **Portfolio Allocator** — balance constraint only ($5 min per trade)
 5. **Trade Manager** — Claude decides SL/TP structurally, exchange-level TP/SL, profit monitor
@@ -322,18 +322,21 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ## 6. Fixes Deployed May 27, 2026
 
-### CHOPPY and EXHAUSTION hard blocks removed from `applyHardFilters()` (commit `3b6e5b6`)
+### All regime hard blocks removed from `applyHardFilters()` — Claude decides freely (commit `3b6e5b6` + pending)
 
 **Root cause:** `applyHardFilters()` lines 291–298 had a per-symbol hard veto for `CHOPPY`, `EXHAUSTION`, and `VOLATILE` regimes. Combined with the score threshold removal (`179cd00`), CHOPPY/EXHAUSTION was still vetoing every signal before Claude could evaluate it.
 
-**Fix:** Removed `CHOPPY` and `EXHAUSTION` from Filter 1 in `applyHardFilters()`. Only `VOLATILE` retained (10× leverage + 4h review cycles = too dangerous for directional entries in high-noise regime).
+**Fix (two steps):**
+1. `3b6e5b6` — Removed `CHOPPY` and `EXHAUSTION` from Filter 1; kept `VOLATILE`
+2. `pending` — Removed `VOLATILE` entirely; Filter 1 gone; no regime hard-blocks any entries in code
 
 **Rationale:**
-- Claude already receives regime in its scan prompt — it can factor CHOPPY/EXHAUSTION into its own decision
-- A code-level veto overrides Claude's signal regardless of structural quality
-- VOLATILE is a different risk profile: price can gap through SL between 4h review cycles; kept as non-negotiable hard block
+- Claude receives regime label in scan prompt — it can weigh it against structural quality, order book, candles, and SL placement
+- Infrastructure-only filters kept: extreme funding (exchange risk), HTF boundary, EMA alignment, liquidity < $10M
+- Regime is a judgment call — code should not override Claude's signal evaluation regardless of regime label
+- VOLATILE in particular: if Claude sees a clean structural setup with tight SL above liq, it can enter; if it sees noise, it won't
 
-**Result:** `applyHardFilters()` Filter 1 is now VOLATILE-only. CHOPPY and EXHAUSTION pass through to Claude.
+**Result:** `applyHardFilters()` has no regime filter. All regimes pass through to Claude. Only infrastructure constraints remain.
 
 ---
 
@@ -410,7 +413,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
 ### Resolved May 27
-- ✅ CHOPPY/EXHAUSTION hard block in `applyHardFilters()` — removed from Filter 1; only VOLATILE retains hard veto; Claude receives regime in prompt and decides freely for CHOPPY/EXHAUSTION (`3b6e5b6`)
+- ✅ All regime hard blocks removed from `applyHardFilters()` — Filter 1 gone entirely; CHOPPY/EXHAUSTION (`3b6e5b6`), VOLATILE (pending); Claude receives regime in prompt and decides freely for all regimes
 - ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (`179cd00`)
 - ✅ `/compare` updated — new top section: Version B live (May 27 → now); historical May 24–27 below; 4-query parallel fetch, free (`be56090`)
 - ✅ Version B went live May 27 — first trade: TP1 hit +$0.85, reflection confirmed firing
@@ -537,3 +540,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `2db0ba3` | docs: HANDOVER.md — Version B live May 27, /compare update, first TP1 +$0.85 |
 | `0b89f1e` | fix: /compare live section queries trade_log not paper_trades |
 | `3b6e5b6` | fix: remove CHOPPY/EXHAUSTION hard block from applyHardFilters(); keep VOLATILE |
+| pending   | fix: remove VOLATILE hard block from applyHardFilters(); no regime blocks in code |
