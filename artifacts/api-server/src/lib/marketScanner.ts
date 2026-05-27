@@ -529,38 +529,8 @@ async function runPhase2(
         ? `LOW risk: prefer defensive, low-volatility assets. Avoid leverage >3x. Target: ${targetReturn}%/period.`
         : `MEDIUM risk: balanced approach. Leverage max 10x. Target: ${targetReturn}%/period.`;
 
-  const strongTrendDir = regime.diPlus >= regime.diMinus ? "bullish" : "bearish";
-  const regimeScoring =
-    regime.regime === "CHOPPY"
-      ? "REGIME=CHOPPY: DO NOT suggest new entries. Return WATCH or AVOID for all signals."
-    : regime.regime === "RANGING"
-      ? "REGIME=RANGING: Price oscillating between support and resistance. ONLY enter at range boundaries — SHORT when price is within 3% of the 50-period high (resistance), LONG when price is within 3% of the 50-period low (support). DO NOT enter mid-range. Include the 50-period high as entry/resistance context for shorts and 50-period low for longs. Use limit orders at or just inside the boundary. SL beyond the boundary (short: above 50-period high, long: below 50-period low). Target the opposite boundary for TP. Small size, tight SL. Both directions allowed — pick whichever boundary price is near."
-    : regime.regime === "EXHAUSTION"
-      ? "REGIME=EXHAUSTION: No new trend entries. Counter-trend scalps only. Force partial profits on existing winning positions."
-    : regime.regime === "VOLATILE"
-      ? `REGIME=VOLATILE: ATR is ${(regime.atr / (regime.atrAvg30d || 1)).toFixed(1)}× above average. Halve position size. Widen SL to 2×ATR. Quick TP (≤1×ATR). Limit orders only.`
-    : regime.regime === "STRONG_TREND"
-      ? `REGIME=STRONG_TREND (${strongTrendDir}, ADX=${regime.adx.toFixed(0)}): Very strong trend. ${strongTrendDir === "bullish" ? "Prefer longs but identify coins showing individual bearish divergence for short opportunities." : "Prefer shorts but identify coins showing individual bullish divergence for long opportunities."} Allow both directions — check each coin's own momentum.`
-    : regime.regime === "TRENDING_UP"
-      ? "REGIME=TRENDING_UP: Prefer longs on breakouts. Shorts allowed on coins showing bearish divergence or weakness (price rejecting resistance, failing to follow BTC higher). Both directions valid — scan each coin individually."
-      : "REGIME=TRENDING_DOWN: Prefer shorts on breakdowns. Longs allowed on coins showing bullish divergence or holding support (failing to follow BTC lower). Both directions valid — scan each coin individually.";
-
-  const scoringWeights = regime.regime === "VOLATILE"
-    ? [
-        "Dynamic score weights for VOLATILE regime:",
-        "  Direction clarity: 25pts | 4h structure: 25pts",
-        "  Volume: 15pts | OI: 15pts | Funding: 10pts",
-        "  Penalties: ATR extreme -10pts",
-        "  Minimum score to recommend: 65",
-      ].join("\n")
-    : [
-        "Dynamic score weights for TRENDING regime:",
-        "  Regime alignment: 30pts | 4h trend direction: 25pts | 1h timing: 20pts",
-        "  Volume expansion: 8pts | OI+price alignment: 7pts | Funding context: 5pts",
-        "  Penalties: RSI >80 or <20: -5pts | Extended from EMA: -5pts",
-        "  Signal freshness: -10pts if setup >2h old",
-        "  Minimum score to recommend: 65 — only return signals scoring ≥65",
-      ].join("\n");
+  // regimeScoring and scoringWeights removed — Claude receives regime label and decides freely
+  // No per-regime entry instructions, no point allocations, no minimum score threshold
 
   const signalTruthTable = [
     "SIGNAL TRUTH TABLE — direction-aware (apply before scoring any opportunity):",
@@ -582,20 +552,18 @@ async function runPhase2(
     "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
     signalTruthTable,
     `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","riskRewardRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
-    `Rank exactly 5. LONGS: ≥80=STRONG BUY(strong_buy), 60-79=BUY(high). SHORTS: ≥80=STRONG SELL(strong_sell), 60-79=SELL(high). 40-59=WATCH, <40=AVOID. Include ≥1 short per scan — look for coins rejecting resistance or lagging BTC.`,
-    `Funding: |rate|<0.03% neutral; 0.03-0.07% directional +3pts; >0.07% crowded -5pts. OI up+price up=bullish +5pts; OI down+price up=weak +2pts; OI up+price down=bearish +5pts; OI down+price down=-3pts.`,
+    `Rank exactly 5. Score reflects your own conviction (0-100). Set recommendation and conviction fields based on your judgment.`,
+    `Funding: |rate|<0.03% neutral; 0.03-0.07% directional signal; >0.07% crowded/squeeze risk. OI up+price up=bullish; OI down+price up=weak; OI up+price down=bearish; OI down+price down=weak.`,
     `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must be 1-3× 4h ATR. If structural level >3× ATR = too far, use next closest level. If <1× ATR = too tight, use level beyond it. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed by ATR range. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
     `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
     `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
-    `RS data: >+5% vs BTC=long candidate +5pts; <-5%=short candidate +5pts; set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
+    `RS data: set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
     `EXISTING POSITIONS: Do not suggest opening a position on any symbol that already has an open position (shown in "Bybit live positions" above). This applies regardless of direction — no adding a short on a symbol where a long is already open, and vice versa.`,
   ].join("\n");
 
   // Dynamic per-scan context — regime metrics and risk sizing move to prompt so systemContext stays stable
   const prompt = [
     riskDirective,
-    regimeScoring,
-    scoringWeights,
     `Orders: LIMIT(GTC) mid-range at nearest S/R; MARKET(IOC) only on confirmed volume breakout. Max position: $${maxPosition.toFixed(0)}.`,
     ``,
     `Bybit live positions: ${bybitPosSummary}`,
