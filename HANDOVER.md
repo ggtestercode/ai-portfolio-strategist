@@ -27,10 +27,12 @@
 4. **Portfolio Allocator** — balance constraint only ($5 min per trade)
 5. **Trade Manager** — Claude decides SL/TP structurally, exchange-level TP/SL, profit monitor
 
-### Entry Score Thresholds (Mode 3)
-- ~~TRENDING: 65 | RANGING: 70 | VOLATILE: 75 | CHOPPY/EXHAUSTION: 80~~ **Removed May 27** — Claude decides freely
-- Score is still required by hard gate (any value) but no minimum blocks entry by regime
-- Removal reason: CHOPPY threshold (80) blocked all entries for 2.5 days post-b5a2d21 despite valid signals
+### Entry Gates (Mode 3) — as of May 27
+- ~~TRENDING: 65 | RANGING: 70 | VOLATILE: 75 | CHOPPY/EXHAUSTION: 80~~ **Removed** (`179cd00`) — no score minimum by regime
+- ~~Regime hard blocks (CHOPPY/EXHAUSTION/VOLATILE)~~ **Removed** (`3b6e5b6`, `d260ce0`) — Filter 1 gone entirely
+- **Hard gate** (still enforced): `stopLoss`, `tp1`, `setupType`, `score` all must be present — score has no minimum value
+- **Infrastructure filters** (still enforced): extreme funding >0.1%, HTF boundary, EMA alignment, liquidity <$10M
+- Claude receives regime label, regime score, candles, order book, funding history — and decides entry freely
 
 ### Exit System
 - TP1: close 30%, SL → breakeven, set `tp1Executed=true`
@@ -328,7 +330,7 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 **Fix (two steps):**
 1. `3b6e5b6` — Removed `CHOPPY` and `EXHAUSTION` from Filter 1; kept `VOLATILE`
-2. `pending` — Removed `VOLATILE` entirely; Filter 1 gone; no regime hard-blocks any entries in code
+2. `d260ce0` — Removed `VOLATILE` entirely; Filter 1 gone; no regime hard-blocks any entries in code
 
 **Rationale:**
 - Claude receives regime label in scan prompt — it can weigh it against structural quality, order book, candles, and SL placement
