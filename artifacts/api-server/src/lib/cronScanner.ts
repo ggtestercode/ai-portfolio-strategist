@@ -497,6 +497,7 @@ async function checkHoldTimers(
           exitPrice: actualFill, amountUsd: pos.size * pos.entryPrice,
           entryPriceOverride: pos.entryPrice,
           directionOverride: pos.side === "Buy" ? "long" : "short",
+          exitReason: "review",
         }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.([
@@ -970,7 +971,7 @@ async function handlePositionDecision(
       await bybitClose(sym);
       const preOrderPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
       const exitPrice = await fetchActualFillPrice(sym, pos.entryPrice, preOrderPrice);
-      await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
+      await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
       await clearPositionMeta(sym).catch(() => {});
       await logScalingDecision(sym, "CUT", decision.reason, pos.pnlPct);
       outcomes.push({ symbol: sym, action: "CUT", reason: decision.reason, pnlPct: pos.pnlPct });
@@ -1859,6 +1860,7 @@ async function checkPositionMonitor(): Promise<void> {
           amountUsd:          trade.closedSize * trade.avgEntryPrice,
           pnlOverride:        trade.closedPnl,
           entryPriceOverride: trade.avgEntryPrice,
+          exitReason:         trade.closedPnl >= 0 ? "tp_hit" : "sl_hit",
         }).catch(e => console.warn(`[posMonitor] closeOpenTrade ${sym}:`, (e as Error).message));
         const won = trade.closedPnl >= 0;
         await alertFn?.([
@@ -1895,7 +1897,7 @@ async function checkPositionMonitor(): Promise<void> {
       console.log(`[posMonitor] ${pos.symbol} large profit +${pnlPct.toFixed(1)}% ≥ ${LARGE_PROFIT_CLOSE_PCT}% → closing full position`);
       await bybitClose(pos.symbol).catch(e => console.error(`[posMonitor] largeProfit close ${pos.symbol}:`, e.message));
       const lpFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
-      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: lpFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
+      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: lpFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "profit_protection" }).catch(() => {});
       await clearPositionMeta(pos.symbol).catch(() => {});
       await alertFn?.([
         `💰 <b>Large profit exit — ${pos.symbol}</b>`,
@@ -1927,7 +1929,7 @@ async function checkPositionMonitor(): Promise<void> {
         console.error(`[posMonitor] close ${pos.symbol}:`, (e as Error).message)
       );
       const hsFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
-      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: hsFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
+      await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: hsFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "sl_hit" }).catch(() => {});
       await clearPositionMeta(pos.symbol).catch(() => {});
       await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(() => {});
       void closeSide; // suppress unused variable warning
@@ -2279,7 +2281,7 @@ async function runPositionReview(
     await bybitClose(pos.symbol)
       .catch(e => console.error(`[posMonitor] CLOSE ${pos.symbol}:`, (e as Error).message));
     const closeFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
-    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: closeFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
+    await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: closeFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
     await clearPositionMeta(pos.symbol).catch(() => {});
     await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ approved\n${reason}`).catch(() => {});
 
@@ -2296,7 +2298,7 @@ async function runPositionReview(
         await bybitClose(pos.symbol)
           .catch(e => console.error(`[posMonitor] CLOSE (dust) ${pos.symbol}:`, (e as Error).message));
         const dustFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
-        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: dustFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short" }).catch(() => {});
+        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: dustFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(() => {});
       } else {

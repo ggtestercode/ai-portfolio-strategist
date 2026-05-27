@@ -46,6 +46,7 @@ interface ReflectionInput {
   markPriceAtDecision?: number;  // pre-order price the system used
   suppressAlerts?: boolean;      // true for backfill — don't spam old-trade execution alerts
   source?: string | null;        // 'mode_3' | 'version_b'
+  exitReasonOverride?: string;   // explicit exit label — overrides P&L-derived heuristic
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -444,13 +445,15 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   if (unplannedPartials.length > 0) executionIssues.push(`Unplanned partials: ${unplannedPartials.map(p => p.partialType).join(", ")}`);
   if (memPartials.length > 3) executionIssues.push(`Excessive partials: ${memPartials.length} closes`);
 
-  // Determine exit method from bybit data and partials
+  // Determine exit method — explicit override wins; otherwise derive from partials/bybit data
   const profitProtectionTypes = ["profit_5pct","profit_10pct","profit_20pct","large_profit"];
-  const exitMethod = memPartials.some(p => profitProtectionTypes.includes(p.partialType ?? ""))
-    ? "profit_protection"
-    : bybitCloses.length > 0 && bybitCloses[bybitCloses.length-1]!.closedPnl !== undefined
-      ? (input.pnlPct < -5 ? "sl_hit" : "review")
-      : "unknown";
+  const exitMethod = input.exitReasonOverride
+    ? input.exitReasonOverride
+    : memPartials.some(p => profitProtectionTypes.includes(p.partialType ?? ""))
+      ? "profit_protection"
+      : bybitCloses.length > 0 && bybitCloses[bybitCloses.length-1]!.closedPnl !== undefined
+        ? (input.pnlPct < -5 ? "sl_hit" : "review")
+        : "unknown";
 
   const tradeLost = input.pnlPct < 0;
   const failureType: "strategy" | "execution" | "mixed" | "success" =
@@ -1677,6 +1680,7 @@ export async function closeOpenTrade(params: {
   pnlOverride?:        number;
   entryPriceOverride?: number;
   directionOverride?:  "long" | "short";
+  exitReason?:         string;   // explicit label — "sl_hit" | "tp_hit" | "review" | "profit_protection" | "hard_stop"
 }): Promise<void> {
   const openTrades = await db.select()
     .from(tradeLogTable)
@@ -1745,6 +1749,7 @@ export async function closeOpenTrade(params: {
     sl:        openTrade.sl,
     tp1:       openTrade.tp1,
     tp2:       openTrade.tp2,
+    exitReasonOverride: params.exitReason,
   }).catch(e => console.error("[tradeMemory] reflection failed:", e));
 
   // Rule tracking — update only rules tagged at entry (appliedRuleIds)
