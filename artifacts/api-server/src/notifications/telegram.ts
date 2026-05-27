@@ -252,7 +252,7 @@ export function startPolling(): void {
     { command: "memory",          description: "Last 5 trade reflections (AI journal)" },
     { command: "rules",           description: "Active trading rules (auto-generated)" },
     { command: "forcerules",      description: "Force rule regeneration now" },
-    { command: "compare",         description: "Mode 3 vs Version B P&L comparison (May 24→now)" },
+    { command: "compare",         description: "Version B live (May 27→now) + historical Mode 3 vs B (May 24-27)" },
     { command: "costs",           description: "Claude API spend — today, MTD, top callers, projection" },
     { command: "paperhistory",    description: "Version B paper trade signals (A/B test)" },
     { command: "pending",    description: "Pending trade approvals" },
@@ -1619,18 +1619,21 @@ export function startPolling(): void {
   b.onText(/^\/compare(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const since = new Date("2026-05-24T00:00:00Z");
+      const sinceMay24 = new Date("2026-05-24T00:00:00Z");
+      const sinceMay27 = new Date("2026-05-27T00:00:00Z");
 
-      const [mode3Raw, vBRaw, mode3MemResult] = await Promise.all([
+      const [mode3Raw, vBRaw, mode3MemResult, vBLiveRaw] = await Promise.all([
+        // Historical: Mode 3 trades since May 24
         db.select({ pnl: tradeLogTable.pnl, pnlPct: tradeLogTable.pnlPct })
           .from(tradeLogTable)
-          .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, since)))
+          .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, sinceMay24)))
           .catch(() => [] as Array<{ pnl: string | null; pnlPct: string | null }>),
+        // Historical: Version B trades since May 24
         db.select({ wouldHavePnl: paperTradesTable.wouldHavePnl, exitReason: paperTradesTable.exitReason })
           .from(paperTradesTable)
-          .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, since)))
+          .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, sinceMay24)))
           .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
-        // One row per trade_log entry — join to reflection within 4h of exit, prefer sl_hit
+        // Historical: Mode 3 exit methods from reflection (one row per trade, prefer sl_hit)
         db.execute<{ exit_method: string | null; tp1_reached: boolean | null }>(sql`
           SELECT DISTINCT ON (tl.id)
             COALESCE(tm.exit_method, 'unknown') AS exit_method,
@@ -1641,17 +1644,19 @@ export function startPolling(): void {
             AND tm.action = 'TRADE_CLOSE'
             AND tm.created_at >= tl.exit_at
             AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
-          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${since}
+          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${sinceMay24}
           ORDER BY tl.id,
             CASE WHEN tm.exit_method = 'sl_hit'   THEN 1
                  WHEN tm.exit_method LIKE 'tp%'   THEN 2
                  WHEN tm.exit_method = 'review'   THEN 3
                  ELSE 4 END
         `).catch(() => ({ rows: [] as Array<{ exit_method: string | null; tp1_reached: boolean | null }> })),
+        // Live baseline: Version B trades since May 27
+        db.select({ wouldHavePnl: paperTradesTable.wouldHavePnl, exitReason: paperTradesTable.exitReason })
+          .from(paperTradesTable)
+          .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, sinceMay27)))
+          .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
       ]);
-
-      const m3 = mode3Raw.map(r => parseFloat(r.pnl ?? "0"));
-      const vB = vBRaw.map(r => r.wouldHavePnl ?? 0);
 
       const stats = (vals: number[]) => {
         const wins   = vals.filter(v => v > 0);
@@ -1665,8 +1670,32 @@ export function startPolling(): void {
         };
       };
 
-      const s3 = stats(m3);
-      const sB = stats(vB);
+      const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
+      const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
+
+      // ── Live Version B section (May 27 baseline) ──────────────────────────
+      const vBLive    = vBLiveRaw.map(r => r.wouldHavePnl ?? 0);
+      const sLive     = stats(vBLive);
+      const liveTp1   = vBLiveRaw.filter(r => r.exitReason === "tp1_hit" || r.exitReason === "tp2_hit").length;
+      const liveSl    = vBLiveRaw.filter(r => r.exitReason === "sl_hit").length;
+      const liveReview = vBLiveRaw.filter(r => r.exitReason === "claude_close").length;
+
+      const liveSection = sLive.total === 0
+        ? [`📊 <b>Version B Live Performance (May 27 → now)</b>`, `No closed trades yet`]
+        : [
+            `📊 <b>Version B Live Performance (May 27 → now)</b>`,
+            `Trades: ${sLive.total} | Win rate: ${sLive.winRate}%`,
+            `Net P&L: ${fmt(sLive.netPnl)}`,
+            `Avg winner: ${fmtAvg(sLive.avgWin, "+")} | Avg loser: ${fmtAvg(sLive.avgLoss, "-")}`,
+            `TP1: ${liveTp1} | SL: ${liveSl} | Review: ${liveReview}`,
+          ];
+
+      // ── Historical comparison section (May 24-27) ─────────────────────────
+      const m3   = mode3Raw.map(r => parseFloat(r.pnl ?? "0"));
+      const vB   = vBRaw.map(r => r.wouldHavePnl ?? 0);
+      const s3   = stats(m3);
+      const sB   = stats(vB);
+
       const m3Mem    = mode3MemResult.rows;
       const m3Sl     = m3Mem.filter(r => r.exit_method === "sl_hit").length;
       const m3Tp1    = m3Mem.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
@@ -1676,16 +1705,13 @@ export function startPolling(): void {
       const vBReview = vBRaw.filter(r => r.exitReason === "claude_close").length;
       const vBTimer  = vBRaw.filter(r => r.exitReason === "48h_timer").length;
 
-      const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
-      const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
-
       const tooEarly = s3.total < 5 || sB.total < 5;
       const verdict  = tooEarly
         ? "Too early to compare (need 5+ trades each side)"
         : s3.netPnl > sB.netPnl ? "Mode 3 ahead" : sB.netPnl > s3.netPnl ? "Version B ahead" : "Even";
 
-      const out = [
-        `📊 <b>Mode 3 vs Version B (May 24 → now)</b>`,
+      const historicalSection = [
+        `📊 <b>Historical comparison (May 24–27)</b>`,
         ``,
         `🔴 <b>Mode 3 (Live)</b>`,
         `Trades: ${s3.total} | Win rate: ${s3.winRate}%`,
@@ -1700,7 +1726,9 @@ export function startPolling(): void {
         `TP1: ${vBTp1} | SL: ${vBSl} | Review: ${vBReview} | Timer: ${vBTimer} (of ${sB.total})`,
         ``,
         `Verdict: <b>${verdict}</b>`,
-      ].join("\n");
+      ];
+
+      const out = [...liveSection, ``, ...historicalSection].join("\n");
 
       await b.sendMessage(chatId, out, { parse_mode: "HTML" });
     } catch (err: unknown) {
