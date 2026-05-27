@@ -313,7 +313,7 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ## 6. Fixes Deployed May 27, 2026
 
-### Regime score thresholds removed from cron scan (commit `TBD`)
+### Regime score thresholds removed from cron scan (commit `179cd00`)
 
 **Root cause:** After b5a2d21 deployed (May 25 13:57 UTC), the market regime was CHOPPY. The hard gate required score ≥ 80 for CHOPPY. No signals reached 80. Result: 0 new Mode 3 entries for the entire 2.5-day window from May 25 16:00 UTC → May 27. Claude was generating signals and assigning scores but every single one was blocked before the hard gate was even reached.
 
@@ -446,7 +446,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - [x] Rules injected into Version B scan prompt (`85492b9`)
 - [x] Reflections enabled on Version B closes (`85492b9`) — `source='version_b'` in trade_memory
 - [ ] Credit balance topped up
-- [x] Switch live capital to Version B logic — regime thresholds removed, Claude decides freely
+- [x] Switch live capital to Version B logic — regime thresholds removed, Claude decides freely (`179cd00`)
 - [ ] Keep Mode 3 as paper with fee/slippage simulation
 - [ ] Confirm first Version B live close triggers reflection correctly
 - [ ] Rollback plan confirmed — Mode 3 config preserved
@@ -505,3 +505,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `34548a6` | fix: Version B portfolio review — case-insensitive decisions, JSON schema enum, Sonnet 1500t |
 | `d87fea2` | feat: Version B portfolio review — add Liq(est) from entry price + 10× leverage |
 | `276c7f7` | fix: pass exitReason explicitly through closeOpenTrade → generateReflection (7 call sites) |
+| `179cd00` | fix: remove regime score thresholds from cron scan entry gate |
