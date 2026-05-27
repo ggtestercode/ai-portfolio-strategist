@@ -412,6 +412,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 ### Pending (not yet implemented)
 - **Hard gate for SL/TP** — code enforcement (not just a rule) to reject any signal without SL, TP, and setupType. Agreed but not deployed. Rule 1 covers this as a soft constraint only.
 - **Scan to 30min** — currently 4h for testing stability; restore when balance >$50 and stable
+- **Trailing SL distance** — hardcoded at 1.0×ATR in `cronScanner.ts`; consistent with "Claude decides freely" philosophy, consider letting Claude specify trailing distance per trade in signal output
 
 ### Known Constraints
 - Neon DB at 97.76/100 CU-hrs — resets June 1; subscribe if it hits limit before then (~$3-5)
@@ -419,6 +420,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
 ### Resolved May 27
+- ✅ Leverage per-trade applied on Bybit (`af178d5`) — `openPosition()` now sets leverage from Claude's signal before placing order; safety cap: 10× maximum (silently clamped); conditional: skips `set-leverage` API call if current position leverage already matches
 - ✅ All regime hard blocks removed from `applyHardFilters()` — Filter 1 gone entirely; CHOPPY/EXHAUSTION (`3b6e5b6`), VOLATILE (`d260ce0`); Claude receives regime in prompt and decides freely for all regimes
 - ✅ Phase 2 scoring/regime instructions removed (`d1c16c9`) — regimeScoring, scoringWeights, score→recommendation mapping gone; funding/OI point values stripped to directional context only; Phase 1 systemContext simplified to free selection; Claude assigns score and conviction from own judgment
 - ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (`179cd00`)
@@ -549,3 +551,5 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `3b6e5b6` | fix: remove CHOPPY/EXHAUSTION hard block from applyHardFilters(); keep VOLATILE |
 | `d260ce0` | fix: remove VOLATILE hard block from applyHardFilters(); no regime blocks in code |
 | `d1c16c9` | fix: remove regime/scoring instructions from Phase 2 prompt — Claude decides freely |
+| `d8e5b89` | fix: simplify Phase 1 systemContext — free symbol selection, no RS/RSI rules |
+| `af178d5` | fix: openPosition() — cap leverage at 10x; skip set-leverage if already set |
