@@ -22,7 +22,7 @@
 
 ### 5-Layer Signal System (Mode 3)
 1. **Market Regime Detection** — BTC ADX, DI+/-, ATR vs 30d avg
-2. **Hard Filters** — extreme funding, HTF resistance, EMA misalignment, low liquidity
+2. **Hard Filters** — extreme funding, HTF resistance, EMA misalignment, low liquidity; **VOLATILE regime hard-blocked** (CHOPPY/EXHAUSTION passed to Claude — Claude decides)
 3. **Weighted Scoring** — dynamic weights by regime, funding nonlinear, OI+price context, signal freshness decay
 4. **Portfolio Allocator** — balance constraint only ($5 min per trade)
 5. **Trade Manager** — Claude decides SL/TP structurally, exchange-level TP/SL, profit monitor
@@ -322,6 +322,21 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ## 6. Fixes Deployed May 27, 2026
 
+### CHOPPY and EXHAUSTION hard blocks removed from `applyHardFilters()` (commit `TBD`)
+
+**Root cause:** `applyHardFilters()` lines 291–298 had a per-symbol hard veto for `CHOPPY`, `EXHAUSTION`, and `VOLATILE` regimes. Combined with the score threshold removal (`179cd00`), CHOPPY/EXHAUSTION was still vetoing every signal before Claude could evaluate it.
+
+**Fix:** Removed `CHOPPY` and `EXHAUSTION` from Filter 1 in `applyHardFilters()`. Only `VOLATILE` retained (10× leverage + 4h review cycles = too dangerous for directional entries in high-noise regime).
+
+**Rationale:**
+- Claude already receives regime in its scan prompt — it can factor CHOPPY/EXHAUSTION into its own decision
+- A code-level veto overrides Claude's signal regardless of structural quality
+- VOLATILE is a different risk profile: price can gap through SL between 4h review cycles; kept as non-negotiable hard block
+
+**Result:** `applyHardFilters()` Filter 1 is now VOLATILE-only. CHOPPY and EXHAUSTION pass through to Claude.
+
+---
+
 ### Regime score thresholds removed from cron scan (commit `179cd00`)
 
 **Root cause:** After b5a2d21 deployed (May 25 13:57 UTC), the market regime was CHOPPY. The hard gate required score ≥ 80 for CHOPPY. No signals reached 80. Result: 0 new Mode 3 entries for the entire 2.5-day window from May 25 16:00 UTC → May 27. Claude was generating signals and assigning scores but every single one was blocked before the hard gate was even reached.
@@ -395,6 +410,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
 ### Resolved May 27
+- ✅ CHOPPY/EXHAUSTION hard block in `applyHardFilters()` — removed from Filter 1; only VOLATILE retains hard veto; Claude receives regime in prompt and decides freely for CHOPPY/EXHAUSTION (pending commit)
 - ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (`179cd00`)
 - ✅ `/compare` updated — new top section: Version B live (May 27 → now); historical May 24–27 below; 4-query parallel fetch, free (`be56090`)
 - ✅ Version B went live May 27 — first trade: TP1 hit +$0.85, reflection confirmed firing
@@ -518,3 +534,6 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `276c7f7` | fix: pass exitReason explicitly through closeOpenTrade → generateReflection (7 call sites) |
 | `179cd00` | fix: remove regime score thresholds from cron scan entry gate |
 | `be56090` | feat: /compare — Version B live baseline May 27 + historical May 24-27 |
+| `2db0ba3` | docs: HANDOVER.md — Version B live May 27, /compare update, first TP1 +$0.85 |
+| `0b89f1e` | fix: /compare live section queries trade_log not paper_trades |
+| pending  | fix: remove CHOPPY/EXHAUSTION hard block from applyHardFilters(); keep VOLATILE |

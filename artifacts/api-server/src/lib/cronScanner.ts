@@ -288,12 +288,11 @@ async function applyHardFilters(
   const rejected: Array<{ symbol: string; reason: string }> = [];
 
   for (const opp of opps) {
-    // Filter 1: hard regime blocks — CHOPPY (no trend/no range), EXHAUSTION, VOLATILE
+    // Filter 1: hard regime block — VOLATILE only (10x leverage + 4h review cycle = too dangerous)
+    // CHOPPY and EXHAUSTION: Claude receives regime in prompt context and decides freely
     // RANGING is allowed through: range trades at support/resistance are valid entries
-    if (regime?.regime === "CHOPPY" ||
-        regime?.regime === "EXHAUSTION" ||
-        regime?.regime === "VOLATILE") {
-      rejected.push({ symbol: opp.symbol, reason: `regime=${regime.regime} — no new entries` });
+    if (regime?.regime === "VOLATILE") {
+      rejected.push({ symbol: opp.symbol, reason: `regime=VOLATILE — no new entries (hard block)` });
       continue;
     }
 
