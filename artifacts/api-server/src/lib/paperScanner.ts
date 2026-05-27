@@ -241,7 +241,7 @@ export async function runPaperScan(): Promise<void> {
 
     // ── Position review (only when there are open positions) ──────────────────
     interface PortfolioReview {
-      positionReviews: Array<{ symbol: string; decision: "HOLD" | "PARTIAL_CLOSE" | "CLOSE"; closePercent: number; reasoning: string }>;
+      positionReviews: Array<{ symbol: string; decision: "HOLD" | "PARTIAL_CLOSE" | "CLOSE"; closePercent: number; newSl?: number; reasoning: string }>;
       newEntries:      Array<{ symbol: string; direction: string; reasoning: string }>;
       portfolioReasoning: string;
     }
@@ -293,6 +293,7 @@ export async function runPaperScan(): Promise<void> {
           "CLOSE when: thesis broken, price near SL with no recovery, or held >36h flat.",
           "PARTIAL_CLOSE (closePercent=50) when: partial profit makes sense, keep core exposure.",
           "HOLD when: thesis intact, within expected range, let it run.",
+          "newSl: optional — updated stop loss price to protect profit. Longs: only higher than current SL. Shorts: only lower. Omit if no change needed.",
           "newEntries: from the new scan signals, list any you want opened. Empty list is fine.",
           `Capital: paper balance $${paperBalance.toFixed(2)} | Each new entry uses 5% of balance.`,
           "JSON RULES: no double-quotes inside strings, no backslash, no newlines inside strings.",
@@ -317,6 +318,7 @@ export async function runPaperScan(): Promise<void> {
                   symbol:       { type: "string" },
                   decision:     { type: "string", enum: ["HOLD", "PARTIAL_CLOSE", "CLOSE"] },
                   closePercent: { type: "number" },
+                  newSl:        { type: "number" },
                   reasoning:    { type: "string" },
                 },
                 required: ["symbol", "decision", "reasoning"],
@@ -401,7 +403,25 @@ export async function runPaperScan(): Promise<void> {
             console.log(`[paperTrade] Version B PARTIAL_CLOSE ${trade.symbol} ${(pct * 100).toFixed(0)}% pnl=${pnlPct.toFixed(2)}% returned=$${(closedMgn + closedPnl - closeFee).toFixed(2)}`);
             console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
           }
-          // HOLD: no action
+          // newSl: trailing stop — valid on HOLD and PARTIAL_CLOSE (position still open)
+          if (rv.decision?.toUpperCase() !== "CLOSE" && rv.newSl != null) {
+            if (trade.stopLoss == null) {
+              console.warn(`[paperTrade] newSl ignored for ${trade.symbol} — no existing SL to ratchet from`);
+            } else {
+              const isValid = isLong
+                ? rv.newSl > trade.stopLoss   // longs: only ratchet up
+                : rv.newSl < trade.stopLoss;  // shorts: only ratchet down
+              if (isValid) {
+                await db.update(paperTradesTable).set({ stopLoss: rv.newSl })
+                  .where(eq(paperTradesTable.id, trade.id))
+                  .catch(e => console.warn(`[paperScanner] newSl update ${trade.symbol}:`, e.message));
+                console.log(`[paperTrade] Version B trailing SL ${trade.symbol} ${trade.direction}: ${trade.stopLoss} → ${rv.newSl}`);
+              } else {
+                console.warn(`[paperTrade] newSl rejected ${trade.symbol} ${trade.direction}: proposed=${rv.newSl} current=${trade.stopLoss} (must ${isLong ? "be higher" : "be lower"})`);
+              }
+            }
+          }
+          // HOLD with no newSl: no action
         }
 
         console.log(`[paperScanner] Portfolio review: ${portfolioDecision.positionReviews.length} decisions, $${balanceFromClosures.toFixed(2)} freed | ${portfolioDecision.portfolioReasoning.slice(0, 150)}`);
