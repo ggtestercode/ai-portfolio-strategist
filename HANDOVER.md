@@ -309,6 +309,31 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ---
 
+## 6. Fixes Deployed May 27, 2026
+
+### `exitMethod` labeling — explicit exit reasons across all close paths (commit `276c7f7`)
+
+**Root cause:** `generateReflection()` derived `exitMethod` from P&L percentage: `pnlPct < -5 → "sl_hit"`, else `"review"`. This mislabeled posMonitor review closes at -7% as `sl_hit`, and tight SL hits at -3% as `review`. The reflection prompt uses `exitMethod` to ask "Was SL hit?", assess manual close quality, and guide Claude's self-assessment — wrong labels corrupt the learning loop.
+
+**Fix — 3 changes in `tradeMemoryLib.ts`:**
+- `ReflectionInput` interface: added `exitReasonOverride?: string` — explicit label that overrides heuristic
+- `generateReflection()`: `exitReasonOverride` takes priority; P&L heuristic is now the last resort fallback only
+- `closeOpenTrade()`: added `exitReason?: string` param, forwarded as `exitReasonOverride` into `generateReflection()`
+
+**7 call sites in `cronScanner.ts` now pass explicit reasons:**
+
+| Call site | `exitReason` |
+|-----------|-------------|
+| 48h timer review CLOSE | `"review"` |
+| Scan CUT decision | `"review"` |
+| Position disappeared (exchange SL/TP/liq) | `closedPnl >= 0 ? "tp_hit" : "sl_hit"` |
+| Large profit full close (≥20%) | `"profit_protection"` |
+| Hard stop (−40%) | `"sl_hit"` |
+| posMonitor Claude CLOSE | `"review"` |
+| posMonitor dust → full close | `"review"` |
+
+---
+
 ## 6. Fixes Deployed May 26, 2026
 
 ### INJUSDT TP2 miss investigation + three fixes (commit `5ba1ffc`)
@@ -346,6 +371,9 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - Neon DB at 97.76/100 CU-hrs — resets June 1; subscribe if it hits limit before then (~$3-5)
 - Version B paper balance: ~$26-40 — do not reset
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
+
+### Resolved May 27
+- ✅ `exitMethod` mislabeled in reflections — `exitReasonOverride` added to `ReflectionInput`; all 7 `closeOpenTrade()` call sites pass explicit reason; P&L heuristic is now fallback only (`276c7f7`)
 
 ### Resolved May 26
 - ✅ TP2 permanently blocked by tier gate — `currentTier < 2` removed; `!pm.tp2Executed` is sole gate (`5ba1ffc`)
@@ -462,3 +490,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `5ba1ffc` | fix: TP2 tier gate, TP1 double-close prevention, TP1 verification log |
 | `34548a6` | fix: Version B portfolio review — case-insensitive decisions, JSON schema enum, Sonnet 1500t |
 | `d87fea2` | feat: Version B portfolio review — add Liq(est) from entry price + 10× leverage |
+| `276c7f7` | fix: pass exitReason explicitly through closeOpenTrade → generateReflection (7 call sites) |
