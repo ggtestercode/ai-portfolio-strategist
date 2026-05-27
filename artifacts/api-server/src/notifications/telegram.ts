@@ -1651,11 +1651,25 @@ export function startPolling(): void {
                  WHEN tm.exit_method = 'review'   THEN 3
                  ELSE 4 END
         `).catch(() => ({ rows: [] as Array<{ exit_method: string | null; tp1_reached: boolean | null }> })),
-        // Live baseline: Version B trades since May 27
-        db.select({ wouldHavePnl: paperTradesTable.wouldHavePnl, exitReason: paperTradesTable.exitReason })
-          .from(paperTradesTable)
-          .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, sinceMay27)))
-          .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
+        // Live baseline: real trades since May 27 (trade_log, same join as Mode 3)
+        db.execute<{ pnl: string | null; exit_method: string | null; tp1_reached: boolean | null }>(sql`
+          SELECT DISTINCT ON (tl.id)
+            tl.pnl,
+            COALESCE(tm.exit_method, 'unknown') AS exit_method,
+            tm.tp1_reached
+          FROM trade_log tl
+          LEFT JOIN trade_memory tm
+            ON tm.symbol = tl.symbol
+            AND tm.action = 'TRADE_CLOSE'
+            AND tm.created_at >= tl.exit_at
+            AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
+          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${sinceMay27}
+          ORDER BY tl.id,
+            CASE WHEN tm.exit_method = 'sl_hit'   THEN 1
+                 WHEN tm.exit_method LIKE 'tp%'   THEN 2
+                 WHEN tm.exit_method = 'review'   THEN 3
+                 ELSE 4 END
+        `).catch(() => ({ rows: [] as Array<{ pnl: string | null; exit_method: string | null; tp1_reached: boolean | null }> })),
       ]);
 
       const stats = (vals: number[]) => {
@@ -1674,11 +1688,12 @@ export function startPolling(): void {
       const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
 
       // ── Live Version B section (May 27 baseline) ──────────────────────────
-      const vBLive    = vBLiveRaw.map(r => r.wouldHavePnl ?? 0);
-      const sLive     = stats(vBLive);
-      const liveTp1   = vBLiveRaw.filter(r => r.exitReason === "tp1_hit" || r.exitReason === "tp2_hit").length;
-      const liveSl    = vBLiveRaw.filter(r => r.exitReason === "sl_hit").length;
-      const liveReview = vBLiveRaw.filter(r => r.exitReason === "claude_close").length;
+      const vBLiveRows  = vBLiveRaw.rows;
+      const vBLive      = vBLiveRows.map(r => parseFloat(r.pnl ?? "0"));
+      const sLive       = stats(vBLive);
+      const liveTp1     = vBLiveRows.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
+      const liveSl      = vBLiveRows.filter(r => r.exit_method === "sl_hit").length;
+      const liveReview  = vBLiveRows.filter(r => r.exit_method === "review").length;
 
       const liveSection = sLive.total === 0
         ? [`📊 <b>Version B Live Performance (May 27 → now)</b>`, `No closed trades yet`]
