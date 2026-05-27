@@ -214,7 +214,16 @@ Top 3 MTD by caller:
 
 ---
 
-## 6. A/B Test Status (as of May 25, 2026)
+## 6. A/B Test Status (as of May 27, 2026)
+
+**Version B went live May 27** — regime thresholds removed (`179cd00`), Claude decides freely. No longer paper-only. Live capital running under Version B logic from May 27 onwards.
+
+**First Version B live trade: TP1 hit +$0.85** (May 27)
+
+### May 27 → now (Version B live baseline)
+Track via `/compare` top section. Clean slate from regime-threshold removal.
+
+### May 24–27 historical (A/B test period)
 
 | Metric | Mode 3 (live) | Version B (paper) |
 |---|---|---|
@@ -225,7 +234,7 @@ Top 3 MTD by caller:
 | SL exits | 1 (TIAUSDT) | 0 |
 | Review closes | 2 (NEARUSDT, TIAUSDT #2) | growing |
 
-**Mode 3 closed trades since May 24:**
+**Mode 3 closed trades (May 24–27):**
 - TIAUSDT #1 — SL hit, -$2.21, entry timing `early`, sl_too_tight, opportunity_cost_pct -12.25%
 - NEARUSDT — Review close (posMonitor), -$0.62, tp1_reached=true but partial never fired
 - TIAUSDT #2 — Review close (posMonitor), -$1.41
@@ -247,7 +256,7 @@ Top 3 MTD by caller:
 
 Note: TIAUSDT closed. HYPE and NEAR still have SL above liq but no structural anchor below liq.
 
-**Version B status:** Running paper trades. Do NOT close manually or reset balance. A/B test protocol.
+**Version B status:** Live from May 27. Do NOT close manually or reset balance.
 
 ---
 
@@ -386,7 +395,9 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
 ### Resolved May 27
-- ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (see commit below)
+- ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (`179cd00`)
+- ✅ `/compare` updated — new top section: Version B live (May 27 → now); historical May 24–27 below; 4-query parallel fetch, free (`be56090`)
+- ✅ Version B went live May 27 — first trade: TP1 hit +$0.85, reflection confirmed firing
 - ✅ `exitMethod` mislabeled in reflections — `exitReasonOverride` added to `ReflectionInput`; all 7 `closeOpenTrade()` call sites pass explicit reason; P&L heuristic is now fallback only (`276c7f7`)
 
 ### Resolved May 26
@@ -448,7 +459,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - [ ] Credit balance topped up
 - [x] Switch live capital to Version B logic — regime thresholds removed, Claude decides freely (`179cd00`)
 - [ ] Keep Mode 3 as paper with fee/slippage simulation
-- [ ] Confirm first Version B live close triggers reflection correctly
+- [x] Confirm first Version B live close triggers reflection correctly — TP1 hit +$0.85 (May 27)
 - [ ] Rollback plan confirmed — Mode 3 config preserved
 
 ---
@@ -506,3 +517,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `d87fea2` | feat: Version B portfolio review — add Liq(est) from entry price + 10× leverage |
 | `276c7f7` | fix: pass exitReason explicitly through closeOpenTrade → generateReflection (7 call sites) |
 | `179cd00` | fix: remove regime score thresholds from cron scan entry gate |
+| `be56090` | feat: /compare — Version B live baseline May 27 + historical May 24-27 |
