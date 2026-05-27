@@ -293,7 +293,7 @@ export async function runPaperScan(): Promise<void> {
           "CLOSE when: thesis broken, price near SL with no recovery, or held >36h flat.",
           "PARTIAL_CLOSE (closePercent=50) when: partial profit makes sense, keep core exposure.",
           "HOLD when: thesis intact, within expected range, let it run.",
-          "newSl: optional — updated stop loss price to protect profit. Longs: only higher than current SL. Shorts: only lower. Omit if no change needed.",
+          "newSl: optional number — updated stop loss price to secure profit. Longs: only higher than current SL. Shorts: only lower. Omit if no change needed.",
           "newEntries: from the new scan signals, list any you want opened. Empty list is fine.",
           `Capital: paper balance $${paperBalance.toFixed(2)} | Each new entry uses 5% of balance.`,
           "JSON RULES: no double-quotes inside strings, no backslash, no newlines inside strings.",
