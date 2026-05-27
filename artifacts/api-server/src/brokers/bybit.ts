@@ -212,6 +212,13 @@ export async function openPosition(
   leverage = 10,
   opts?: { stopLoss?: number; takeProfit?: number; tp1?: number },
 ): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number }> {
+  // ── Leverage cap ─────────────────────────────────────────────────────────
+  const MAX_LEVERAGE = 10;
+  if (leverage > MAX_LEVERAGE) {
+    console.log(`[Bybit] Leverage capped: ${leverage}x → ${MAX_LEVERAGE}x (safety cap)`);
+    leverage = MAX_LEVERAGE;
+  }
+
   // ── Position sizing ───────────────────────────────────────────────────────
   const { totalEquity, availableBalance } = await getBalance();
   const bybitBalance   = availableBalance;
@@ -246,7 +253,15 @@ export async function openPosition(
   }
 
   const sym = normalise(symbol);
-  await setLeverage(sym, leverage);
+
+  // Set leverage only if it differs from current position leverage (avoids unnecessary API calls)
+  const livePositions = await getPositions().catch(() => [] as BybitPosition[]);
+  const existingPos   = livePositions.find(p => normalise(p.symbol) === sym);
+  if (!existingPos || existingPos.leverage !== leverage) {
+    await setLeverage(sym, leverage);
+  } else {
+    console.log(`[Bybit] ${sym} leverage already ${leverage}x — skipping set-leverage`);
+  }
 
   // Try to switch this symbol to hedge mode so longs and shorts can coexist.
   // positionIdx 1 = hedge-long (Buy), positionIdx 2 = hedge-short (Sell).
