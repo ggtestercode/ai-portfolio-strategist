@@ -799,9 +799,9 @@ export function startPolling(): void {
         const tpLine  = `\n  TP (exchange): ${exchangeTP}`;
         const metaTargets = meta
           ? [
-              meta.sl  ? `\n  SL target: $${fmt(meta.sl)} (ATR×1.5)` : "",
-              meta.tp1 ? `\n  TP1 target: $${fmt(meta.tp1)} (ATR×1.0)` : "",
-              meta.tp2 ? `\n  TP2 target: $${fmt(meta.tp2)} (ATR×2.0)` : "",
+              meta.sl  ? `\n  SL target: $${fmt(meta.sl)}` : "",
+              meta.tp1 ? `\n  TP1 target: $${fmt(meta.tp1)}` : "",
+              meta.tp2 ? `\n  TP2 target: $${fmt(meta.tp2)}` : "",
             ].join("")
           : "";
 
