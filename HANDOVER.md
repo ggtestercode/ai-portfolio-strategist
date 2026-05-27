@@ -30,9 +30,13 @@
 ### Entry Gates (Mode 3) — as of May 27
 - ~~TRENDING: 65 | RANGING: 70 | VOLATILE: 75 | CHOPPY/EXHAUSTION: 80~~ **Removed** (`179cd00`) — no score minimum by regime
 - ~~Regime hard blocks (CHOPPY/EXHAUSTION/VOLATILE)~~ **Removed** (`3b6e5b6`, `d260ce0`) — Filter 1 gone entirely
+- ~~regimeScoring per-regime entry instructions~~ **Removed** (`d1c16c9`) — "DO NOT enter" / "prefer longs" / "counter-trend scalps only" gone
+- ~~scoringWeights point allocations and minimum score 65~~ **Removed** (`d1c16c9`) — Claude assigns score from own judgment
+- ~~Score→recommendation mapping (≥80=STRONG BUY etc.)~~ **Removed** (`d1c16c9`) — Claude sets conviction/recommendation freely
 - **Hard gate** (still enforced): `stopLoss`, `tp1`, `setupType`, `score` all must be present — score has no minimum value
 - **Infrastructure filters** (still enforced): extreme funding >0.1%, HTF boundary, EMA alignment, liquidity <$10M
-- Claude receives regime label, regime score, candles, order book, funding history — and decides entry freely
+- **signalTruthTable retained**: direction-aware market knowledge (RSI, funding, OI, support/resistance context)
+- Claude receives regime label + full market data and decides freely — no code-level or prompt-level scoring formula
 
 ### Exit System
 - TP1: close 30%, SL → breakeven, set `tp1Executed=true`
@@ -416,6 +420,7 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ### Resolved May 27
 - ✅ All regime hard blocks removed from `applyHardFilters()` — Filter 1 gone entirely; CHOPPY/EXHAUSTION (`3b6e5b6`), VOLATILE (`d260ce0`); Claude receives regime in prompt and decides freely for all regimes
+- ✅ Phase 2 scoring/regime instructions removed (`d1c16c9`) — regimeScoring, scoringWeights, score→recommendation mapping gone; funding/OI point values stripped to directional context only; Phase 1 systemContext simplified to free selection; Claude assigns score and conviction from own judgment
 - ✅ Regime score thresholds blocking all cron entries — removed `score < execThreshold` pre-filter; Claude decides freely; hard gate (SL/TP/setupType/score present) unchanged (`179cd00`)
 - ✅ `/compare` updated — new top section: Version B live (May 27 → now); historical May 24–27 below; 4-query parallel fetch, free (`be56090`)
 - ✅ Version B went live May 27 — first trade: TP1 hit +$0.85, reflection confirmed firing
@@ -543,3 +548,4 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 | `0b89f1e` | fix: /compare live section queries trade_log not paper_trades |
 | `3b6e5b6` | fix: remove CHOPPY/EXHAUSTION hard block from applyHardFilters(); keep VOLATILE |
 | `d260ce0` | fix: remove VOLATILE hard block from applyHardFilters(); no regime blocks in code |
+| `d1c16c9` | fix: remove regime/scoring instructions from Phase 2 prompt — Claude decides freely |

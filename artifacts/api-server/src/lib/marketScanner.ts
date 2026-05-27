@@ -658,7 +658,7 @@ export async function runScan(): Promise<ScanResult> {
 
     const rsCallResult = await llm.json<{ top10: string[] }>({
       taskType:      "market_scan_rs",
-      systemContext: 'Select the top 10 crypto symbols for detailed signal generation. Respond ONLY with valid JSON: {"top10":["SYM1","SYM2",...10 items]}. Mix long candidates (positive RS vs BTC) and short candidates (negative RS). Skip RSI >85 or <15.',
+      systemContext: 'You are helping select cryptocurrency trading opportunities, you are free to perform for both long and short positions. Review these symbols and select the top 10 most promising for detailed analysis. Goal: maximize trading returns. Respond ONLY with valid JSON: {"top10":["SYM1","SYM2",...10 items]}',
       prompt: [
         `Regime: ${regime.regime} | ADX=${regime.adx.toFixed(1)} DI+=${regime.diPlus.toFixed(1)} DI-=${regime.diMinus.toFixed(1)}`,
         `BTC 7d: ${btcChange7d >= 0 ? "+" : ""}${btcChange7d.toFixed(1)}% | Positions: ${bybitPosSummary}`,
