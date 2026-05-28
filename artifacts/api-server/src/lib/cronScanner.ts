@@ -2358,9 +2358,25 @@ export function setCronEnabled(enabled: boolean): void {
 export function resumeTrading(): void {
   tradingPaused = false;
   pausedReason  = "";
-  db.update(botStateTable).set({ tradingPaused: false, pausedReason: null, lastUpdated: new Date() })
-    .where(eq(botStateTable.id, 1)).catch(() => {});
-  console.log("[cronScanner] Trading resumed");
+  // Reset peak_equity to current balance so drawdown is measured from now, not historical peak
+  syncTotalCapitalToDB().then(balances => {
+    const currentBalance = (balances?.bybit ?? 0) > 0 ? balances!.bybit : undefined;
+    db.update(botStateTable).set({
+      tradingPaused: false,
+      pausedReason:  null,
+      lastUpdated:   new Date(),
+      ...(currentBalance != null ? { peakEquity: currentBalance } : {}),
+    }).where(eq(botStateTable.id, 1)).catch(() => {});
+    if (currentBalance != null) {
+      console.log(`[cronScanner] Trading resumed — peak_equity reset to $${currentBalance.toFixed(2)}`);
+    } else {
+      console.log("[cronScanner] Trading resumed");
+    }
+  }).catch(() => {
+    db.update(botStateTable).set({ tradingPaused: false, pausedReason: null, lastUpdated: new Date() })
+      .where(eq(botStateTable.id, 1)).catch(() => {});
+    console.log("[cronScanner] Trading resumed");
+  });
 }
 
 export async function triggerNow(): Promise<void> { return runCronScan("manual"); }
