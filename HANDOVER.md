@@ -1,5 +1,5 @@
 # AI Trading Bot — Project Handover
-**Last updated:** May 25, 2026  
+**Last updated:** May 28, 2026  
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist  
 **Server:** Vultr Singapore — root@139.180.215.150  
 **Deploy command:** `./deploy.sh` ← always use this, never manual ssh one-liners
@@ -12,7 +12,7 @@
 
 **Current stage:** End-of-May observation period. A/B test running between Mode 3 (live Bybit) and Version B (paper). Decision on which approach to adopt for June with more capital pending end-of-month results.
 
-**Exchange:** Bybit Live (real capital ~$36)  
+**Exchange:** Bybit Live (real capital ~$21.82 after May 27–28 BTC crash)  
 **Infrastructure:** PM2 on Vultr, Neon PostgreSQL (97.76/100 CU-hrs — near limit, resets June 1)  
 **Telegram bot:** Polling mode, full command suite
 
@@ -252,15 +252,7 @@ Track via `/compare` top section. Clean slate from regime-threshold removal.
 
 **Current open positions (Mode 3):**
 
-| Symbol | Dir | Entry | SL | Liq | Lev |
-|--------|-----|-------|----|-----|-----|
-| NEARUSDT | long | $2.3949 | $2.255 | $2.1772 | 10× |
-| HYPEUSDT | long | $62.869 | $58.30 | $56.964 | 10× |
-| ZECUSDT | long | $646.41 | $608.00 | $593.65 | 10× |
-| BCHUSDT | short | $352.50 | $369.50 | $383.90 | 10× |
-| INJUSDT | long | $5.157 | $4.970 | $4.689 | 10× |
-
-Note: TIAUSDT closed. HYPE and NEAR still have SL above liq but no structural anchor below liq.
+No open positions as of May 28. All remaining longs (ATOM/AVAX/TRX) were SL-hit overnight during BTC crash from ~$110k → $74k. Bot paused twice (daily loss limit May 27 23:43 UTC; peak drawdown -41.9% May 28 02:11 UTC). Bot resumed May 28, `peak_equity` reset to $21.82.
 
 **Version B status:** Live from May 27. Do NOT close manually or reset balance.
 
@@ -381,6 +373,30 @@ All long-output commands (`/memory`, `/positions`, `/paperhistory`) truncated at
 
 ---
 
+## 6. Fixes Deployed May 28, 2026
+
+### Recent exit context added to Phase 2 scan prompt (commit `b77010e`)
+
+Per-symbol: last 24h exits from `trade_log` joined with `trade_memory`. Shows exit method (sl_hit / tp1 / tp2 / review close / profit protection / closed profitable / closed at loss), hours ago, and price. Injected after liqLines in Phase 2 prompt so Claude can factor in recent re-entry risk. Fallback: `pnl > 0 → "closed profitable"`, `pnl ≤ 0 → "closed at loss"` when exit_method unavailable.
+
+---
+
+### Position limit: max 3 open positions (commit `46dbd03`)
+
+Added to `cronScanner.ts` before the new-entry loop. Fetches live Bybit position count (`bybitGetPositions()`) before opening any position. If `openCountNow >= 3`, skips all new entries for that scan. Inside the loop: breaks early if `openCountNow + openedThisScan >= 3`. `openedThisScan` counter increments on each successful `gateResult.action === "executed"`. Infrastructure-only — no strategy logic. Capital preservation at $21 balance.
+
+---
+
+### `resumeTrading()` resets `peak_equity` to current balance (commit `59969de`)
+
+**Root cause:** After peak drawdown halt fires, `/resume` cleared `trading_paused` but left `peak_equity` at the historical high. Next scan immediately re-evaluated drawdown vs the old peak → re-triggered the halt → infinite loop. May 28 08:00 UTC cron scan ran but produced no Phase 1/Phase 2 output for this reason.
+
+**Fix:** `resumeTrading()` now calls `syncTotalCapitalToDB()` to fetch live Bybit balance, then writes `peakEquity: currentBalance` alongside clearing `tradingPaused`. Drawdown is measured from the new post-resume baseline, not the pre-crash peak.
+
+**Immediate DB fix:** `peak_equity` manually set to `21.82` on May 28 09:51 UTC to unblock the 12:00 UTC scan.
+
+---
+
 ## 6. Fixes Deployed May 26, 2026
 
 ### INJUSDT TP2 miss investigation + three fixes (commit `5ba1ffc`)
@@ -419,6 +435,12 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 - Neon DB at 97.76/100 CU-hrs — resets June 1; subscribe if it hits limit before then (~$3-5)
 - Version B paper balance: ~$26-40 — do not reset
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
+
+### Resolved May 28
+- ✅ Recent exit context in Phase 2 scan prompt — last 24h per symbol: exit method, hours ago, price (`b77010e`)
+- ✅ Position limit max 3 open — live Bybit count checked before every new entry; breaks early if limit hit mid-scan (`46dbd03`)
+- ✅ `/resume` infinite halt loop — `resumeTrading()` now resets `peak_equity` to current live balance; drawdown measured from new baseline (`59969de`)
+- ✅ Bot resumed May 28 after BTC crash ($110k → $74k); `peak_equity` reset to $21.82; all positions were SL-hit
 
 ### Resolved May 27
 - ✅ Leverage per-trade applied on Bybit (`af178d5`) — `openPosition()` now sets leverage from Claude's signal before placing order; safety cap: 10× maximum (silently clamped); conditional: skips `set-leverage` API call if current position leverage already matches
