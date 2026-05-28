@@ -1538,7 +1538,21 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .slice(0, MAX_AUTO_TRADES);
 
+    // ── Position limit: max 3 open — capital preservation (live check) ────
+    const MAX_OPEN_POSITIONS = 3;
+    const liveForLimit = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+    const openCountNow = liveForLimit.length;
+    if (openCountNow >= MAX_OPEN_POSITIONS) {
+      console.log(`[cronScanner] Position limit: ${openCountNow}/${MAX_OPEN_POSITIONS} positions open — skipping new entries`);
+    }
+    let openedThisScan = 0;
+
     for (const opp of rankedSignals) {
+      // Position limit guard — recheck each iteration in case we opened one this scan
+      if (openCountNow + openedThisScan >= MAX_OPEN_POSITIONS) {
+        console.log(`[cronScanner] Position limit reached (${openCountNow + openedThisScan}/${MAX_OPEN_POSITIONS}) — no more entries this scan`);
+        break;
+      }
       if (await isCoinSuspended(opp.symbol)) continue;
       const sym = bybitSym(opp.symbol);
 
@@ -1595,6 +1609,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       });
 
       if (gateResult.action === "executed") {
+        openedThisScan++; // track toward position limit
         patchEntrySource(sym, "auto_scan").catch(e => console.warn(`[cronScanner] patchEntrySource ${sym}:`, e.message));
         patchPositionMeta(sym, { score: opp.score ?? 0 }).catch(() => {});
 
