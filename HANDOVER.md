@@ -397,6 +397,21 @@ Added to `cronScanner.ts` before the new-entry loop. Fetches live Bybit position
 
 ---
 
+### `/resume` resets daily P&L window via `resume_at` timestamp (commit `3a08669`)
+
+**Root cause:** After the BTC crash, the daily loss limit (-30%) fired on top of the peak drawdown halt. `/resume` cleared `trading_paused` but `getDailyPnl()` still counted all of today's losses (ATOM/AVAX/TRX SL hits = -$13.60, 62% of balance). Every subsequent scan re-triggered the daily loss halt immediately — same infinite loop pattern as the `peak_equity` issue.
+
+**Fix — 3 changes:**
+- `botState` schema: added `resume_at TIMESTAMPTZ` column
+- `resumeTrading()`: writes `resumeAt = NOW()` alongside `peakEquity` reset and `tradingPaused = false` — one atomic resume clears both limits
+- `getDailyPnl()`: window is now `MAX(today 00:00 UTC, resume_at)` — pre-resume losses are excluded from the daily loss check; only trades closed after the last `/resume` count
+
+**Result:** `/resume` is now a genuine clean slate for both risk checks. Future `/resume` calls always self-heal peak drawdown and daily loss simultaneously.
+
+**DB applied:** `resume_at` column added via `ALTER TABLE`; `resume_at = 2026-05-28 12:07 UTC`, `trading_paused = false` set directly — bot resumed clean at 12:07 UTC May 28.
+
+---
+
 ## 6. Fixes Deployed May 26, 2026
 
 ### INJUSDT TP2 miss investigation + three fixes (commit `5ba1ffc`)
@@ -439,8 +454,9 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 ### Resolved May 28
 - ✅ Recent exit context in Phase 2 scan prompt — last 24h per symbol: exit method, hours ago, price (`b77010e`)
 - ✅ Position limit max 3 open — live Bybit count checked before every new entry; breaks early if limit hit mid-scan (`46dbd03`)
-- ✅ `/resume` infinite halt loop — `resumeTrading()` now resets `peak_equity` to current live balance; drawdown measured from new baseline (`59969de`)
-- ✅ Bot resumed May 28 after BTC crash ($110k → $74k); `peak_equity` reset to $21.82; all positions were SL-hit
+- ✅ `/resume` peak drawdown loop — `resumeTrading()` resets `peak_equity` to current live balance; drawdown measured from new baseline (`59969de`)
+- ✅ `/resume` daily loss loop — `resume_at` timestamp added to `bot_state`; `getDailyPnl()` window = `MAX(today 00:00 UTC, resume_at)`; pre-resume losses excluded (`3a08669`)
+- ✅ Bot resumed May 28 12:07 UTC — clean slate; `peak_equity = $21.82`, `resume_at = 12:07 UTC`; all positions were SL-hit in BTC crash
 
 ### Resolved May 27
 - ✅ Leverage per-trade applied on Bybit (`af178d5`) — `openPosition()` now sets leverage from Claude's signal before placing order; safety cap: 10× maximum (silently clamped); conditional: skips `set-leverage` API call if current position leverage already matches
