@@ -291,6 +291,7 @@ ADAUSDT APTUSDT ARBUSDT ATOMUSDT AVAXUSDT BCHUSDT BNBUSDT BTCUSDT DOGEUSDT DOTUS
 - Performance summary
 - Active trading rules (3 rules, soft constraints)
 - For open positions: entry, P/L, SL, TP, funding, key level, liqPrice
+- **Recent exits (last 24h)** — per symbol: exit method (sl_hit/tp1/tp2/review close/profit protection/closed profitable/closed at loss), hours ago, price — added May 28
 
 ### Cost Summary
 | Item | Cost |

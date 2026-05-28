@@ -5,6 +5,7 @@ import { fetchAssetData, type AssetData }    from "../data/marketData";
 import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, getOrderbook, getFundingHistory, type BybitKline, type BybitPosition } from "../brokers/bybit";
 import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
 import { db, profileTable }                  from "@workspace/db";
+import { sql }                               from "drizzle-orm";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
 export type Conviction     = "low" | "medium" | "high" | "strong_buy" | "strong_sell";
@@ -444,8 +445,46 @@ async function runPhase2(
   const candle15mLines:  string[] = [];
   const orderbookLines:  string[] = [];
   const fundingHistLines:string[] = [];
+  const recentExitLines: string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
+
+  // ── Recent exits (last 24h) per selected symbol ───────────────────────────
+  try {
+    type RecentExitRow = { symbol: string; exit_at: string; exit_price: string; pnl: string; exit_method: string | null };
+    const recentExits = await db.execute<RecentExitRow>(sql`
+      SELECT DISTINCT ON (tl.symbol)
+        tl.symbol,
+        tl.exit_at,
+        tl.exit_price,
+        tl.pnl,
+        COALESCE(tm.exit_method, 'unknown') AS exit_method
+      FROM trade_log tl
+      LEFT JOIN trade_memory tm
+        ON tm.symbol = tl.symbol
+        AND tm.action = 'TRADE_CLOSE'
+        AND tm.created_at >= tl.exit_at
+        AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
+      WHERE tl.exit_at >= NOW() - INTERVAL '24 hours'
+        AND tl.symbol = ANY(${selectedSymbols})
+      ORDER BY tl.symbol, tl.exit_at DESC
+    `);
+    for (const row of recentExits.rows) {
+      const hoursAgo = Math.round((Date.now() - new Date(row.exit_at).getTime()) / 3_600_000);
+      const price    = parseFloat(row.exit_price ?? "0");
+      const pnl      = parseFloat(row.pnl ?? "0");
+      const method   = row.exit_method ?? "unknown";
+      let label: string;
+      if      (method === "sl_hit")               label = "sl_hit";
+      else if (method.startsWith("tp"))           label = method;
+      else if (method === "review")               label = "review close";
+      else if (method === "profit_protection")    label = "profit protection close";
+      else                                        label = pnl > 0 ? "closed profitable" : "closed at loss";
+      recentExitLines.push(`${row.symbol} Recent: ${label} ${hoursAgo}h ago at $${price}`);
+    }
+  } catch (e) {
+    console.warn("[scanner] Recent exits query failed:", (e as Error).message);
+  }
 
   await Promise.allSettled(selectedSymbols.map(async sym => {
     try {
@@ -582,7 +621,8 @@ async function runPhase2(
     fundingLines.length    ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n`                             : "",
     orderbookLines.length  ? `Order book depth (top 50 bids/asks):\n${orderbookLines.join("\n")}\n`                     : "",
     fundingHistLines.length? `Funding rate history (24 periods, oldest→newest):\n${fundingHistLines.join("\n")}\n`      : "",
-    liqLines.length    ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
+    liqLines.length        ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
+    recentExitLines.length ? `Recent exits (last 24h — context for re-entry decisions):\n${recentExitLines.join("\n")}\n` : "",
     rsContext ? `\n${rsContext}\n` : "",
     sweepContext   ? `\n${sweepContext}` : "",
     squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",
