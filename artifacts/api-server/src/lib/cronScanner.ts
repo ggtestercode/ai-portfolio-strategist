@@ -2358,22 +2358,24 @@ export function setCronEnabled(enabled: boolean): void {
 export function resumeTrading(): void {
   tradingPaused = false;
   pausedReason  = "";
-  // Reset peak_equity to current balance so drawdown is measured from now, not historical peak
+  // Reset peak_equity and resumeAt so both drawdown and daily P&L checks start fresh
+  const resumeTimestamp = new Date();
   syncTotalCapitalToDB().then(balances => {
     const currentBalance = (balances?.bybit ?? 0) > 0 ? balances!.bybit : undefined;
     db.update(botStateTable).set({
       tradingPaused: false,
       pausedReason:  null,
       lastUpdated:   new Date(),
+      resumeAt:      resumeTimestamp,
       ...(currentBalance != null ? { peakEquity: currentBalance } : {}),
     }).where(eq(botStateTable.id, 1)).catch(() => {});
     if (currentBalance != null) {
-      console.log(`[cronScanner] Trading resumed — peak_equity reset to $${currentBalance.toFixed(2)}`);
+      console.log(`[cronScanner] Trading resumed — peak_equity reset to $${currentBalance.toFixed(2)}, daily P&L window reset to ${resumeTimestamp.toISOString()}`);
     } else {
-      console.log("[cronScanner] Trading resumed");
+      console.log(`[cronScanner] Trading resumed — daily P&L window reset to ${resumeTimestamp.toISOString()}`);
     }
   }).catch(() => {
-    db.update(botStateTable).set({ tradingPaused: false, pausedReason: null, lastUpdated: new Date() })
+    db.update(botStateTable).set({ tradingPaused: false, pausedReason: null, lastUpdated: new Date(), resumeAt: resumeTimestamp })
       .where(eq(botStateTable.id, 1)).catch(() => {});
     console.log("[cronScanner] Trading resumed");
   });

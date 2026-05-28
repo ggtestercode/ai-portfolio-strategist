@@ -57,6 +57,7 @@ export const botStateTable = pgTable("bot_state", {
   paperTotalSlippage:   real("paper_total_slippage").notNull().default(0),
   watchList:            jsonb("watch_list").$type<WatchCoin[]>().default([]),
   watchListUpdatedAt:   timestamp("watch_list_updated_at", { withTimezone: true }),
+  resumeAt:             timestamp("resume_at", { withTimezone: true }),
 });
 
 export type BotState       = typeof botStateTable.$inferSelect;

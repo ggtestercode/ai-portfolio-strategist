@@ -1639,7 +1639,19 @@ export async function getOpenTrades(): Promise<typeof tradeLogTable.$inferSelect
 export async function getDailyPnl(): Promise<number> {
   // Use Bybit as source of truth — trade_log exitAt can be stamped at reconciliation time
   // rather than actual Bybit close time, causing false positives in the daily window.
-  const since = Date.now() - 24 * 60 * 60 * 1000;
+  // Window starts at MAX(today 00:00 UTC, last /resume timestamp) so manual resumes
+  // give a genuine fresh start without counting pre-resume losses.
+  const todayStart = new Date();
+  todayStart.setUTCHours(0, 0, 0, 0);
+
+  let since = todayStart.getTime();
+  try {
+    const [state] = await db.select({ resumeAt: botStateTable.resumeAt }).from(botStateTable).limit(1);
+    if (state?.resumeAt) {
+      since = Math.max(since, new Date(state.resumeAt).getTime());
+    }
+  } catch { /* non-fatal — fall back to today start */ }
+
   const closed = await bybitGetClosedPnl(50, since);
   return closed.reduce((sum, r) => sum + r.closedPnl, 0);
 }
