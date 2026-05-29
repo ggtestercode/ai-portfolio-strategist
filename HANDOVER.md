@@ -439,6 +439,29 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ---
 
+## 7. Fixes Deployed May 29, 2026
+
+### TP1 double-close — third attempt (commit `e5a25bf`)
+
+ATOM trade (entry May 28 $2.009, TP1=$2.10) triggered a double-close on May 29 ~00:05 UTC: `qty=7.4` and `qty=3.0` both closed at TP1. Investigation showed `5ba1ffc`'s "set flag before close" fix only addressed cron-tick vs cron-tick race (already prevented by `isScanning` guard anyway). Two paths remained:
+
+1. `checkPartialExits` called from both `checkPositionMonitor` (5-min timer) and `runCronScan` (4h cron) with no shared lock — both could read `tp1Executed=false` before either wrote `true` (TOCTOU).
+2. Exchange partial TP fires silently on Bybit with no code hook — `tp1Executed` never set by exchange-side fill, so software closes again on next poll.
+
+**Fix 1 — Shared mutex (`cronScanner.ts`):**
+- Added `partialExitRunning` boolean; `checkPartialExits` returns immediately if already running
+- Prevents posMonitor and cronScanner concurrent calls from both seeing `tp1Executed=false`
+
+**Fix 2 — Exchange TP1 silent detection (`cronScanner.ts`):**
+- Before software TP1 check: if `pos.size < origQty × 0.85` and `!pm.tp1Executed`, exchange partial already fired
+- Sets `tp1Executed=true` and updates local `pm` copy; software close skipped; TP2 gate still works this tick
+
+**Fix 3 — Verification delay (`bybit.ts`):**
+- Added 2000ms pause between `POST /v5/position/trading-stop` and verification `GET /v5/order/realtime`
+- Bybit indexes the new order after the POST returns; immediate query consistently returned empty despite order existing and later firing — false-negative caused "software polling is the only fallback" log
+
+---
+
 ## 9. Active Bugs & Open Issues
 
 ### Pending (not yet implemented)
