@@ -523,6 +523,16 @@ async function checkHoldTimers(
 
 // ── Layer 5: Partial exit monitoring (tier-based) ────────────────────────────
 async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> {
+  if (partialExitRunning) { console.log("[partialExit] Previous check still running — skipping tick"); return; }
+  partialExitRunning = true;
+  try {
+  await _checkPartialExits(livePositions);
+  } finally {
+    partialExitRunning = false;
+  }
+}
+
+async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void> {
   const state = await loadBotState().catch(() => null);
   if (!state) return;
   const meta = (state.positionMetadata ?? {}) as Record<string, PositionMeta>;
@@ -587,9 +597,19 @@ async function checkPartialExits(livePositions: BybitPosition[]): Promise<void> 
       continue;
     }
 
+    // Detect silent exchange-side TP1 fill: position already reduced ≥15% but flag not set.
+    // Exchange partial TP orders fire without triggering any code hook, so tp1Executed can stay
+    // false even after Bybit reduces the position. If we detect the reduction here, set the flag
+    // to prevent a duplicate software close on the same tick.
+    if (effectiveTp1 > 0 && !pm.tp1Executed && pos.size < origQty * 0.85) {
+      console.log(`[partialExit] ${pos.symbol} — exchange TP1 detected: size ${pos.size}/${origQty} (${(qtyRatio * 100).toFixed(0)}%) < 85% → marking tp1Executed, skipping software close`);
+      await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
+      pm.tp1Executed = true; // update local copy so TP2 gate below sees it this tick
+    }
+
     // TP1: price reached TP1 and explicit flag not yet set
-    // currentTier is NOT used here — tier inference can false-positive if any prior partial reduced size.
-    // pm.tp1Executed is the sole authoritative gate; it is set explicitly when TP1 fires.
+    // pm.tp1Executed is the sole authoritative gate; it is set explicitly when TP1 fires,
+    // or above when exchange-side reduction is detected.
     if (effectiveTp1 > 0 && !pm.tp1Executed) {
       const tp1Reached = pos.side === "Buy" ? currentPrice >= effectiveTp1 : currentPrice <= effectiveTp1;
       if (tp1Reached) {
@@ -1808,8 +1828,9 @@ const ADJUST_SL_NOTIFY_COOLDOWN_MS = 2 * 3_600_000; // at most once per 2h per p
 // Symbols that had open positions on the previous monitor tick (for close detection)
 const prevPositionSymbols = new Set<string>();
 const selfHealAttempted   = new Set<string>(); // prevent repeated ATR fallback per session
-let monitorRunning  = false;
-let monitorFirstRun = true; // seed prevPositionSymbols on first tick
+let monitorRunning      = false;
+let monitorFirstRun     = true; // seed prevPositionSymbols on first tick
+let partialExitRunning  = false;
 
 async function checkPositionMonitor(): Promise<void> {
   if (monitorRunning) { console.log("[posMonitor] Previous check still running — skipping tick"); return; }

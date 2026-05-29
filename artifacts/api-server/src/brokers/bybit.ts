@@ -322,6 +322,8 @@ export async function openPosition(
     // NOTE: livePos.takeProfit shows the Full-mode TP (TP2), not the TP1 partial order.
     if (tp1Set) {
       try {
+        // 2s propagation delay — Bybit indexes the new order after the POST returns
+        await new Promise(res => setTimeout(res, 2000));
         // Check TP/SL conditional orders for this symbol — TP1 partial appears here, not in position.takeProfit
         type TpslOrder = { triggerPrice: string; qty: string; reduceOnly: boolean };
         const tpslRes = await get<{ list: TpslOrder[] }>(
