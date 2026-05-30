@@ -453,6 +453,19 @@ Added `peakPnlPct` to `PositionMeta` (jsonb field, no migration). Updated on eve
 
 ---
 
+### Position review parse-fail alert + midnight summary (commit `043d6fb`)
+
+**Parse-fail alert:** `makePositionReview` now checks `res.parseSuccess` after `llm.json()`. If false, sends Telegram: `⚠️ Position review parse failed — defaulting to HOLD for all positions`. Previously silent.
+
+**Daily midnight SGT summary (00:00 SGT = 16:00 UTC):** Cron added to `startPositionMonitor`. No Claude API call — pure Bybit + DB. For each open position shows:
+- Symbol, direction, entry price, current price
+- P/L% with peak P/L% in brackets when drawdown from peak > 0.1%
+- SL, TP1, held duration
+
+Option A implemented (no last review decision). Option B (add `lastReviewDecision` to `PositionMeta`) deferred to post June 1.
+
+---
+
 ### /history duration fix (commit `970d968`)
 
 `durMs` was `lastCloseAt - firstCloseAt` (time between close events). For single-close trades this was always 0; for multi-partial trades it showed only the partial→final window. Fixed to `lastCloseAt - firstOpenedAt` using `openedAt` (Bybit `createdTime` = actual position entry timestamp), already present on every `BybitClosedPnl` record.
