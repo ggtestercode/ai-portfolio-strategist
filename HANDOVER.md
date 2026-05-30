@@ -439,7 +439,13 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ---
 
-## 7. Fixes Deployed May 29, 2026
+## 7. Fixes Deployed May 29–30, 2026
+
+### /history duration fix (commit `970d968`)
+
+`durMs` was `lastCloseAt - firstCloseAt` (time between close events). For single-close trades this was always 0; for multi-partial trades it showed only the partial→final window. Fixed to `lastCloseAt - firstOpenedAt` using `openedAt` (Bybit `createdTime` = actual position entry timestamp), already present on every `BybitClosedPnl` record.
+
+---
 
 ### TP1 double-close — third attempt (commit `e5a25bf`)
 
