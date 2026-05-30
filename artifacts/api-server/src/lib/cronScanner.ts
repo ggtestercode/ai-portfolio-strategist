@@ -1899,6 +1899,12 @@ async function checkPositionMonitor(): Promise<void> {
     const pnlPct = pos.pnlPct ?? 0;
     const state  = monitorState[pos.symbol] ?? { lastReviewAt: 0, lastFundingRate: 0, lastOI: 0, lastRSI1h: 0 };
 
+    // Track peak unrealized P/L — write only when a new high is reached
+    const existingPeak = (posMeta[pos.symbol]?.peakPnlPct ?? -Infinity);
+    if (pnlPct > existingPeak) {
+      await patchPositionMeta(pos.symbol, { peakPnlPct: pnlPct }).catch(() => {});
+    }
+
     // ── Self-healing metadata check (runs every tick until fixed) ─────────────
     const selfMeta = posMeta[pos.symbol];
     const selfRequired: (keyof PositionMeta)[] = ["tp1", "sl", "originalQty"];
@@ -2131,7 +2137,7 @@ async function runPositionReview(
 
   const prompt = [
     `Position: ${pos.symbol} ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Current: $${currentPrice.toFixed(4)}`,
-    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Held: ${positionAgeHours < 999 ? positionAgeHours.toFixed(1) + "h" : heldH + "h"} | Regime: ${regime ?? "unknown"}`,
+    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%${(() => { const pk = meta?.peakPnlPct; return pk != null && pk - pnlPct > 0.1 ? ` (peak: ${pk >= 0 ? "+" : ""}${pk.toFixed(2)}%)` : ""; })()} | Held: ${positionAgeHours < 999 ? positionAgeHours.toFixed(1) + "h" : heldH + "h"} | Regime: ${regime ?? "unknown"}`,
     `RSI(14): ${rsi.toFixed(1)} | EMA20: $${ema20.toFixed(4)} | EMA50: $${ema50.toFixed(4)}`,
     `Funding: ${fundingStr}`,
     oi != null ? `OI: ${oi}` : null,

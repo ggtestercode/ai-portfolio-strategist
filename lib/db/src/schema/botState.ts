@@ -27,6 +27,7 @@ export interface PositionMeta {
   lastTrailPrice?:  number;  // price at which trail was last updated
   tp1Executed?:     boolean; // TP1 partial has been executed
   tp2Executed?:     boolean; // TP2 partial has been executed
+  peakPnlPct?:      number;  // highest unrealized P/L% seen since entry
 }
 
 export interface PositionMonitorState {
