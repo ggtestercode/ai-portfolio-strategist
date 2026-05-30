@@ -43,7 +43,7 @@
 - TP2: close 30% of original qty, set `tp2Executed=true`
 - Large profit: ≥+15% close 50%; ≥+20% full close
 - Hard stop: ≤-40% immediate
-- Trailing SL: activates at +3% P/L, distance 1.0× 4h ATR, ratchets protectively
+- Trailing SL: Claude-driven — optional `NEW_SL [$price]` on 3rd line of any HOLD/PARTIAL_CLOSE review; ratchet-only validation; replaces hardcoded 1.0×ATR trail (`ae059fc`)
 - Daily loss limit: -30%
 - Max stop loss: -40% from entry
 
@@ -468,12 +468,29 @@ ATOM trade (entry May 28 $2.009, TP1=$2.10) triggered a double-close on May 29 ~
 
 ---
 
+### Claude-driven ratchet SL — replaces hardcoded ATR trail (commit `ae059fc`)
+
+Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. Claude now controls SL updates directly via an optional `NEW_SL [$price]` line in any posMonitor review decision.
+
+**How it works:**
+- Claude may append `NEW_SL [$price]` as a 3rd line after any HOLD or PARTIAL_CLOSE decision
+- Prompt instructs: only when in profit, ratchet only (longs: higher than current SL; shorts: lower than current SL)
+- Code validates ratchet: longs require `newSl > currentSL`, shorts require `newSl < currentSL` (or currentSL unset)
+- Valid → `bybitSetStopLoss` + `patchPositionMeta({ sl: newSl })`
+- Invalid → warn log, no action
+- CLOSE and ADJUST_SL decisions skip the `NEW_SL` block (CLOSE: position gone; ADJUST_SL: handles its own SL)
+- `reason` parsing strips the `NEW_SL` line so it doesn't pollute Telegram reasoning text
+
+**Rationale:** ATR-based trailing was blind to structure (support/resistance, key levels). Claude can place SL at meaningful levels rather than a fixed ATR multiple behind price.
+
+---
+
 ## 9. Active Bugs & Open Issues
 
 ### Pending (not yet implemented)
 - **Hard gate for SL/TP** — code enforcement (not just a rule) to reject any signal without SL, TP, and setupType. Agreed but not deployed. Rule 1 covers this as a soft constraint only.
 - **Scan to 30min** — currently 4h for testing stability; restore when balance >$50 and stable
-- **Trailing SL distance** — hardcoded at 1.0×ATR in `cronScanner.ts`; consistent with "Claude decides freely" philosophy, consider letting Claude specify trailing distance per trade in signal output
+- **Trailing SL** — ✅ Claude-driven ratchet SL deployed (`ae059fc`); no longer hardcoded
 
 ### Known Constraints
 - Neon DB at 97.76/100 CU-hrs — resets June 1; subscribe if it hits limit before then (~$3-5)
