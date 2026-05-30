@@ -441,6 +441,18 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ## 7. Fixes Deployed May 29–30, 2026
 
+### Claude-driven ratchet SL — replaces hardcoded ATR trail (commit `ae059fc`)
+
+Removed 1.0×ATR trailing SL block from `checkPositionMonitor`. Claude outputs optional `NEW_SL [$price]` as 3rd line of any HOLD or PARTIAL_CLOSE decision. Ratchet-only validation (longs: newSl > currentSL; shorts: newSl < currentSL). Valid → `bybitSetStopLoss` + `patchPositionMeta`. CLOSE and ADJUST_SL skip the block.
+
+---
+
+### Peak unrealized P/L tracking (commit `7ef9295`)
+
+Added `peakPnlPct` to `PositionMeta` (jsonb field, no migration). Updated on every posMonitor tick when `pnlPct` exceeds stored peak — one DB write per new high only. Claude review prompt now shows `P/L: +3.20% (peak: +6.80%)` when drawdown from peak exceeds 0.1%; omitted when position hasn't pulled back.
+
+---
+
 ### /history duration fix (commit `970d968`)
 
 `durMs` was `lastCloseAt - firstCloseAt` (time between close events). For single-close trades this was always 0; for multi-partial trades it showed only the partial→final window. Fixed to `lastCloseAt - firstOpenedAt` using `openedAt` (Bybit `createdTime` = actual position entry timestamp), already present on every `BybitClosedPnl` record.
