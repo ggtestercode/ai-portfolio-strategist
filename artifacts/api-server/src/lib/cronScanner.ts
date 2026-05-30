@@ -920,6 +920,10 @@ async function makePositionReview(
     fallback: { positions: [] },
   });
 
+  if (!res.parseSuccess) {
+    await alertFn?.("⚠️ Position review parse failed — defaulting to HOLD for all positions").catch(() => {});
+  }
+
   return res.data;
 }
 
@@ -2331,8 +2335,47 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
       console.error("[dbHealth] Daily check FAILED:", e);
     }
   });
+
+  // Midnight SGT (= 16:00 UTC) daily position summary — no Claude call
+  cron.schedule("0 16 * * *", async () => {
+    try {
+      const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+      if (!positions.length) {
+        await alertFn?.("🌙 Daily summary — no open positions").catch(() => {});
+        return;
+      }
+      const state   = await loadBotState().catch(() => null);
+      const posMeta = (state?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+      const fmtHeld = (openedAt: number | undefined) => {
+        if (!openedAt) return "?";
+        const ms = Date.now() - openedAt;
+        const h  = Math.floor(ms / 3_600_000);
+        return h < 48 ? `${h}h` : `${Math.floor(h / 24)}d`;
+      };
+      const lines = positions.map(pos => {
+        const meta    = posMeta[pos.symbol];
+        const pnlPct  = pos.pnlPct ?? 0;
+        const peak    = meta?.peakPnlPct;
+        const peakStr = peak != null && peak - pnlPct > 0.1 ? ` (peak: ${peak >= 0 ? "+" : ""}${peak.toFixed(2)}%)` : "";
+        const sl      = meta?.sl ?? pos.stopLoss;
+        const tp1     = meta?.tp1 ?? pos.takeProfit;
+        const dir     = pos.side === "Buy" ? "LONG" : "SHORT";
+        const held    = fmtHeld(meta?.openedAt);
+        return [
+          `<b>${pos.symbol}</b> ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Now: $${(pos.markPrice ?? pos.entryPrice).toFixed(4)}`,
+          `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%${peakStr} | SL: ${sl ? "$" + (typeof sl === "number" ? sl.toFixed(4) : sl) : "—"} | TP1: ${tp1 ? "$" + (typeof tp1 === "number" ? tp1.toFixed(4) : tp1) : "—"} | Held: ${held}`,
+        ].join("\n");
+      });
+      await alertFn?.([`🌙 <b>Daily summary — 00:00 SGT</b>`, "", ...lines].join("\n\n")).catch(() => {});
+      console.log(`[dailySummary] Sent — ${positions.length} open positions`);
+    } catch (e) {
+      console.error("[dailySummary] Failed:", e);
+    }
+  });
+
   console.log("[posMonitor] Started — checks every 5 min");
   console.log("[dbHealth] Daily 9am SGT Neon health check scheduled");
+  console.log("[dailySummary] Daily midnight SGT position summary scheduled");
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
