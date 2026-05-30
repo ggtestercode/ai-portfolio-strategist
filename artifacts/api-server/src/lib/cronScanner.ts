@@ -1,6 +1,6 @@
 import cron, { type ScheduledTask }   from "node-cron";
 import { runScan, runFocusedScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
-import { runPaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
+import { runPaperScan, runMode3PaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
 import { applyAtrSlTp }               from "./startup";
@@ -1806,13 +1806,16 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
 
     console.log(`[cronScanner] Complete — ${result.opportunities.length} signals, ${filteredSignals.length} passed filters, ${rankedSignals.length} actioned`);
 
-    // Run Version B paper scan in parallel — never blocks live trading
+    // Version B paper — only when enabled
     if (process.env["PAPER_TRADING_ENABLED"] !== "false") {
       runPaperScan().catch(err => console.error("[paperScanner] Error:", err));
-      updatePaperTradesPnl().catch(err => console.error("[paperScanner] P&L update:", err));
     } else {
-      console.log("[paperScanner] Disabled via PAPER_TRADING_ENABLED=false");
+      console.log("[paperScanner] Version B disabled via PAPER_TRADING_ENABLED=false");
     }
+
+    // Mode 3 paper — always runs, piggybacking on live scan signals at zero extra API cost
+    runMode3PaperScan(filteredSignals, regime?.regime ?? "CHOPPY")
+      .catch(err => console.error("[mode3Paper] Error:", err));
   } catch (err) {
     console.error("[cronScanner] Scan failed:", err);
   } finally {

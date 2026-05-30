@@ -56,6 +56,7 @@ export const botStateTable = pgTable("bot_state", {
   paperTotalFees:       real("paper_total_fees").notNull().default(0),
   paperTotalFunding:    real("paper_total_funding").notNull().default(0),
   paperTotalSlippage:   real("paper_total_slippage").notNull().default(0),
+  mode3PaperBalance:    real("mode3_paper_balance").notNull().default(40.0),
   watchList:            jsonb("watch_list").$type<WatchCoin[]>().default([]),
   watchListUpdatedAt:   timestamp("watch_list_updated_at", { withTimezone: true }),
   resumeAt:             timestamp("resume_at", { withTimezone: true }),

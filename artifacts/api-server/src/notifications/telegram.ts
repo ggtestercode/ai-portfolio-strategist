@@ -252,7 +252,7 @@ export function startPolling(): void {
     { command: "memory",          description: "Last 5 trade reflections (AI journal)" },
     { command: "rules",           description: "Active trading rules (auto-generated)" },
     { command: "forcerules",      description: "Force rule regeneration now" },
-    { command: "compare",         description: "Version B live (May 27→now) + historical Mode 3 vs B (May 24-27)" },
+    { command: "compare",         description: "Mode 3 paper vs live bot (since May 30)" },
     { command: "costs",           description: "Claude API spend — today, MTD, top callers, projection" },
     { command: "paperhistory",    description: "Version B paper trade signals (A/B test)" },
     { command: "pending",    description: "Pending trade approvals" },
@@ -1615,43 +1615,37 @@ export function startPolling(): void {
     }
   });
 
-  // ── /compare — Mode 3 vs Version B stats since May 24 ───────────────────
+  // ── /compare — Mode 3 paper vs live bot (since May 30) ──────────────────
   b.onText(/^\/compare(?:@\w+)?$/, async (msg) => {
-    const chatId = String(msg.chat.id);
+    const chatId  = String(msg.chat.id);
     try {
-      const sinceMay24 = new Date("2026-05-24T00:00:00Z");
-      const sinceMay27 = new Date("2026-05-27T00:00:00Z");
+      const baseline = new Date("2026-05-30T00:00:00Z");
 
-      const [mode3Raw, vBRaw, mode3MemResult, vBLiveRaw] = await Promise.all([
-        // Historical: Mode 3 trades since May 24
-        db.select({ pnl: tradeLogTable.pnl, pnlPct: tradeLogTable.pnlPct })
-          .from(tradeLogTable)
-          .where(and(isNotNull(tradeLogTable.exitAt), gte(tradeLogTable.entryAt, sinceMay24)))
-          .catch(() => [] as Array<{ pnl: string | null; pnlPct: string | null }>),
-        // Historical: Version B trades since May 24
-        db.select({ wouldHavePnl: paperTradesTable.wouldHavePnl, exitReason: paperTradesTable.exitReason })
+      const [m3Closed, m3Open, botStateRow, liveRaw] = await Promise.all([
+        // Mode 3 paper — closed trades since baseline
+        db.select({
+          wouldHavePnl: paperTradesTable.wouldHavePnl,
+          exitReason:   paperTradesTable.exitReason,
+          marginUsed:   paperTradesTable.marginUsed,
+        }).from(paperTradesTable)
+          .where(and(
+            eq(paperTradesTable.version, "mode3"),
+            ne(paperTradesTable.status,  "open"),
+            gte(paperTradesTable.signalTime, baseline),
+          )).catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null; marginUsed: number | null }>),
+
+        // Mode 3 paper — open count
+        db.select({ id: paperTradesTable.id })
           .from(paperTradesTable)
-          .where(and(ne(paperTradesTable.status, "open"), gte(paperTradesTable.signalTime, sinceMay24)))
-          .catch(() => [] as Array<{ wouldHavePnl: number | null; exitReason: string | null }>),
-        // Historical: Mode 3 exit methods from reflection (one row per trade, prefer sl_hit)
-        db.execute<{ exit_method: string | null; tp1_reached: boolean | null }>(sql`
-          SELECT DISTINCT ON (tl.id)
-            COALESCE(tm.exit_method, 'unknown') AS exit_method,
-            tm.tp1_reached
-          FROM trade_log tl
-          LEFT JOIN trade_memory tm
-            ON tm.symbol = tl.symbol
-            AND tm.action = 'TRADE_CLOSE'
-            AND tm.created_at >= tl.exit_at
-            AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
-          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${sinceMay24}
-          ORDER BY tl.id,
-            CASE WHEN tm.exit_method = 'sl_hit'   THEN 1
-                 WHEN tm.exit_method LIKE 'tp%'   THEN 2
-                 WHEN tm.exit_method = 'review'   THEN 3
-                 ELSE 4 END
-        `).catch(() => ({ rows: [] as Array<{ exit_method: string | null; tp1_reached: boolean | null }> })),
-        // Live baseline: real trades since May 27 (trade_log, same join as Mode 3)
+          .where(and(eq(paperTradesTable.version, "mode3"), eq(paperTradesTable.status, "open")))
+          .catch(() => [] as Array<{ id: number }>),
+
+        // Mode 3 balance from bot_state
+        db.select({ mode3PaperBalance: botStateTable.mode3PaperBalance })
+          .from(botStateTable).limit(1)
+          .catch(() => [] as Array<{ mode3PaperBalance: number | null }>),
+
+        // Live bot — closed trades since baseline (with exit method from trade_memory)
         db.execute<{ pnl: string | null; exit_method: string | null; tp1_reached: boolean | null }>(sql`
           SELECT DISTINCT ON (tl.id)
             tl.pnl,
@@ -1663,11 +1657,11 @@ export function startPolling(): void {
             AND tm.action = 'TRADE_CLOSE'
             AND tm.created_at >= tl.exit_at
             AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
-          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${sinceMay27}
+          WHERE tl.exit_at IS NOT NULL AND tl.entry_at >= ${baseline}
           ORDER BY tl.id,
-            CASE WHEN tm.exit_method = 'sl_hit'   THEN 1
-                 WHEN tm.exit_method LIKE 'tp%'   THEN 2
-                 WHEN tm.exit_method = 'review'   THEN 3
+            CASE WHEN tm.exit_method = 'sl_hit' THEN 1
+                 WHEN tm.exit_method LIKE 'tp%'  THEN 2
+                 WHEN tm.exit_method = 'review'  THEN 3
                  ELSE 4 END
         `).catch(() => ({ rows: [] as Array<{ pnl: string | null; exit_method: string | null; tp1_reached: boolean | null }> })),
       ]);
@@ -1683,68 +1677,58 @@ export function startPolling(): void {
           avgLoss: losses.length > 0 ? losses.reduce((s, v) => s + v, 0) / losses.length : null,
         };
       };
-
       const fmt    = (n: number) => `${n >= 0 ? "+" : "-"}$${Math.abs(n).toFixed(2)}`;
       const fmtAvg = (n: number | null, sign: "+" | "-") => n !== null ? `${sign}$${Math.abs(n).toFixed(2)}` : "n/a";
 
-      // ── Live Version B section (May 27 baseline) ──────────────────────────
-      const vBLiveRows  = vBLiveRaw.rows;
-      const vBLive      = vBLiveRows.map(r => parseFloat(r.pnl ?? "0"));
-      const sLive       = stats(vBLive);
-      const liveTp1     = vBLiveRows.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
-      const liveSl      = vBLiveRows.filter(r => r.exit_method === "sl_hit").length;
-      const liveReview  = vBLiveRows.filter(r => r.exit_method === "review").length;
+      // ── Mode 3 paper section ──────────────────────────────────────────────
+      const m3PnlVals  = m3Closed.map(r => r.wouldHavePnl ?? 0);
+      const sm3        = stats(m3PnlVals);
+      const m3Tp       = m3Closed.filter(r => r.exitReason === "tp1_hit" || r.exitReason === "tp2_hit").length;
+      const m3Sl       = m3Closed.filter(r => r.exitReason === "sl_hit").length;
+      const m3Bal      = botStateRow[0]?.mode3PaperBalance ?? 40.0;
+      const m3OpenCnt  = m3Open.length;
 
-      const liveSection = sLive.total === 0
-        ? [`📊 <b>Version B Live Performance (May 27 → now)</b>`, `No closed trades yet`]
-        : [
-            `📊 <b>Version B Live Performance (May 27 → now)</b>`,
-            `Trades: ${sLive.total} | Win rate: ${sLive.winRate}%`,
-            `Net P&L: ${fmt(sLive.netPnl)}`,
-            `Avg winner: ${fmtAvg(sLive.avgWin, "+")} | Avg loser: ${fmtAvg(sLive.avgLoss, "-")}`,
-            `TP1: ${liveTp1} | SL: ${liveSl} | Review: ${liveReview}`,
-          ];
-
-      // ── Historical comparison section (May 24-27) ─────────────────────────
-      const m3   = mode3Raw.map(r => parseFloat(r.pnl ?? "0"));
-      const vB   = vBRaw.map(r => r.wouldHavePnl ?? 0);
-      const s3   = stats(m3);
-      const sB   = stats(vB);
-
-      const m3Mem    = mode3MemResult.rows;
-      const m3Sl     = m3Mem.filter(r => r.exit_method === "sl_hit").length;
-      const m3Tp1    = m3Mem.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
-      const m3Review = m3Mem.filter(r => r.exit_method === "review").length;
-      const vBTp1    = vBRaw.filter(r => r.exitReason === "tp1_hit" || r.exitReason === "tp2_hit").length;
-      const vBSl     = vBRaw.filter(r => r.exitReason === "sl_hit").length;
-      const vBReview = vBRaw.filter(r => r.exitReason === "claude_close").length;
-      const vBTimer  = vBRaw.filter(r => r.exitReason === "48h_timer").length;
-
-      const tooEarly = s3.total < 5 || sB.total < 5;
-      const verdict  = tooEarly
-        ? "Too early to compare (need 5+ trades each side)"
-        : s3.netPnl > sB.netPnl ? "Mode 3 ahead" : sB.netPnl > s3.netPnl ? "Version B ahead" : "Even";
-
-      const historicalSection = [
-        `📊 <b>Historical comparison (May 24–27)</b>`,
-        ``,
-        `🔴 <b>Mode 3 (Live)</b>`,
-        `Trades: ${s3.total} | Win rate: ${s3.winRate}%`,
-        `Net P&L: ${fmt(s3.netPnl)}`,
-        `Avg winner: ${fmtAvg(s3.avgWin, "+")} | Avg loser: ${fmtAvg(s3.avgLoss, "-")}`,
-        `TP1: ${m3Tp1} | SL: ${m3Sl} | Review: ${m3Review} (of ${s3.total})`,
-        ``,
-        `📄 <b>Version B (Paper)</b>`,
-        `Trades: ${sB.total} | Win rate: ${sB.winRate}%`,
-        `Net P&L: ${fmt(sB.netPnl)} (after fees/slippage)`,
-        `Avg winner: ${fmtAvg(sB.avgWin, "+")} | Avg loser: ${fmtAvg(sB.avgLoss, "-")}`,
-        `TP1: ${vBTp1} | SL: ${vBSl} | Review: ${vBReview} | Timer: ${vBTimer} (of ${sB.total})`,
-        ``,
-        `Verdict: <b>${verdict}</b>`,
+      const m3Section = [
+        `📄 <b>Mode 3 Paper (since May 30)</b>`,
+        `Balance: $${m3Bal.toFixed(2)} (started $40.00)`,
+        `Open: ${m3OpenCnt} | Closed: ${sm3.total}`,
+        ...(sm3.total === 0
+          ? [`No closed trades yet`]
+          : [
+              `Win rate: ${sm3.winRate}% (${m3Closed.filter(r => (r.wouldHavePnl ?? 0) > 0).length}/${sm3.total})`,
+              `Net P&L: ${fmt(sm3.netPnl)} (fees+slip incl.)`,
+              `Avg winner: ${fmtAvg(sm3.avgWin, "+")} | Avg loser: ${fmtAvg(sm3.avgLoss, "-")}`,
+              `TP: ${m3Tp} | SL: ${m3Sl}`,
+            ]),
       ];
 
-      const out = [...liveSection, ``, ...historicalSection].join("\n");
+      // ── Live bot section ──────────────────────────────────────────────────
+      const liveRows  = liveRaw.rows;
+      const livePnls  = liveRows.map(r => parseFloat(r.pnl ?? "0"));
+      const sLive     = stats(livePnls);
+      const liveTp1   = liveRows.filter(r => r.tp1_reached && r.exit_method !== "sl_hit").length;
+      const liveSl    = liveRows.filter(r => r.exit_method === "sl_hit").length;
+      const liveRev   = liveRows.filter(r => r.exit_method === "review").length;
 
+      const liveSection = [
+        `📈 <b>Live Bot (since May 30)</b>`,
+        ...(sLive.total === 0
+          ? [`No closed trades yet`]
+          : [
+              `Trades: ${sLive.total} | Win rate: ${sLive.winRate}%`,
+              `Net P&L: ${fmt(sLive.netPnl)}`,
+              `Avg winner: ${fmtAvg(sLive.avgWin, "+")} | Avg loser: ${fmtAvg(sLive.avgLoss, "-")}`,
+              `TP1: ${liveTp1} | SL: ${liveSl} | Review: ${liveRev}`,
+            ]),
+      ];
+
+      // ── Verdict ───────────────────────────────────────────────────────────
+      const tooEarly = sm3.total < 5 || sLive.total < 5;
+      const verdict  = tooEarly
+        ? `Too early — need 5+ closed trades each side (m3:${sm3.total} live:${sLive.total})`
+        : sm3.netPnl > sLive.netPnl ? "Mode 3 paper ahead" : sLive.netPnl > sm3.netPnl ? "Live bot ahead" : "Even";
+
+      const out = [...m3Section, ``, ...liveSection, ``, `Verdict: <b>${verdict}</b>`].join("\n");
       await b.sendMessage(chatId, out, { parse_mode: "HTML" });
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);

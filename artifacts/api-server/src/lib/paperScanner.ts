@@ -5,7 +5,7 @@
  * Claude decides freely. Results are logged to paper_trades — never executed.
  */
 
-import { detectMarketRegime, type ScanOpportunity, type ScanResult } from "./marketScanner";
+import { detectMarketRegime, getRegimeThreshold, type ScanOpportunity, type ScanResult } from "./marketScanner";
 import { getWatchlist }          from "./watchlist";
 import { fetchAssetData }        from "../data/marketData";
 import {
@@ -54,6 +54,12 @@ async function addPaperCosts(fees: number, funding: number, slippage: number): P
     lastUpdated: new Date(),
   }).where(eq(botStateTable.id, 1))
     .catch(e => console.warn("[paperScanner] cost tracking failed:", e.message));
+}
+
+async function getMode3PaperBalance(): Promise<number> {
+  const [row] = await db.select({ mode3PaperBalance: botStateTable.mode3PaperBalance })
+    .from(botStateTable).limit(1);
+  return row?.mode3PaperBalance ?? 40.0;
 }
 
 let lastPaperFundingAt    = 0;  // epoch ms — reset on process restart
@@ -563,6 +569,109 @@ export async function runPaperScan(): Promise<void> {
   }
 }
 
+// ── Mode 3 paper simulation (piggybacked on live scan signals, zero extra API cost) ──
+
+export async function runMode3PaperScan(
+  filteredSignals: ScanOpportunity[],
+  regimeType:      string,
+): Promise<void> {
+  try {
+    // Gate 1: hard regime block (CHOPPY / EXHAUSTION / VOLATILE never enter in Mode 3)
+    if (["CHOPPY", "EXHAUSTION", "VOLATILE"].includes(regimeType)) {
+      console.log(`[mode3Paper] Regime ${regimeType} hard-blocked — no entries`);
+      return;
+    }
+
+    // Gate 2: regime score threshold
+    const threshold  = getRegimeThreshold(regimeType);
+    const qualifying = filteredSignals.filter(o =>
+      o.direction && o.direction !== "neutral" &&
+      o.stopLoss && o.tp1 && o.setupType && o.score != null &&
+      o.score >= threshold
+    );
+
+    console.log(`[mode3Paper] Regime=${regimeType} threshold=${threshold} — ${qualifying.length}/${filteredSignals.length} signals qualify`);
+    if (!qualifying.length) return;
+
+    const balance = await getMode3PaperBalance();
+    if (balance < 5) {
+      console.log(`[mode3Paper] Balance $${balance.toFixed(2)} below $5 — stopped`);
+      return;
+    }
+
+    let runningBalance = balance;
+    let totalFees      = 0;
+    let totalSlippage  = 0;
+    let logged         = 0;
+
+    for (const opp of qualifying) {
+      if (runningBalance < 5) break;
+
+      // Dedup — skip if same symbol+direction already open as mode3 paper
+      const existing = await db.select({ id: paperTradesTable.id })
+        .from(paperTradesTable)
+        .where(and(
+          eq(paperTradesTable.symbol,    opp.symbol),
+          eq(paperTradesTable.direction, opp.direction!),
+          eq(paperTradesTable.status,    "open"),
+          eq(paperTradesTable.version,   "mode3"),
+        )).limit(1).catch(() => [] as Array<{ id: number }>);
+      if (existing.length > 0) {
+        console.log(`[mode3Paper] Dedup — ${opp.symbol} ${opp.direction} already open`);
+        continue;
+      }
+
+      const tradeMargin  = Math.max(5, Math.min(opp.positionSizeUsd ?? runningBalance * 0.05, runningBalance * 0.50));
+      const slippagePct  = 0.0005 + Math.random() * 0.001;
+      const rawEntry     = opp.entry ?? opp.price;
+      const actualEntry  = opp.direction === "long"
+        ? rawEntry * (1 + slippagePct)
+        : rawEntry * (1 - slippagePct);
+      const leverage     = opp.leverage ?? 10;
+      const notional     = tradeMargin * leverage;
+      const openFee      = notional * 0.00055;
+      const slipCost     = notional * slippagePct;
+
+      runningBalance -= tradeMargin;
+      totalFees      += openFee;
+      totalSlippage  += slipCost;
+
+      await db.insert(paperTradesTable).values({
+        symbol:     opp.symbol,
+        direction:  opp.direction!,
+        entryPrice: actualEntry,
+        stopLoss:   opp.stopLoss        ?? null,
+        tp1:        opp.tp1             ?? null,
+        tp2:        opp.tp2             ?? null,
+        rr:         opp.riskRewardRatio ?? null,
+        regime:     regimeType,
+        score:      opp.score           ?? null,
+        whyNow:     opp.whyNow          ?? null,
+        setupType:  opp.setupType       ?? null,
+        signalTime: new Date(),
+        status:     "open",
+        version:    "mode3",
+        marginUsed: tradeMargin,
+      }).catch(e => console.warn(`[mode3Paper] DB insert ${opp.symbol}:`, e.message));
+
+      console.log(`[mode3Paper] Enter ${opp.symbol} ${opp.direction} at $${actualEntry.toFixed(4)} (slip=${(slippagePct*100).toFixed(3)}%) margin=$${tradeMargin.toFixed(2)} score=${opp.score} ≥ ${threshold}`);
+      logged++;
+    }
+
+    const spent       = balance - runningBalance;
+    const finalBal    = Math.max(0, balance - spent - totalFees);
+    await db.update(botStateTable).set({
+      mode3PaperBalance: finalBal,
+      lastUpdated:       new Date(),
+    }).where(eq(botStateTable.id, 1))
+      .catch(e => console.warn("[mode3Paper] balance update:", e.message));
+
+    console.log(`[mode3Paper] Complete — ${logged} entries, balance=$${finalBal.toFixed(2)}`);
+  } catch (err) {
+    console.error("[mode3Paper] Scan failed:", err);
+  }
+}
+
 // ── Paper trade P/L updater (called from position monitor) ───────────────────
 
 export async function updatePaperTradesPnl(): Promise<void> {
@@ -585,7 +694,8 @@ export async function updatePaperTradesPnl(): Promise<void> {
     }));
 
     // ── 8h funding simulation ─────────────────────────────────────────────────
-    let totalFundingCost = 0;
+    let vBFundingCost = 0;
+    let m3FundingCost = 0;
     if (Date.now() - lastPaperFundingAt >= 8 * 3600_000) {
       lastPaperFundingAt = Date.now();
       for (const trade of open) {
@@ -596,17 +706,21 @@ export async function updatePaperTradesPnl(): Promise<void> {
           const fr = await getFundingRate(sym).catch(() => null);
           if (!fr) continue;
           const fundingCost = (trade.marginUsed ?? 5) * 10 * Math.abs(fr.rate);
-          totalFundingCost += fundingCost;
-          console.log(`[paperFunding] ${trade.symbol} rate=${(fr.rate * 100).toFixed(4)}% cost=$${fundingCost.toFixed(4)}`);
+          if (trade.version === "mode3") m3FundingCost += fundingCost;
+          else                           vBFundingCost  += fundingCost;
+          console.log(`[paperFunding] ${trade.symbol} (${trade.version ?? "B"}) rate=${(fr.rate * 100).toFixed(4)}% cost=$${fundingCost.toFixed(4)}`);
         } catch { /* skip */ }
       }
-      if (totalFundingCost > 0) console.log(`[paperFunding] Total this cycle: $${totalFundingCost.toFixed(4)}`);
+      const totalFunding = vBFundingCost + m3FundingCost;
+      if (totalFunding > 0) console.log(`[paperFunding] Total this cycle: $${totalFunding.toFixed(4)} (vB=$${vBFundingCost.toFixed(4)} m3=$${m3FundingCost.toFixed(4)})`);
     }
 
-    // Process all trades, accumulate balance returns for one final DB write
+    // Process all trades, accumulate balance returns split by version
     const now = new Date();
-    let totalBalanceReturn = 0;
-    let totalCloseFees     = 0;
+    let vBBalanceReturn = 0;
+    let vBCloseFees     = 0;
+    let m3BalanceReturn = 0;
+    let m3CloseFees     = 0;
 
     for (const trade of open) {
       try {
@@ -617,8 +731,9 @@ export async function updatePaperTradesPnl(): Promise<void> {
         const entry   = trade.entryPrice;
         const isLong  = trade.direction === "long";
         const pnlPct  = isLong ? (current - entry) / entry * 100 : (entry - current) / entry * 100;
+        const isMode3 = trade.version === "mode3";
 
-        console.log(`[paperMonitor] ${trade.symbol} ${trade.direction} entry=${entry} price=${current} tp1=${trade.tp1 ?? "—"} sl=${trade.stopLoss ?? "—"} pnl%=${pnlPct.toFixed(2)}`);
+        console.log(`[paperMonitor] ${trade.symbol} ${trade.direction} (${trade.version ?? "B"}) entry=${entry} price=${current} tp1=${trade.tp1 ?? "—"} sl=${trade.stopLoss ?? "—"} pnl%=${pnlPct.toFixed(2)}`);
 
         let newStatus = "open";
         let exitPrice: number | null = null;
@@ -640,12 +755,17 @@ export async function updatePaperTradesPnl(): Promise<void> {
           ...(newStatus !== "open" ? { status: newStatus, exitPrice, exitTime: now, exitReason } : {}),
         }).where(eq(paperTradesTable.id, trade.id));
 
-        // Accumulate balance return and close fee for closed trades
+        // Accumulate balance return and close fee for closed trades (split by version)
         if (newStatus !== "open" && trade.marginUsed) {
           const closeFee = trade.marginUsed * 10 * 0.00055;
-          totalBalanceReturn += trade.marginUsed + (realizedPnl ?? 0);
-          totalCloseFees     += closeFee;
-          console.log(`[paperFee] ${trade.symbol} close fee: $${closeFee.toFixed(4)}`);
+          if (isMode3) {
+            m3BalanceReturn += trade.marginUsed + (realizedPnl ?? 0);
+            m3CloseFees     += closeFee;
+          } else {
+            vBBalanceReturn += trade.marginUsed + (realizedPnl ?? 0);
+            vBCloseFees     += closeFee;
+          }
+          console.log(`[paperFee] ${trade.symbol} (${trade.version ?? "B"}) close fee: $${closeFee.toFixed(4)}`);
           generateReflection({
             symbol:        trade.symbol,
             direction:     trade.direction,
@@ -663,22 +783,32 @@ export async function updatePaperTradesPnl(): Promise<void> {
             tp2:           trade.tp2 != null ? String(trade.tp2) : null,
             sourceTradeId: String(trade.id),
             suppressAlerts: true,
-            source:        "version_b",
+            source:        isMode3 ? "mode3" : "version_b",
           }).catch(e => console.error(`[paperReflection] ${newStatus} ${trade.symbol}:`, e.message));
         }
       } catch { /* skip individual trade errors */ }
     }
 
-    // Single balance update: returns from closures minus fees and funding
-    if (totalBalanceReturn !== 0 || totalCloseFees !== 0 || totalFundingCost !== 0) {
+    // Version B balance update
+    if (vBBalanceReturn !== 0 || vBCloseFees !== 0 || vBFundingCost !== 0) {
       const bal = await getPaperBalance();
       await db.update(botStateTable).set({
-        paperBalance: Math.max(0, bal + totalBalanceReturn - totalCloseFees - totalFundingCost),
-        ...(totalCloseFees   > 0 ? { paperTotalFees:    sql`paper_total_fees + ${totalCloseFees}` }       : {}),
-        ...(totalFundingCost > 0 ? { paperTotalFunding: sql`paper_total_funding + ${totalFundingCost}` } : {}),
+        paperBalance: Math.max(0, bal + vBBalanceReturn - vBCloseFees - vBFundingCost),
+        ...(vBCloseFees   > 0 ? { paperTotalFees:    sql`paper_total_fees + ${vBCloseFees}` }       : {}),
+        ...(vBFundingCost > 0 ? { paperTotalFunding: sql`paper_total_funding + ${vBFundingCost}` } : {}),
         lastUpdated: new Date(),
       }).where(eq(botStateTable.id, 1))
-        .catch(e => { console.warn("[paperScanner] balance return:", e.message); dbWriteAlert("monitor balance return", e); });
+        .catch(e => { console.warn("[paperScanner] vB balance return:", e.message); dbWriteAlert("monitor vB balance return", e); });
+    }
+
+    // Mode 3 balance update
+    if (m3BalanceReturn !== 0 || m3CloseFees !== 0 || m3FundingCost !== 0) {
+      const m3bal = await getMode3PaperBalance();
+      await db.update(botStateTable).set({
+        mode3PaperBalance: Math.max(0, m3bal + m3BalanceReturn - m3CloseFees - m3FundingCost),
+        lastUpdated: new Date(),
+      }).where(eq(botStateTable.id, 1))
+        .catch(e => { console.warn("[paperScanner] m3 balance return:", e.message); dbWriteAlert("monitor m3 balance return", e); });
     }
   } catch (err) {
     console.error("[paperScanner] P/L update failed:", err);
@@ -804,9 +934,8 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
 
 export function startPaperMonitorCron(alertFn?: (msg: string) => Promise<void>): void {
   if (alertFn) _paperAlertFn = alertFn;  // store for DB write failure alerts
-  // every 5 minutes — skipped when PAPER_TRADING_ENABLED=false
+  // every 5 minutes — monitors both version B and mode3 paper trades
   cron.schedule("*/5 * * * *", () => {
-    if (process.env["PAPER_TRADING_ENABLED"] === "false") return;
     void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));
   });
 
