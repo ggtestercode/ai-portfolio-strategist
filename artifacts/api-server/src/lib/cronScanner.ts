@@ -2021,54 +2021,6 @@ async function checkPositionMonitor(): Promise<void> {
     if (fr != null)    monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastFundingRate: fr.rate };
     if (oiVal != null) monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastOI: oiVal };
 
-    // ── Trailing SL (runs every tick) ────────────────────────────────────────
-    const meta     = posMeta[pos.symbol];
-    const isLong   = pos.side === "Buy";
-    const atr      = klines4h.length >= 15 ? calcATR(klines4h, 14) : (klines.length >= 15 ? calcATR(klines, 14) : 0);
-    if (atr > 0 && pnlPct >= 3) {
-      const trailDist   = atr * 1.0;
-      // Derive live price from unrealized pnl to avoid an extra API call
-      const livePrice   = pos.size > 0
-        ? pos.entryPrice + (isLong ? 1 : -1) * (pos.pnl / pos.size)
-        : pos.entryPrice;
-      const newSL       = isLong ? livePrice - trailDist : livePrice + trailDist;
-      const currentSL   = meta?.sl ?? pos.stopLoss ?? 0;
-      // Only move SL in the protective direction (ratchet up for longs, down for shorts)
-      const betterSL    = isLong ? newSL > currentSL : (currentSL === 0 || newSL < currentSL);
-
-      // Plausibility: SL must stay on correct side of live price
-      // For long: SL < livePrice; for short: SL > livePrice
-      const slPlausible = isLong ? newSL < livePrice : newSL > livePrice;
-      if (!slPlausible) {
-        console.warn(`[posMonitor] ${pos.symbol} trailing SL $${newSL.toFixed(4)} would be on wrong side of live $${livePrice.toFixed(4)} — skipping`);
-      }
-
-      if (betterSL && slPlausible) {
-        if (!meta?.trailingActive) {
-          // First activation — notify Telegram
-          await bybitSetStopLoss(pos.symbol, newSL, pos.positionIdx)
-            .catch(e => console.warn(`[posMonitor] trailing SL set ${pos.symbol}:`, (e as Error).message));
-          await patchPositionMeta(pos.symbol, { sl: newSL, trailingActive: true, lastTrailPrice: livePrice });
-          await alertFn?.([
-            `🔄 <b>Trailing SL activated — ${pos.symbol}</b>`,
-            `SL moved to $${newSL.toFixed(4)} (ATR×1.0 trail, 4h)`,
-            `Current profit locked: +${pnlPct.toFixed(2)}%`,
-          ].join("\n")).catch(() => {});
-          console.log(`[posMonitor] ${pos.symbol} trailing SL activated: $${newSL.toFixed(4)} live=$${livePrice.toFixed(4)} ATR=$${atr.toFixed(4)}`);
-        } else {
-          // Already trailing — update silently when price moved ≥ 1 trail distance
-          const lastTrail  = meta.lastTrailPrice ?? pos.entryPrice;
-          const priceMoved = Math.abs(livePrice - lastTrail);
-          if (priceMoved >= trailDist) {
-            await bybitSetStopLoss(pos.symbol, newSL, pos.positionIdx)
-              .catch(e => console.warn(`[posMonitor] trailing SL update ${pos.symbol}:`, (e as Error).message));
-            await patchPositionMeta(pos.symbol, { sl: newSL, lastTrailPrice: livePrice });
-            console.log(`[posMonitor] ${pos.symbol} trailing SL → $${newSL.toFixed(4)} (moved $${priceMoved.toFixed(4)})`);
-          }
-        }
-      }
-    }
-
     // Triggers respect a 30-min cooldown — prevents re-firing every tick on a
     // persistent condition (e.g. same high-volume candle, OI still low)
     const timeSinceReview = now - state.lastReviewAt;
@@ -2212,6 +2164,7 @@ async function runPositionReview(
     `  CLOSE`,
     `  ADJUST_SL [$price]`,
     `Then on the SECOND LINE: one sentence of reasoning — state which supporting/undermining signals swung the decision, and the specific price level for any SL adjustment.`,
+    `OPTIONAL THIRD LINE: NEW_SL [$price] — only with HOLD or PARTIAL_CLOSE, only when in profit, to ratchet the stop loss tighter. Longs: must be higher than current SL. Shorts: must be lower than current SL. Omit if not needed.`,
     `Do NOT use HOLD if your reasoning says the thesis is broken or mixed.`,
   ].filter(Boolean).join("\n");
 
@@ -2242,7 +2195,10 @@ async function runPositionReview(
   const text  = resp.text.trim();
   const upper = text.toUpperCase();
   const lines = text.split("\n").filter(Boolean);
-  const reason = lines.slice(1).join(" ") || "";
+  const newSlLine  = lines.find(l => /^NEW_SL\s+\$?[\d.]+/i.test(l));
+  const newSlMatch = newSlLine?.match(/NEW_SL\s+\$?([\d.]+)/i);
+  const claudeNewSl = newSlMatch ? parseFloat(newSlMatch[1]!) : NaN;
+  const reason = lines.slice(1).filter(l => !/^NEW_SL\s/i.test(l)).join(" ") || "";
 
   const prefix = trigger
     ? `⚡ <b>Immediate review — ${pos.symbol}</b>\nTrigger: ${trigger}`
@@ -2330,6 +2286,22 @@ async function runPositionReview(
       await closePercentPosition(pos.symbol, pct)
         .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
       await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ approved\n${reason}`).catch(() => {});
+    }
+  }
+
+  // Apply Claude's optional ratchet SL (valid with HOLD or PARTIAL_CLOSE; skipped for CLOSE/ADJUST_SL)
+  const didFullClose = upper.startsWith("CLOSE") || upper.startsWith("ADJUST_SL");
+  if (!didFullClose && !isNaN(claudeNewSl) && claudeNewSl > 0) {
+    const currentSlRaw = meta?.sl ?? pos.stopLoss ?? 0;
+    const currentSlNum = typeof currentSlRaw === "number" ? currentSlRaw : parseFloat(String(currentSlRaw) || "0");
+    const ratchetOk = isLong ? claudeNewSl > currentSlNum : (currentSlNum === 0 || claudeNewSl < currentSlNum);
+    if (ratchetOk) {
+      await bybitSetStopLoss(pos.symbol, claudeNewSl, pos.positionIdx)
+        .catch(e => console.warn(`[posMonitor] newSl update ${pos.symbol}:`, (e as Error).message));
+      await patchPositionMeta(pos.symbol, { sl: claudeNewSl });
+      console.log(`[posMonitor] ${pos.symbol} SL ratchet → $${claudeNewSl.toFixed(4)} (was $${currentSlNum.toFixed(4)})`);
+    } else {
+      console.warn(`[posMonitor] ${pos.symbol} NEW_SL $${claudeNewSl.toFixed(4)} rejected — ratchet check failed (current $${currentSlNum.toFixed(4)}, ${isLong ? "LONG" : "SHORT"})`);
     }
   }
 }
