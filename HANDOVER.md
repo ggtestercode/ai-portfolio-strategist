@@ -443,27 +443,15 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ### Mode 3 paper trading + /compare rewrite (commit `5bd9d9d`)
 
-**What changed:**
-
-- **Version B paper disabled** — `PAPER_TRADING_ENABLED=false` in server .env; `runPaperScan()` no longer called. Existing open Version B paper trades still monitored by `updatePaperTradesPnl()` (balance returns flow to `paperBalance`).
-
-- **Mode 3 paper simulation** — `runMode3PaperScan(filteredSignals, regimeType)` in `paperScanner.ts`:
-  - Zero extra Claude API calls — piggybacks on `filteredSignals` already produced by the live 4h scan
-  - Gate 1: CHOPPY / EXHAUSTION / VOLATILE → hard block (same as live Mode 3)
-  - Gate 2: `score >= getRegimeThreshold(regimeType)` (RANGING=70, TRENDING=65, etc.)
-  - Same fee (0.055%) and slippage (0.05–0.15%) simulation as Version B
-  - Inserts to `paper_trades` with `version='mode3'`
-  - Tracks balance in new `bot_state.mode3PaperBalance` column (starts $40)
-
-- **`updatePaperTradesPnl()` version-aware** — balance returns and funding now split by `trade.version`: vB trades → `paperBalance`; mode3 trades → `mode3PaperBalance`. Reflection source = `'mode3'` for mode3 trades.
-
-- **`startPaperMonitorCron()` guard removed** — `PAPER_TRADING_ENABLED=false` check removed from 5-min cron so Mode 3 paper trades are still monitored.
-
-- **`cronScanner.ts`** — `runMode3PaperScan(filteredSignals, regime?.regime ?? "CHOPPY")` called every 4h scan unconditionally, after Version B gate.
-
-- **`/compare` rewritten** — now shows Mode 3 paper (since May 30) vs live bot (since May 30). Dropped stale May 24-27 historical section. Columns: balance, open count, win rate, net P&L, TP/SL breakdown for paper; same for live.
-
-- **DB migration** — `mode3PaperBalance REAL NOT NULL DEFAULT 40.0` added to `bot_state`; applied automatically by deploy.sh drizzle-kit push.
+- **Version B paper disabled** — `PAPER_TRADING_ENABLED=false` in server .env
+- **Mode 3 paper simulation active — zero extra API cost**
+  - Uses Version B scan signals (`filteredSignals`) filtered by Mode 3 gates:
+    CHOPPY/EXHAUSTION/VOLATILE hard block + `score >= getRegimeThreshold()`
+  - Starting balance $40, tracked in `mode3PaperBalance` (new `bot_state` column; DB migrated on deploy)
+  - Tagged `version='mode3'` in `paper_trades`; `updatePaperTradesPnl()` splits balance returns by version
+  - 5-min paper monitor cron now always runs regardless of `PAPER_TRADING_ENABLED`
+- **`/compare` rewritten** — Version B live vs Mode 3 paper, same time window (May 30 onwards); stale May 24-27 section dropped
+- **Caveat:** Mode 3 paper uses Version B scan signals (unfiltered Claude judgment), not Mode 3's original structured prompt — partial simulation only; entry counts and signal mix differ from true Mode 3
 
 ---
 
