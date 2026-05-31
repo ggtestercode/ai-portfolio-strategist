@@ -24,7 +24,7 @@ import {
   type BybitKline,
 } from "../brokers/bybit";
 import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, tradingRulesTable, ruleOverridesTable, type PositionMeta, type PositionMonitorState, type WatchCoin } from "@workspace/db";
-import { eq, and, desc, isNull } from "drizzle-orm";
+import { eq, and, desc, isNull, gt } from "drizzle-orm";
 
 // ── Close helpers ─────────────────────────────────────────────────────────────
 
@@ -2095,6 +2095,33 @@ async function runPositionReview(
   const fundingStr   = fr ? `${(fr.rate * 100).toFixed(4)}%` : "unknown";
   const isRanging    = regime?.toUpperCase().includes("RANGING") ?? false;
 
+  // Recent exits for this symbol in last 24h — gives Claude awareness of prior same-symbol losses
+  const cutoff24h = new Date(Date.now() - 24 * 3_600_000);
+  const recentExit = await db.select({
+    exitMethod:   tradeMemoryTable.exitMethod,
+    pnlPct:       tradeMemoryTable.pnlPct,
+    priceAtClose: tradeMemoryTable.priceAtClose,
+    createdAt:    tradeMemoryTable.createdAt,
+  }).from(tradeMemoryTable)
+    .where(and(
+      eq(tradeMemoryTable.symbol, pos.symbol),
+      eq(tradeMemoryTable.action, "TRADE_CLOSE"),
+      gt(tradeMemoryTable.createdAt, cutoff24h),
+    ))
+    .orderBy(desc(tradeMemoryTable.createdAt))
+    .limit(1)
+    .then(r => r[0] ?? null)
+    .catch(() => null);
+
+  const priorExitLine = (() => {
+    if (!recentExit) return null;
+    const hoursAgo  = Math.round((Date.now() - new Date(recentExit.createdAt).getTime()) / 3_600_000);
+    const method    = recentExit.exitMethod ?? "exit";
+    const pnl       = recentExit.pnlPct ? ` (${parseFloat(recentExit.pnlPct) >= 0 ? "+" : ""}${parseFloat(recentExit.pnlPct).toFixed(2)}%)` : "";
+    const price     = recentExit.priceAtClose ? ` at $${recentExit.priceAtClose}` : "";
+    return `Prior exit: ${pos.symbol} ${method}${hoursAgo}h ago${price}${pnl}`;
+  })();
+
   // FIX 2: Skip early reviews when trade is still healthy
   const positionAgeHours = meta?.openedAt ? (Date.now() - meta.openedAt) / 3_600_000 : 999;
   const slVal = typeof sl === "number" ? sl : parseFloat(String(sl) || "0");
@@ -2145,7 +2172,8 @@ async function runPositionReview(
 
   const prompt = [
     `Position: ${pos.symbol} ${dir} | Entry: $${pos.entryPrice.toFixed(4)} | Current: $${currentPrice.toFixed(4)}`,
-    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%${(() => { const pk = meta?.peakPnlPct; return pk != null && pk - pnlPct > 0.1 ? ` (peak: ${pk >= 0 ? "+" : ""}${pk.toFixed(2)}%)` : ""; })()} | Held: ${positionAgeHours < 999 ? positionAgeHours.toFixed(1) + "h" : heldH + "h"} | Regime: ${regime ?? "unknown"}`,
+    `Held: ${positionAgeHours < 999 ? positionAgeHours.toFixed(1) + "h" : heldH + "h"} | Peak P/L: ${meta?.peakPnlPct != null ? (meta.peakPnlPct >= 0 ? "+" : "") + meta.peakPnlPct.toFixed(2) + "%" : "n/a"} | Current P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}% | Regime: ${regime ?? "unknown"}`,
+    priorExitLine,
     `RSI(14): ${rsi.toFixed(1)} | EMA20: $${ema20.toFixed(4)} | EMA50: $${ema50.toFixed(4)}`,
     `Funding: ${fundingStr}`,
     oi != null ? `OI: ${oi}` : null,
@@ -2250,22 +2278,16 @@ async function runPositionReview(
     return;
   }
 
-  // CLOSE or PARTIAL_CLOSE: always gate via Telegram — advisory only, human must approve
+  // CLOSE or PARTIAL_CLOSE: execute directly — defensive position management is time-sensitive
   const reviewDecision = lines[0] ?? text;
-  const approved = await gateManualReview(pos.symbol, reviewDecision, reason, pnlPct);
-  if (!approved) {
-    console.log(`[posMonitor] Review gate: ${pos.symbol} ${reviewDecision} → HOLD (no approval within 15 min)`);
-    await alertFn?.([
-      `${prefix}`,
-      `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
-      ``,
-      `🔍 Claude suggests: ${reviewDecision}`,
-      `Reason: ${reason.slice(0, 200)}`,
-      ``,
-      `No approval received — HOLD maintained`,
-    ].join("\n")).catch(() => {});
-    return;
-  }
+  console.log(`[posMonitor] Auto-executing ${pos.symbol} ${reviewDecision} — no approval gate for position management`);
+  await alertFn?.([
+    `${prefix}`,
+    `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
+    ``,
+    `Claude: ${reviewDecision}`,
+    `Reason: ${reason.slice(0, 200)}`,
+  ].join("\n")).catch(() => {});
 
   if (upper.startsWith("CLOSE")) {
     await bybitClose(pos.symbol)
@@ -2273,7 +2295,7 @@ async function runPositionReview(
     const closeFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
     await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: closeFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
     await clearPositionMeta(pos.symbol).catch(() => {});
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ approved\n${reason}`).catch(() => {});
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ executed\n${reason}`).catch(() => {});
 
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
     const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
@@ -2299,7 +2321,7 @@ async function runPositionReview(
     } else {
       await closePercentPosition(pos.symbol, pct)
         .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
-      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ approved\n${reason}`).catch(() => {});
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ executed\n${reason}`).catch(() => {});
     }
   }
 
