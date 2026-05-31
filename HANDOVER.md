@@ -445,16 +445,15 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 Both were silently broken since deployment — no errors surfaced, no visible impact until investigated.
 
-- **Recent exits query fixed (`marketScanner.ts`)**
-  - Root cause: `ANY(${selectedSymbols})` in Drizzle's `sql` template passes the JS array as a single bound parameter — Neon serverless driver cannot map it to PostgreSQL's `ANY()`. Error was swallowed because `(e as Error).message` returned Drizzle's query body, not the PostgreSQL error.
-  - Fix: replaced with `IN (${sql.join(selectedSymbols.map(s => sql\`${s}\`), sql\`,\`)})` — each symbol becomes its own `$N` parameter.
-  - Claude now receives "INJUSDT Recent: sl_hit 8h ago at $6.542" context in every scan. Success logged as `[scanner] Recent exits injected: ...`
+- **Recent exits query fixed** — `ANY()` parameter bug in `marketScanner.ts`
+  - Claude now sees "INJUSDT Recent: sl_hit 8h ago at $6.542" in every scan
+  - Was silently failing since deployment; Claude had zero re-entry awareness
+  - Root cause: Drizzle's `sql` template serializes JS arrays as a single bound param — Neon rejects it for `ANY()`. Fixed with `IN (sql.join(...))` so each symbol is its own `$N`.
 
-- **Limit order execution fixed (`bybit.ts`, `startup.ts`, `approvalGate.ts`, `cronScanner.ts`)**
-  - Root cause: `openPosition()` hardcoded `orderType: "Market"` — Claude's `limitPrice` field was received but discarded. Every entry filled at mark price, not Claude's intended level.
-  - Fix: `limitPrice` threaded from `opp.limitPrice ?? opp.entry` in `buildProposal` → `TradeProposal.limitPrice` → startup executor → `bybitOpen` opts.
-  - In `openPosition()`: if `limitPrice` present and within 2% of mark → `Limit/GTC` at that price. If absent or >2% stale → fall back to `Market/IOC` with reason logged.
-  - Example: INJ entry ($6.85 limit, $6.934 mark, 0.97% diff) would now place Limit/GTC at $6.85 instead of market-filling at $6.934.
+- **Limit order execution fixed** — Claude's `limitPrice` now respected on Bybit
+  - Falls back to market if limitPrice is absent or >2% from mark price
+  - INJ example: planned $6.85 would now fill at $6.85, not $6.934
+  - Root cause: `openPosition()` hardcoded `Market/IOC` — `limitPrice` was received and discarded. Fixed by threading `limitPrice` through `TradeProposal` → startup executor → `bybitOpen` opts → `Limit/GTC` order when within 2%.
 
 ---
 
