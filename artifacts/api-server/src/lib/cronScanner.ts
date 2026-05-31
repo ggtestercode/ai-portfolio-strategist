@@ -1626,6 +1626,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         stopLossPrice:   opp.stopLoss,
         takeProfitPrice: opp.tp2 ?? opp.takeProfit,
         tp1Price:        opp.tp1,
+        limitPrice:      opp.limitPrice ?? opp.entry,
       });
       const gateResult = await approvalGate.submit(proposal).catch(e => {
         console.error(`[cronScanner] submit ${sym}:`, e);

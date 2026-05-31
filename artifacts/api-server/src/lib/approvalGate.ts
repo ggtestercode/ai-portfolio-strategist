@@ -30,6 +30,7 @@ export interface TradeProposal {
   stopLossPrice?:  number;
   takeProfitPrice?: number;
   tp1Price?:       number;
+  limitPrice?:     number;
 }
 
 export interface PendingApproval {

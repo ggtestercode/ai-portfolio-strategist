@@ -452,6 +452,8 @@ async function runPhase2(
   // ── Recent exits (last 24h) per selected symbol ───────────────────────────
   try {
     type RecentExitRow = { symbol: string; exit_at: string; exit_price: string; pnl: string; exit_method: string | null };
+    // Use IN(...) with individual sql params — ANY($1) with a JS array fails on Neon serverless
+    const symList     = sql.join(selectedSymbols.map(s => sql`${s}`), sql`,`);
     const recentExits = await db.execute<RecentExitRow>(sql`
       SELECT DISTINCT ON (tl.symbol)
         tl.symbol,
@@ -466,7 +468,7 @@ async function runPhase2(
         AND tm.created_at >= tl.exit_at
         AND tm.created_at <= tl.exit_at + INTERVAL '4 hours'
       WHERE tl.exit_at >= NOW() - INTERVAL '24 hours'
-        AND tl.symbol = ANY(${selectedSymbols})
+        AND tl.symbol IN (${symList})
       ORDER BY tl.symbol, tl.exit_at DESC
     `);
     for (const row of recentExits.rows) {
@@ -482,8 +484,9 @@ async function runPhase2(
       else                                        label = pnl > 0 ? "closed profitable" : "closed at loss";
       recentExitLines.push(`${row.symbol} Recent: ${label} ${hoursAgo}h ago at $${price}`);
     }
+    if (recentExitLines.length) console.log(`[scanner] Recent exits injected: ${recentExitLines.join(" | ")}`);
   } catch (e) {
-    console.warn("[scanner] Recent exits query failed:", (e as Error).message);
+    console.warn("[scanner] Recent exits query failed:", String(e));
   }
 
   await Promise.allSettled(selectedSymbols.map(async sym => {
