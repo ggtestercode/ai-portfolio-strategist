@@ -441,6 +441,16 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ## 7. Fixes Deployed May 29–31, 2026
 
+### posMonitor — recent exit context, auto-execute, reformatted P/L (commit `baab6f0`)
+
+- **Recent exit context in posMonitor** — before building the review prompt, queries `trade_memory` for the most recent `TRADE_CLOSE` record for the position's symbol in the last 24h. If found, injects a line like `Prior exit: INJUSDT sl_hit 8h ago at $6.542 (-2.1%)` into the position context block. Previously, Claude reviewing open positions had zero awareness of prior same-symbol losses — this was only injected in Phase 2 scan, not in posMonitor.
+
+- **PARTIAL_CLOSE / CLOSE bypass approval gate** — removed `gateManualReview` call for CLOSE and PARTIAL_CLOSE decisions. These now execute immediately with a Telegram notification. The 15-min approval timeout was blocking time-sensitive profit protection (HYPE +3.5% PARTIAL_CLOSE was rejected by timeout → reverted to HOLD). HOLD and ADJUST_SL were never gated. New entries still route through the approval gate.
+
+- **Position context reformatted** — P/L line now shows `Held: 35.2h | Peak P/L: +0.28% | Current P/L: -1.72% | Regime: CHOPPY` — both peak and current P/L are always explicit labels. Previously peak was a conditional parenthetical `(peak: +Y%)` only shown when drawdown from peak exceeded 0.1%.
+
+---
+
 ### Recent exits query + limit order execution (commit `b2cfeb5`)
 
 Both were silently broken since deployment — no errors surfaced, no visible impact until investigated.
