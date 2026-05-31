@@ -439,7 +439,24 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ---
 
-## 7. Fixes Deployed May 29–30, 2026
+## 7. Fixes Deployed May 29–31, 2026
+
+### Recent exits query + limit order execution (commit `b2cfeb5`)
+
+Both were silently broken since deployment — no errors surfaced, no visible impact until investigated.
+
+- **Recent exits query fixed (`marketScanner.ts`)**
+  - Root cause: `ANY(${selectedSymbols})` in Drizzle's `sql` template passes the JS array as a single bound parameter — Neon serverless driver cannot map it to PostgreSQL's `ANY()`. Error was swallowed because `(e as Error).message` returned Drizzle's query body, not the PostgreSQL error.
+  - Fix: replaced with `IN (${sql.join(selectedSymbols.map(s => sql\`${s}\`), sql\`,\`)})` — each symbol becomes its own `$N` parameter.
+  - Claude now receives "INJUSDT Recent: sl_hit 8h ago at $6.542" context in every scan. Success logged as `[scanner] Recent exits injected: ...`
+
+- **Limit order execution fixed (`bybit.ts`, `startup.ts`, `approvalGate.ts`, `cronScanner.ts`)**
+  - Root cause: `openPosition()` hardcoded `orderType: "Market"` — Claude's `limitPrice` field was received but discarded. Every entry filled at mark price, not Claude's intended level.
+  - Fix: `limitPrice` threaded from `opp.limitPrice ?? opp.entry` in `buildProposal` → `TradeProposal.limitPrice` → startup executor → `bybitOpen` opts.
+  - In `openPosition()`: if `limitPrice` present and within 2% of mark → `Limit/GTC` at that price. If absent or >2% stale → fall back to `Market/IOC` with reason logged.
+  - Example: INJ entry ($6.85 limit, $6.934 mark, 0.97% diff) would now place Limit/GTC at $6.85 instead of market-filling at $6.934.
+
+---
 
 ### Mode 3 paper trading + /compare rewrite (commit `5bd9d9d`)
 
