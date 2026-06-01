@@ -1347,6 +1347,23 @@ async function runWatchScan(): Promise<void> {
         }
       }
 
+      // R:R gate — compute from raw values (more reliable than Claude's reported field)
+      {
+        const rrEntry  = signal.entry ?? signal.price;
+        const riskDist = Math.abs(rrEntry - (signal.stopLoss ?? 0));
+        const rewardDist = Math.abs((signal.tp1 ?? 0) - rrEntry);
+        const rrRatio  = riskDist > 0 ? rewardDist / riskDist : 0;
+        if (rrRatio < 1.0) {
+          console.log(`[gate] REJECTED ${sym} (watchScan) — R:R ${rrRatio.toFixed(2)} < 1.0`);
+          alertFn?.([
+            `🚫 Entry rejected — ${sym}`,
+            `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.0 (reward must equal or exceed risk)`,
+          ].join("\n")).catch(() => {});
+          await removeFromWatchList(signal.symbol);
+          continue;
+        }
+      }
+
       const amountUsd = calcRMultipleSizing(
         bybitBalance,
         signal.entry ?? signal.price,
@@ -1611,6 +1628,22 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         }
       }
 
+      // R:R gate — compute from raw values (more reliable than Claude's reported field)
+      {
+        const rrEntry  = opp.entry ?? opp.price;
+        const riskDist = Math.abs(rrEntry - (opp.stopLoss ?? 0));
+        const rewardDist = Math.abs((opp.tp1 ?? 0) - rrEntry);
+        const rrRatio  = riskDist > 0 ? rewardDist / riskDist : 0;
+        if (rrRatio < 1.0) {
+          console.log(`[gate] REJECTED ${sym} — R:R ${rrRatio.toFixed(2)} < 1.0`);
+          alertFn?.([
+            `🚫 Entry rejected — ${sym}`,
+            `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.0 (reward must equal or exceed risk)`,
+          ].join("\n")).catch(() => {});
+          continue;
+        }
+      }
+
       // Layer 4+5: R-multiple sizing
       const amountUsd = calcRMultipleSizing(
         bybitBalance,
@@ -1747,7 +1780,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           `Entry: ${opp.orderType === "limit" ? `limit $${opp.limitPrice ?? opp.entry ?? "?"}` : "market"} | Score: ${opp.score} → ${rMult}R`,
           `SL: $${opp.stopLoss?.toFixed(4) ?? "?"} | TP1: $${opp.tp1?.toFixed(4) ?? "?"} | TP2: $${opp.tp2?.toFixed(4) ?? "?"}`,
           `Risk: $${(bybitBalance * 0.05 * rMult).toFixed(2)} | Size: $${amountUsd.toFixed(0)} (${opp.leverage ?? 10}×)`,
-          opp.riskRewardRatio ? `R:R 1:${opp.riskRewardRatio.toFixed(1)}` : null,
+          opp.rewardRiskRatio ? `R:R 1:${opp.rewardRiskRatio.toFixed(1)}` : null,
         ].filter(Boolean).join("\n");
         await alertFn?.(entryLines).catch(() => {});
       }

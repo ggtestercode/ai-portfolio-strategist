@@ -47,7 +47,7 @@ export interface ScanOpportunity {
   limitPrice?:         number;
   timeInForce?:        "IOC" | "GTC";
   orderReasoning?:     string;
-  riskRewardRatio?:     number;
+  rewardRiskRatio?:     number;
   stopLossMethod?:      "swing_low" | "ATR" | "percent" | "support";
   stopLossReasoning?:   string;
   takeProfitReasoning?: string;
@@ -593,7 +593,8 @@ async function runPhase2(
   const systemContext = [
     "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
     signalTruthTable,
-    `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","riskRewardRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
+    `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","rewardRiskRatio":2.0,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
+    `rewardRiskRatio: reward divided by risk. Reward = distance from entry to TP1. Risk = distance from entry to SL. Example: entry $10, TP1 $11, SL $9 = 1.0 (reward $1 / risk $1). Higher is better. Required — must be computed and set for every signal.`,
     `Rank exactly 5. Score reflects your own conviction (0-100). Set recommendation and conviction fields based on your judgment.`,
     `Funding: |rate|<0.03% neutral; 0.03-0.07% directional signal; >0.07% crowded/squeeze risk. OI up+price up=bullish; OI down+price up=weak; OI up+price down=bearish; OI down+price down=weak.`,
     `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must be 1-3× 4h ATR. If structural level >3× ATR = too far, use next closest level. If <1× ATR = too tight, use level beyond it. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed by ATR range. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,

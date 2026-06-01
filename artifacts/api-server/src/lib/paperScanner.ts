@@ -174,7 +174,7 @@ export async function runPaperScan(): Promise<void> {
     // ── Version B system prompt — no regime/score blocks ────────────────────
     const systemContext = [
       "You are an experimental trading bot — Version B. Respond with ONLY valid JSON — no markdown, no prose.",
-      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|STRONG SELL|SELL|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"orderType":"market|limit","riskRewardRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","setupType":"REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP","setupQuality":"HIGH|MEDIUM|LOW","timing":"EARLY|MIDDLE|LATE","whyNow":"","edgeType":"LIQUIDITY_TRAP|SQUEEZE_SETUP|RELATIVE_WEAKNESS|SWEEP_REVERSAL|TREND_CONTINUATION|MEAN_REVERSION","conflicts":[],"conflictResolution":"NO_CONFLICT|MINOR_REDUCED|MAJOR_SKIP","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":0,"rMultiple":0}],"scanTimestamp":"","summary":""}`,
+      `Schema: {"opportunities":[{"symbol":"","assetClass":"","score":0-100,"recommendation":"STRONG BUY|BUY|STRONG SELL|SELL|WATCH|AVOID","reasoning":"","price":0,"dataTimestamp":"","direction":"long|short|neutral","conviction":"low|medium|high|strong_buy|strong_sell","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":1,"positionSizeUsd":0,"orderType":"market|limit","rewardRiskRatio":0,"stopLossMethod":"swing_low|ATR|percent|support","setupType":"REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP","setupQuality":"HIGH|MEDIUM|LOW","timing":"EARLY|MIDDLE|LATE","whyNow":"","edgeType":"LIQUIDITY_TRAP|SQUEEZE_SETUP|RELATIVE_WEAKNESS|SWEEP_REVERSAL|TREND_CONTINUATION|MEAN_REVERSION","conflicts":[],"conflictResolution":"NO_CONFLICT|MINOR_REDUCED|MAJOR_SKIP","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":0,"rMultiple":0}],"scanTimestamp":"","summary":""}`,
       "You have access to all market data: RSI, EMA, ADX, funding, OI, volume, relative strength, all timeframes.",
       "You are NOT told which signals to use. Discover your own signal combinations.",
       "Document which signals you chose and why in the 'reasoning' field.",
@@ -186,7 +186,7 @@ export async function runPaperScan(): Promise<void> {
       "Score is informational only — no threshold. Rank 5 opportunities freely.",
       "Include at least 1-2 short signals if bearish setups exist.",
       "For LONGS: stopLoss below entry, tp1/tp2 above. For SHORTS: stopLoss above entry, tp1/tp2 below.",
-      "riskRewardRatio must be ≥1.0. ATR-based: TP1=entry±(ATR×1.0), TP2=entry±(ATR×2.0), SL=entry±(ATR×1.5).",
+      "rewardRiskRatio must be ≥1.0. ATR-based: TP1=entry±(ATR×1.0), TP2=entry±(ATR×2.0), SL=entry±(ATR×1.5).",
       "whyNow: name the specific signals you chose to use and why you preferred them over others. If no edge — set direction=neutral.",
       "JSON RULES: NEVER use double-quote characters inside any string value. NEVER use backslash characters. No newlines inside strings.",
     ].join("\n");
@@ -288,7 +288,7 @@ export async function runPaperScan(): Promise<void> {
       // New signals summary (give Claude the technical context)
       const newSigLines = (res.data.opportunities as ScanOpportunity[])
         .filter(o => o.direction && o.direction !== "neutral")
-        .map(o => `${o.symbol} ${o.direction} score=${o.score ?? "?"} setup=${o.setupType ?? "?"} rr=${o.riskRewardRatio?.toFixed(1) ?? "?"} entry=${o.entry ?? "?"} sl=${o.stopLoss ?? "?"} tp1=${o.tp1 ?? "?"}`)
+        .map(o => `${o.symbol} ${o.direction} score=${o.score ?? "?"} setup=${o.setupType ?? "?"} rr=${o.rewardRiskRatio?.toFixed(1) ?? "?"} entry=${o.entry ?? "?"} sl=${o.stopLoss ?? "?"} tp1=${o.tp1 ?? "?"}`)
         .join("\n") || "none";
 
       const reviewRes = await llm.json<PortfolioReview>({
@@ -531,7 +531,7 @@ export async function runPaperScan(): Promise<void> {
         stopLoss:   opp.stopLoss         ?? null,
         tp1:        opp.tp1              ?? null,
         tp2:        opp.tp2              ?? null,
-        rr:         opp.riskRewardRatio  ?? null,
+        rr:         opp.rewardRiskRatio  ?? null,
         regime:     regime.regime,
         score:      opp.score            ?? null,
         whyNow:     entry.reasoning || opp.whyNow || null,
@@ -643,7 +643,7 @@ export async function runMode3PaperScan(
         stopLoss:   opp.stopLoss        ?? null,
         tp1:        opp.tp1             ?? null,
         tp2:        opp.tp2             ?? null,
-        rr:         opp.riskRewardRatio ?? null,
+        rr:         opp.rewardRiskRatio ?? null,
         regime:     regimeType,
         score:      opp.score           ?? null,
         whyNow:     opp.whyNow          ?? null,
