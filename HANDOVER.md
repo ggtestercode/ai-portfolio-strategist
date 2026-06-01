@@ -568,6 +568,31 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 
 ---
 
+## 8. Fixes Deployed June 1, 2026
+
+### deploy.sh — git push + commit-hash verification (commit `d1e0a8d`)
+
+- **Root cause identified:** deploy.sh never ran `git push`. It SSHed to the server and ran `git pull origin main` — so if local commits hadn't been pushed, the server pulled stale code and rebuilt the same old binary. `✅ Binary fresh` passed every time (binary age only, not content). 8 commits went undeployed silently across multiple sessions.
+- **Fix 1 — git push before SSH:** `git push origin main` now runs first. If nothing to push or a conflict exists, the script halts before touching the server.
+- **Fix 2 — commit-hash verification:** Local `HEAD` captured before SSH. After server pull+build, server `git rev-parse HEAD` compared against local hash. Mismatch → hard `exit 1` with explicit message. Binary age check removed entirely.
+
+---
+
+### generateTradingRules — full reflection coverage + force bypass (commits `d40210a`–`be9e4c7`)
+
+- **Removed `LIMIT 60`** — generator now fetches all TRADE_CLOSE rows (was capping at 60, then filtering to ~37 strategy-only).
+- **Removed execution filter** — all failure types now included; `failureType` field added to reflection format so Claude can distinguish them.
+- **Rule count** — changed from hardcoded 5 to "between 5 and 15 — as many as evidence supports, minimum 3 occurrences each."
+- **`force` parameter** — `generateTradingRules(force=false)`. `/forceRules` Telegram handler passes `force=true`, bypassing the 20-trade gate. Scheduled auto-check still gates normally.
+- **DELETE + INSERT** — replaced upsert-on-ruleNumber with full delete then fresh insert. Old ghost rules from prior generations no longer persist if Claude returns fewer rules.
+- **Raw response logged** — `[rules] Raw response: {json}` emitted before parsing so full Claude output is visible in PM2 logs.
+- **Rate limit retry** — on 429 or usage-limit error: wait 60s, retry once. If still failing, Telegram: `⚠️ Rule generation rate-limited — try again in a few minutes`.
+- **maxTokens raised to 8000** — was 1000 (too small for 15 detailed rules).
+
+**Result:** First successful full-coverage run — 15 rules from 110 reflections, 60,397 input tokens, $0.24. Key finding: **exits are the primary P/L problem, not entries.** TP1 too_ambitious in 88/110 trades; avg opportunity cost 3.21% vs avg missed profit 1.90%. TRENDING_DOWN + long = 0% accuracy across 15+ instances (hard veto). Partial closes at/against entry price = primary P/L destroyer across 20+ trades.
+
+---
+
 ## 9. Active Bugs & Open Issues
 
 ### Pending (not yet implemented)
