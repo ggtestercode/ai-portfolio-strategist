@@ -999,14 +999,11 @@ export async function generateTradingRules(): Promise<void> {
     return;
   }
 
-  const [reflections, existingRules] = await Promise.all([
-    db.select()
-      .from(tradeMemoryTable)
-      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
-      .orderBy(desc(tradeMemoryTable.createdAt))
-      .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]),
-    getActiveRules(),
-  ]);
+  const reflections = await db.select()
+    .from(tradeMemoryTable)
+    .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+    .orderBy(desc(tradeMemoryTable.createdAt))
+    .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
 
   if (reflections.length < 10) {
     console.log(`[rules] Insufficient reflections (${reflections.length}) — skipping`);
@@ -1072,10 +1069,6 @@ export async function generateTradingRules(): Promise<void> {
     ].filter(Boolean).join("\n");
   }).join("\n---\n");
 
-  const existingStr = existingRules.map(r =>
-    `Rule ${r.ruleNumber} [${r.confidence}]: ${r.ruleText}\n  Wins: ${r.winsFollowing} | Losses: ${r.lossesFollowing}`
-  ).join("\n");
-
   const prompt = [
     `Analyse trade reflections and generate between 5 and 15 actionable trading rules — as many as the evidence supports with minimum 3 trade occurrences each. Do not invent rules to fill a quota.`,
     ``,
@@ -1098,8 +1091,6 @@ export async function generateTradingRules(): Promise<void> {
     ``,
     `Trade reflections (${reflections.length} trades):`,
     reflStr,
-    ``,
-    existingRules.length ? `Current active rules:\n${existingStr}` : "No existing rules.",
     ``,
     `Return ONLY valid JSON:`,
     `{"rules":[{"ruleNumber":1,"ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
