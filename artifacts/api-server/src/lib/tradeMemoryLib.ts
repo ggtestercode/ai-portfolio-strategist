@@ -986,15 +986,15 @@ async function updatePendingOverrides(symbol: string, pnlPct: number): Promise<v
   }
 }
 
-export async function generateTradingRules(): Promise<void> {
-  // Only generate if 20+ new closed trades since last generation
+export async function generateTradingRules(force = false): Promise<void> {
+  // Only generate if 20+ new closed trades since last generation (bypassed by force)
   const lastGenDate = await getLastRuleGenerationDate();
   const newTrades   = await db.select({ id: tradeLogTable.id })
     .from(tradeLogTable)
     .where(and(isNotNull(tradeLogTable.exitAt), gt(tradeLogTable.exitAt, lastGenDate)))
     .catch(() => [] as Array<{ id: string }>);
 
-  if (newTrades.length < 20) {
+  if (!force && newTrades.length < 20) {
     console.log(`[rules] Only ${newTrades.length}/20 new trades since last generation — skipping`);
     return;
   }
@@ -1113,15 +1113,22 @@ export async function generateTradingRules(): Promise<void> {
     fallback: { rules: [], patternsFound: "" },
   });
 
-  let generated = 0;
-  for (const rule of res.data.rules) {
+  const validRules = res.data.rules.filter(rule => {
     if (rule.occurrences < 3) {
       console.log(`[rules] Rule ${rule.ruleNumber} insufficient evidence (${rule.occurrences}<3) — skipped`);
-      continue;
+      return false;
     }
     if (rule.contradictsFundamentals) {
       console.log(`[rules] Rule ${rule.ruleNumber} flags fundamentals contradiction: ${rule.flagNote ?? "unspecified"}`);
     }
+    return true;
+  });
+
+  // Delete all existing rules then insert fresh — no ghost entries from prior generations
+  await db.delete(tradingRulesTable).catch(e => console.error("[rules] Delete existing rules:", e));
+
+  let generated = 0;
+  for (const rule of validRules) {
     await db.insert(tradingRulesTable)
       .values({
         ruleNumber:      rule.ruleNumber,
@@ -1136,19 +1143,7 @@ export async function generateTradingRules(): Promise<void> {
         createdAt:       new Date(),
         updatedAt:       new Date(),
       })
-      .onConflictDoUpdate({
-        target: tradingRulesTable.ruleNumber,
-        set: {
-          ruleText:    rule.ruleText,
-          evidence:    rule.evidence,
-          causalLogic: rule.causalLogic,
-          confidence:  rule.confidence,
-          occurrences: rule.occurrences,
-          active:      true,
-          updatedAt:   new Date(),
-        },
-      })
-      .catch(e => console.error(`[rules] Upsert rule ${rule.ruleNumber}:`, e));
+      .catch(e => console.error(`[rules] Insert rule ${rule.ruleNumber}:`, e));
     generated++;
     console.log(`[rules] Rule ${rule.ruleNumber} [${rule.confidence}]: ${rule.ruleText.slice(0, 80)}`);
   }

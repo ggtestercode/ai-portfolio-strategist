@@ -1814,7 +1814,7 @@ export function startPolling(): void {
     const chatId = String(msg.chat.id);
     try {
       await b.sendMessage(chatId, `⏳ Generating rules from reflections…`);
-      await generateTradingRules();
+      await generateTradingRules(true);
       const rules = await getActiveRules();
       await b.sendMessage(chatId, rules.length
         ? `✅ Rule generation complete — ${rules.length} rules active. Use /rules to view.`
