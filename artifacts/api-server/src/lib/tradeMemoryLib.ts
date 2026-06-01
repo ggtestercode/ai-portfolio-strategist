@@ -1077,7 +1077,7 @@ export async function generateTradingRules(): Promise<void> {
   ).join("\n");
 
   const prompt = [
-    `Analyse trade reflections and generate exactly 8 actionable trading rules.`,
+    `Analyse trade reflections and generate between 5 and 15 actionable trading rules — as many as the evidence supports with minimum 3 trade occurrences each. Do not invent rules to fill a quota.`,
     ``,
     verdictAggregates,
     ``,
