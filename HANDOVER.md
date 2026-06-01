@@ -568,6 +568,21 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 
 ---
 
+## 8. Fixes Deployed June 2, 2026
+
+### Pending limit orders visible in Phase 2 scan prompt (commit `6843be7`)
+
+- **Root cause:** When a limit order was placed but not yet filled, it didn't appear in `bybitGetPositions()`. Claude saw 0 positions for that symbol at the next scan and generated a duplicate signal — exact cause of the double XRP short (12:01 limit at $1.306 + 16:01 market entry at $1.285 both open simultaneously).
+- **`getOrders()` in `bybit.ts`:** Added `orderFilter=Order` param to exclude conditional SL/TP orders from the Bybit response. Added `price > 0` filter to further exclude any market/conditional orders that return `price=0`.
+- **`cancelStaleOrders()` in `cronScanner.ts`:** Now returns `{ cancelled, active }`. `active` = non-stale limit orders still waiting for fill. Previously returned only the cancelled array.
+- **`runPhase2()` in `marketScanner.ts`:** Fetches open orders once before the per-symbol data loop, builds a `pendingMap` keyed by symbol. Per-symbol: if a pending order exists, injects one line into `pendingLines`:
+  `XRPUSDT Pending: SELL limit $1.306 qty=38 placed 4h ago — unfilled`
+  Prompt section: `Pending limit orders (unfilled — consider cancel/hold/skip)`.
+- **Claude sees this and decides:** cancel and re-enter at current price / keep waiting / skip because pending order already covers the symbol.
+- **Token cost:** ~15 tokens per pending order per scan. At 0–1 pending orders typical: <$0.01/month.
+
+---
+
 ## 8. Fixes Deployed June 1, 2026
 
 ### deploy.sh — git push + commit-hash verification (commit `d1e0a8d`)
