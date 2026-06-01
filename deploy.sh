@@ -3,47 +3,42 @@ set -e
 
 echo "🚀 Deploying to Vultr..."
 
-ssh root@139.180.215.150 << 'EOF'
+echo "📤 Pushing to remote..."
+git push origin main
+
+LOCAL_COMMIT=$(git rev-parse HEAD)
+echo "📌 Local HEAD: $LOCAL_COMMIT"
+
+ssh root@139.180.215.150 << EOF
 set -e
 ROOT=/root/ai-portfolio-strategist
-cd $ROOT
+cd \$ROOT
 
 echo "📥 Pulling latest..."
 git pull origin main
 
 echo "🗄️  Syncing DB schema..."
-set -a && source $ROOT/.env && set +a
-cd $ROOT/lib/db && npx drizzle-kit push --config ./drizzle.config.ts
+set -a && source \$ROOT/.env && set +a
+cd \$ROOT/lib/db && npx drizzle-kit push --config ./drizzle.config.ts
 
 echo "🔨 Building API..."
-cd $ROOT/artifacts/api-server && pnpm build
+cd \$ROOT/artifacts/api-server && pnpm build
 
 echo "🔨 Building frontend..."
-cd $ROOT/artifacts/portfolio-strategist && PORT=4173 BASE_PATH=/ pnpm build
+cd \$ROOT/artifacts/portfolio-strategist && PORT=4173 BASE_PATH=/ pnpm build
 
 echo "♻️  Restarting PM2..."
-cd $ROOT && pm2 restart all
+cd \$ROOT && pm2 restart all
 pm2 status
 
-echo "🔍 Verifying binary freshness..."
-DIST_FILE="$ROOT/artifacts/api-server/dist/index.mjs"
-DIST_MTIME=$(stat -c %Y "$DIST_FILE")
-NOW=$(date +%s)
-AGE=$((NOW - DIST_MTIME))
-if [ $AGE -gt 120 ]; then
-  echo "⚠️  Binary is ${AGE}s old — stale! Re-running build..."
-  cd $ROOT/artifacts/api-server && pnpm build
-  cd $ROOT && pm2 restart all
-  DIST_MTIME=$(stat -c %Y "$DIST_FILE")
-  NOW=$(date +%s)
-  AGE=$((NOW - DIST_MTIME))
-  if [ $AGE -gt 120 ]; then
-    echo "❌ Build verification FAILED after retry — binary still ${AGE}s old"
-    exit 1
-  fi
-  echo "✅ Binary verified fresh after retry (${AGE}s old)"
-else
-  echo "✅ Binary fresh (${AGE}s old)"
+echo "🔍 Verifying commit match..."
+SERVER_COMMIT=\$(git -C \$ROOT rev-parse HEAD)
+echo "📌 Server HEAD: \$SERVER_COMMIT"
+if [ "\$SERVER_COMMIT" != "$LOCAL_COMMIT" ]; then
+  echo "❌ COMMIT MISMATCH — local: $LOCAL_COMMIT | server: \$SERVER_COMMIT"
+  echo "❌ Deploy FAILED — server is not running the expected code"
+  exit 1
 fi
+echo "✅ Commit verified: \$SERVER_COMMIT"
 echo "✅ Deploy complete"
 EOF
