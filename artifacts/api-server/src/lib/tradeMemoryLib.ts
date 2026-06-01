@@ -1105,13 +1105,40 @@ export async function generateTradingRules(force = false): Promise<void> {
     patternsFound: string;
   };
 
-  const res = await llm.json<RuleGenResult>({
+  const isRateLimitErr = (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    return msg.includes("429") || msg.includes("rate_limit") || msg.includes("rate limit") || msg.includes("usage limits");
+  };
+
+  const callLlm = () => llm.json<RuleGenResult>({
     taskType:      "rule_generation",
     systemContext: "You are a trading performance analyst. Generate evidence-based rules from trade data. Reply JSON only.",
     prompt,
     schema: { type: "object", properties: { rules: { type: "array" }, patternsFound: { type: "string" } }, required: ["rules"] },
     fallback: { rules: [], patternsFound: "" },
   });
+
+  let res: Awaited<ReturnType<typeof callLlm>>;
+  try {
+    res = await callLlm();
+  } catch (err) {
+    if (isRateLimitErr(err)) {
+      console.warn("[rules] Rate limit hit — waiting 60s then retrying");
+      await new Promise(r => setTimeout(r, 60_000));
+      try {
+        res = await callLlm();
+      } catch (retryErr) {
+        const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        await _ruleAlertFn?.("⚠️ Rule generation rate-limited — try again in a few minutes").catch(() => {});
+        console.error("[rules] Retry also failed:", msg);
+        return;
+      }
+    } else {
+      throw err;
+    }
+  }
+
+  console.log(`[rules] Raw response: ${res.text}`);
 
   const validRules = res.data.rules.filter(rule => {
     if (rule.occurrences < 3) {
