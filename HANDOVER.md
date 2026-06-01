@@ -607,11 +607,15 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 - Software TP2 check (`checkPartialExits`) also runs at TP2 price but exchange wins the race every tick.
 - All current open positions show `tpslMode: Full` in Bybit live data.
 
-**Deferred — `tp1ClosePercent` / `tp2ClosePercent` optional scan fields:**
-- Schema fields not yet implemented. When added, Claude will specify what percentage to close at each level.
-- `tp1ClosePercent` (default 30): controls `setTp1Partial()` qty.
-- `tp2ClosePercent` (default 100): controls whether exchange TP2 is Full-mode (closes all remaining) or Partial (closes N% of position). For <100, Full-mode TP should NOT be set on order body; set as Partial via `trading-stop` after fill instead.
-- Until implemented, behavior is 30% at TP1 + 100% of remaining at TP2.
+**Implemented — `tp1ClosePercent` / `tp2ClosePercent` optional scan fields (commit `68400c7`):**
+- Claude outputs these per signal. Both optional — omit to use defaults (30 / 100). Default behavior unchanged.
+- `tp1ClosePercent` (default 30): passed to `setTp1Partial()` as `posQty × pct%`. Replaces hardcoded 30%.
+- `tp2ClosePercent` (default 100): controls exchange TP2 mode:
+  - **= 100**: Full-mode TP on order body — closes 100% of remaining at TP2. Current behavior.
+  - **< 100**: Full-mode TP NOT set on order body. New `setTp2Partial()` called after fill via `trading-stop` with `tpslMode=Partial, tpSize=qty×pct%`. Remainder trails via Claude `NEW_SL` ratchet.
+- Software TP2 check now uses `pm.tp2ClosePercent ?? 100` instead of hardcoded 30%-of-original.
+- Both percentages stored in `positionMeta` and `pendingLimitFills` — survive PM2 restarts.
+- `recoverPendingLimitFills()` passes stored percentages to both `setTp1Partial` and `setTp2Partial` on recovery.
 
 ---
 
@@ -633,7 +637,6 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 ## 9. Active Bugs & Open Issues
 
 ### Pending (not yet implemented)
-- **`tp1ClosePercent` / `tp2ClosePercent` scan fields** — optional fields for Claude to control exit sizing per trade. `tp1ClosePercent` (default 30) sets partial qty in `setTp1Partial`. `tp2ClosePercent` (default 100) controls Full-mode vs Partial TP2 on exchange. See TP exit structure section above for full context.
 - **Scan to 30min** — currently 4h for testing stability; restore when balance >$50 and stable
 
 ### Known Constraints
