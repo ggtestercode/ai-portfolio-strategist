@@ -1004,7 +1004,6 @@ export async function generateTradingRules(): Promise<void> {
       .from(tradeMemoryTable)
       .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
       .orderBy(desc(tradeMemoryTable.createdAt))
-      .limit(60)
       .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]),
     getActiveRules(),
   ]);
@@ -1014,23 +1013,7 @@ export async function generateTradingRules(): Promise<void> {
     return;
   }
 
-  // Separate execution failures from strategy failures
-  const strategyReflections = reflections.filter(r =>
-    !r.failureType || r.failureType === "strategy" || r.failureType === "success" || r.failureType === "mixed"
-  );
-  const executionOnlyFailures = reflections.filter(r => r.failureType === "execution");
 
-  // Summarise execution failures
-  const allExecIssues: string[] = [];
-  for (const r of executionOnlyFailures) {
-    if (Array.isArray(r.executionIssues)) allExecIssues.push(...(r.executionIssues as string[]));
-  }
-  const execIssueCounts: Record<string, number> = {};
-  for (const issue of allExecIssues) execIssueCounts[issue] = (execIssueCounts[issue] ?? 0) + 1;
-  const execSummary = Object.entries(execIssueCounts)
-    .sort((a,b) => b[1]-a[1])
-    .map(([issue, count]) => `  - ${issue}: ${count}x`)
-    .join("\n") || "  none";
 
   // Verdict aggregates from batch-5 fields (computed over all reflections, not just strategy)
   const N = reflections.length;
@@ -1069,7 +1052,7 @@ export async function generateTradingRules(): Promise<void> {
     `- Most common failure type: ${topFailureType}`,
   ].join("\n");
 
-  const reflStr = strategyReflections.map(r => {
+  const reflStr = reflections.map(r => {
     const pct = parseFloat(r.pnlPct ?? "0");
     const slVerdict = r.slTooTight ? "too_tight" : r.slTooWide ? "too_wide" : null;
     return [
@@ -1095,10 +1078,6 @@ export async function generateTradingRules(): Promise<void> {
   const prompt = [
     `Analyse trade reflections and generate exactly 5 actionable trading rules.`,
     ``,
-    `Execution-only failures excluded from rule generation (${executionOnlyFailures.length} trades):`,
-    execSummary,
-    `These need code fixes, not strategy rules.`,
-    ``,
     verdictAggregates,
     ``,
     `Rules derived from VERDICT AGGREGATES must be specific and quantified.`,
@@ -1107,7 +1086,7 @@ export async function generateTradingRules(): Promise<void> {
     `Good: "TP1 too_ambitious in 8/12 trades — set TP1 at 1.0× ATR not 2.0×"`,
     `Bad:  "Be more realistic with TP targets"`,
     ``,
-    `Analyse ONLY the ${strategyReflections.length} strategy/mixed/success entries below for rule generation:`,
+    `Analyse ALL ${reflections.length} trade reflections below for rule generation:`,
     ``,
     `Requirements per rule:`,
     `- Minimum 3 trade occurrences as evidence`,
@@ -1116,7 +1095,7 @@ export async function generateTradingRules(): Promise<void> {
     `- Flag if rule contradicts market fundamentals`,
     `- Confidence: HIGH (5+ occurrences) | MEDIUM (3-4) | LOW (<3)`,
     ``,
-    `Trade reflections (${strategyReflections.length} trades):`,
+    `Trade reflections (${reflections.length} trades):`,
     reflStr,
     ``,
     existingRules.length ? `Current active rules:\n${existingStr}` : "No existing rules.",
