@@ -588,6 +588,33 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 
 ---
 
+### pendingLimitFills persistence — survives PM2 restarts (commit `1ef2339`)
+
+- **Root cause:** `pendingLimitFills` was an in-memory Map that cleared on every PM2 restart. Limit orders placed before a restart lost their TP1 partial setup permanently. The Full-mode TP on the order body (at TP2 price) remained, so when price hit TP1, the exchange closed 100% of the position instead of 30%.
+- **Fix:** `pendingLimitFills` now persists to `bot_state.pending_limit_fills` (new jsonb column, `PendingLimitFill` interface in schema).
+- `persistPendingLimitFillsToDB()` — writes entire map to DB after any mutation.
+- `removePendingLimitFill(symbol)` — exported; deletes from map + DB. Used by both fill detection and stale order cancellation in `cronScanner.ts`.
+- `recoverPendingLimitFills()` — runs on every startup: reads DB, re-populates map, calls `setTp1Partial` for any symbol with a live position where `tp1Executed=false`. Symbols with no live position (filled+closed or cancelled) are pruned from DB.
+
+---
+
+### TP exit structure — investigation findings + deferred work
+
+**Confirmed behavior (June 1 investigation):**
+- At open: exchange receives Full-mode TP at **TP2 price** (from `opts.takeProfit` on order body) + Partial TP at TP1 for 30% (from `setTp1Partial`).
+- After TP1 partial fires (30% closed): Full-mode TP at TP2 **remains active and closes 100% of remaining 70%**.
+- Effective exit structure is **30% at TP1 + 70% at TP2** — the intended 3-tranche (30/30/trail) never executes because the Full-mode TP sweeps all remaining at TP2.
+- Software TP2 check (`checkPartialExits`) also runs at TP2 price but exchange wins the race every tick.
+- All current open positions show `tpslMode: Full` in Bybit live data.
+
+**Deferred — `tp1ClosePercent` / `tp2ClosePercent` optional scan fields:**
+- Schema fields not yet implemented. When added, Claude will specify what percentage to close at each level.
+- `tp1ClosePercent` (default 30): controls `setTp1Partial()` qty.
+- `tp2ClosePercent` (default 100): controls whether exchange TP2 is Full-mode (closes all remaining) or Partial (closes N% of position). For <100, Full-mode TP should NOT be set on order body; set as Partial via `trading-stop` after fill instead.
+- Until implemented, behavior is 30% at TP1 + 100% of remaining at TP2.
+
+---
+
 ### generateTradingRules — full reflection coverage + force bypass (commits `d40210a`–`be9e4c7`)
 
 - **Removed `LIMIT 60`** — generator now fetches all TRADE_CLOSE rows (was capping at 60, then filtering to ~37 strategy-only).
@@ -606,12 +633,11 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 ## 9. Active Bugs & Open Issues
 
 ### Pending (not yet implemented)
-- **Hard gate for SL/TP** — code enforcement (not just a rule) to reject any signal without SL, TP, and setupType. Agreed but not deployed. Rule 1 covers this as a soft constraint only.
+- **`tp1ClosePercent` / `tp2ClosePercent` scan fields** — optional fields for Claude to control exit sizing per trade. `tp1ClosePercent` (default 30) sets partial qty in `setTp1Partial`. `tp2ClosePercent` (default 100) controls Full-mode vs Partial TP2 on exchange. See TP exit structure section above for full context.
 - **Scan to 30min** — currently 4h for testing stability; restore when balance >$50 and stable
-- **Trailing SL** — ✅ Claude-driven ratchet SL deployed (`ae059fc`); no longer hardcoded
 
 ### Known Constraints
-- Neon DB at 97.76/100 CU-hrs — resets June 1; subscribe if it hits limit before then (~$3-5)
+- Neon DB reset June 1 ✅ — CU-hrs back to 0; full operation resumed
 - Version B paper balance: ~$26-40 — do not reset
 - HYPE and NEAR positions have no structural SL anchor above liquidation — slippage through SL cascades to liquidation
 
