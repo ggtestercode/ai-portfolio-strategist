@@ -22,6 +22,15 @@ import { eq, isNull }              from "drizzle-orm";
 
 export let okxPaperMode = false;
 
+export const pendingLimitFills = new Map<string, {
+  sl?:         number;
+  tp1?:        number;
+  tp2?:        number;
+  direction:   "long" | "short";
+  qty:         number;
+  positionIdx: number;
+}>();
+
 // ── ATR (Wilder's smoothing) ──────────────────────────────────────────────────
 function calcATR(klines: BybitKline[], period = 14): number {
   if (klines.length < period + 1) return 0;
@@ -179,22 +188,34 @@ export async function initBrokers(): Promise<void> {
       limitPrice: limitPrice,
     });
 
-    // Set ATR-based SL/TP only when Claude didn't provide valid levels
-    if (!sl || !tp) {
-      console.log(`[startup] ${p.symbol} missing Claude SL/TP — applying ATR fallback`);
-      applyAtrSlTp(p.symbol, isShort ? "short" : "long", result.entryPrice, result.positionIdx, result.qty)
-        .catch(e2 => console.warn(`[startup] applyAtrSlTp ${p.symbol}:`, e2.message));
+    if (result.isLimitOrder) {
+      // Position doesn't exist yet — defer SL/TP and metadata to fill detection in posMonitor
+      pendingLimitFills.set(p.symbol, {
+        sl:          sl,
+        tp1:         tp1 ?? undefined,
+        tp2:         tp ?? undefined,
+        direction:   isShort ? "short" : "long",
+        qty:         result.qty,
+        positionIdx: result.positionIdx,
+      });
+      console.log(`[startup] ${p.symbol} limit order pending — SL/TP deferred to fill detection`);
     } else {
-      // Claude provided SL/TP — store metadata so /positions can display them
-      storePositionMeta(p.symbol, {
-        originalQty: result.qty,
-        entryPrice:  result.entryPrice,
-        sl,
-        tp1: tp1 ?? tp,
-        tp2: tp,
-        atr:         0,
-        openedAt:    Date.now(),
-      }).catch(e => console.warn(`[startup] storePositionMeta ${p.symbol}:`, e.message));
+      // Market order — position exists, apply SL/TP immediately
+      if (!sl || !tp) {
+        console.log(`[startup] ${p.symbol} missing Claude SL/TP — applying ATR fallback`);
+        applyAtrSlTp(p.symbol, isShort ? "short" : "long", result.entryPrice, result.positionIdx, result.qty)
+          .catch(e2 => console.warn(`[startup] applyAtrSlTp ${p.symbol}:`, e2.message));
+      } else {
+        storePositionMeta(p.symbol, {
+          originalQty: result.qty,
+          entryPrice:  result.entryPrice,
+          sl,
+          tp1: tp1 ?? tp,
+          tp2: tp,
+          atr:         0,
+          openedAt:    Date.now(),
+        }).catch(e => console.warn(`[startup] storePositionMeta ${p.symbol}:`, e.message));
+      }
     }
 
     return { orderId: result.orderId };

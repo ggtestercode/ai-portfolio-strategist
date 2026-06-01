@@ -205,13 +205,41 @@ export async function setLeverage(symbol: string, leverage: number): Promise<voi
     .catch(e => { if (!e.message.includes("110043")) throw e; }); // 110043 = leverage not modified
 }
 
+export async function setTp1Partial(symbol: string, tp1Price: number, positionIdx: number, posQty: number): Promise<boolean> {
+  const sym     = normalise(symbol);
+  const filters = await getInstrumentFilters(sym).catch(() => null);
+  if (!filters) return false;
+  const tickDp    = String(filters.tickSize).split(".")[1]?.length ?? 2;
+  const tp1Str    = (Math.round(tp1Price / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+  const tp1Qty    = Math.floor(posQty * 0.30 / filters.qtyStep) * filters.qtyStep;
+  const tp1QtyStr = Math.max(tp1Qty, filters.minQty).toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+  let tp1Set = false;
+  for (let attempt = 1; attempt <= 3 && !tp1Set; attempt++) {
+    try {
+      await bpost("/v5/position/trading-stop", {
+        category: "linear", symbol: sym,
+        takeProfit: tp1Str, tpSize: tp1QtyStr,
+        tpTriggerBy: "LastPrice", tpslMode: "Partial",
+        positionIdx,
+      });
+      tp1Set = true;
+      console.log(`[Bybit] TP1 partial set ${sym}: 30% (${tp1QtyStr}) at $${tp1Str}`);
+    } catch (e) {
+      console.warn(`[Bybit] TP1 partial set ${sym} attempt ${attempt}/3:`, (e as Error).message);
+      if (attempt < 3) await new Promise(res => setTimeout(res, 1000));
+    }
+  }
+  if (!tp1Set) console.error(`[Bybit] TP1 exchange order NOT set for ${sym} — software polling is the only fallback`);
+  return tp1Set;
+}
+
 export async function openPosition(
   symbol: string,
   side: "Buy" | "Sell",
   amountUsd: number,
   leverage = 10,
   opts?: { stopLoss?: number; takeProfit?: number; tp1?: number; limitPrice?: number },
-): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number }> {
+): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number; isLimitOrder: boolean }> {
   // ── Leverage cap ─────────────────────────────────────────────────────────
   const MAX_LEVERAGE = 10;
   if (leverage > MAX_LEVERAGE) {
@@ -315,68 +343,14 @@ export async function openPosition(
     console.log(`[Bybit] Market ${side} ${sym} qty=${finalQtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} ${reason}SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} TP1=${opts?.tp1 ?? "none"} → orderId=${r.orderId}`);
   }
 
-  // Set TP1 as exchange partial TP (30% of position) after order fills
-  if (opts?.tp1 && opts.tp1 > 0) {
-    const tp1Str    = (Math.round(opts.tp1 / filters.tickSize) * filters.tickSize).toFixed(tickDp);
-    const tp1Qty    = (Math.floor(qty * 0.30 / filters.qtyStep) * filters.qtyStep);
-    const tp1QtyStr = Math.max(tp1Qty, filters.minQty).toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
-
-    // Wait for position to settle on Bybit before setting partial TP
-    await new Promise(res => setTimeout(res, 600));
-
-    let tp1Set = false;
-    for (let attempt = 1; attempt <= 3 && !tp1Set; attempt++) {
-      try {
-        await bpost("/v5/position/trading-stop", {
-          category: "linear", symbol: sym,
-          takeProfit: tp1Str, tpSize: tp1QtyStr,
-          tpTriggerBy: "LastPrice", tpslMode: "Partial",
-          positionIdx,
-        });
-        tp1Set = true;
-        console.log(`[Bybit] TP1 partial set ${sym}: 30% (${tp1QtyStr}) at $${tp1Str}`);
-      } catch (e) {
-        console.warn(`[Bybit] TP1 partial set ${sym} attempt ${attempt}/3:`, (e as Error).message);
-        if (attempt < 3) await new Promise(res => setTimeout(res, 1000));
-      }
-    }
-
-    // Verify TP1 partial order was accepted — query TP/SL orders separately from Full-mode position TP.
-    // NOTE: livePos.takeProfit shows the Full-mode TP (TP2), not the TP1 partial order.
-    if (tp1Set) {
-      try {
-        // 2s propagation delay — Bybit indexes the new order after the POST returns
-        await new Promise(res => setTimeout(res, 2000));
-        // Check TP/SL conditional orders for this symbol — TP1 partial appears here, not in position.takeProfit
-        type TpslOrder = { triggerPrice: string; qty: string; reduceOnly: boolean };
-        const tpslRes = await get<{ list: TpslOrder[] }>(
-          "/v5/order/realtime", { category: "linear", symbol: sym, orderFilter: "tpslOrder" }
-        ).catch(() => ({ list: [] as TpslOrder[] }));
-        const tp1Order = tpslRes.list.find(o =>
-          Math.abs(parseFloat(o.triggerPrice) / parseFloat(tp1Str) - 1) < 0.005
-        );
-        if (tp1Order) {
-          console.log(`[Bybit] TP1 partial verified on exchange ${sym}: qty=${tp1Order.qty} at $${tp1Order.triggerPrice} (partial TP order)`);
-        } else {
-          console.warn(`[Bybit] TP1 partial order not found in exchange orders for ${sym} — software polling is fallback`);
-          tp1Set = false;
-        }
-        // Separately log the Full-mode position TP (TP2) to distinguish the two
-        const livePos = (await getPositions()).find(p => p.symbol === sym && p.positionIdx === positionIdx);
-        if (livePos?.takeProfit) {
-          console.log(`[Bybit] Position Full-mode TP (TP2) ${sym}: $${livePos.takeProfit}`);
-        }
-      } catch (e) {
-        console.warn(`[Bybit] TP1 verification check ${sym}:`, (e as Error).message);
-      }
-    }
-
-    if (!tp1Set) {
-      console.error(`[Bybit] TP1 exchange order NOT set for ${sym} — software polling is the only fallback`);
-    }
+  // For market orders only: set TP1 partial immediately (position exists).
+  // Limit orders defer TP1 to posMonitor fill detection — position doesn't exist yet.
+  if (!useLimit && opts?.tp1 && opts.tp1 > 0) {
+    await new Promise(res => setTimeout(res, 600)); // let position settle
+    await setTp1Partial(sym, opts.tp1, positionIdx, qty);
   }
 
-  return { orderId: r.orderId, entryPrice: useLimit ? execPrice! : markPrice, positionIdx, qty: useLimit ? limitQty : qty };
+  return { orderId: r.orderId, entryPrice: useLimit ? execPrice! : markPrice, positionIdx, qty: useLimit ? limitQty : qty, isLimitOrder: !!useLimit };
 }
 
 export async function closePosition(symbol: string): Promise<{ orderId: string; entryPrice: number; size: number; side: "Buy" | "Sell" }> {

@@ -3,7 +3,7 @@ import { runScan, runFocusedScan, type ScanResult, type ScanOpportunity, calcATR
 import { runPaperScan, runMode3PaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
-import { applyAtrSlTp }               from "./startup";
+import { applyAtrSlTp, pendingLimitFills } from "./startup";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
 import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose, getActiveRules } from "./tradeMemoryLib";
@@ -13,6 +13,7 @@ import {
   closePosition   as bybitClose,
   cancelOrder     as bybitCancelOrder,
   getOrders       as bybitGetOrders,
+  setTp1Partial   as bybitSetTp1Partial,
   closePercentPosition,
   setStopLoss     as bybitSetStopLoss,
   setTrailingStop,
@@ -366,23 +367,33 @@ async function applyHardFilters(
 }
 
 // ── Layer 5: Stale order cancellation ────────────────────────────────────────
-async function cancelStaleOrders(): Promise<void> {
+async function cancelStaleOrders(): Promise<Array<{ symbol: string; price: number }>> {
+  const cancelled: Array<{ symbol: string; price: number }> = [];
   try {
-    const orders = await bybitGetOrders();
-    const tenMinAgo = Date.now() - 10 * 60 * 1000;
+    const orders   = await bybitGetOrders();
+    const fourHAgo = Date.now() - 4 * 60 * 60 * 1000;
     for (const order of orders) {
       const placedAt = new Date(order.placedAt).getTime();
-      if (placedAt < tenMinAgo) {
+      if (placedAt < fourHAgo) {
         await bybitCancelOrder(order.symbol, order.orderId).catch(e =>
           console.warn(`[cronScanner] Cancel order ${order.orderId} failed:`, e.message)
         );
-        await alertFn?.(`❌ Stale order cancelled — ${order.symbol}\nLimit $${order.price} not filled after 10 min`).catch(() => {});
-        console.log(`[cronScanner] Cancelled stale order ${order.orderId} ${order.symbol}`);
+        // Void the trade_log entry — no position was ever opened, no reflection needed
+        await db.update(tradeLogTable)
+          .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
+          .where(and(eq(tradeLogTable.symbol, order.symbol), isNull(tradeLogTable.exitAt)))
+          .catch(() => {});
+        pendingLimitFills.delete(order.symbol);
+        await clearPositionMeta(order.symbol).catch(() => {});
+        await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 4h, re-evaluating`).catch(() => {});
+        console.log(`[cronScanner] Cancelled stale 4h order ${order.orderId} ${order.symbol}`);
+        cancelled.push({ symbol: order.symbol, price: order.price });
       }
     }
   } catch (e) {
     console.warn("[cronScanner] staleOrderCheck failed:", (e as Error).message);
   }
+  return cancelled;
 }
 
 // ── Layer 5: 48h hold timer → Claude review ──────────────────────────────────
@@ -1900,6 +1911,36 @@ async function checkPositionMonitor(): Promise<void> {
       }
     }
   }
+  // ── Limit order fill detection ────────────────────────────────────────────
+  // Detect symbols that just appeared as positions (limit order filled since last tick).
+  // Apply deferred SL/TP/metadata now that the position exists on Bybit.
+  for (const pos of positions) {
+    if (!prevPositionSymbols.has(pos.symbol) && pendingLimitFills.has(pos.symbol)) {
+      const pending = pendingLimitFills.get(pos.symbol)!;
+      pendingLimitFills.delete(pos.symbol);
+      console.log(`[posMonitor] Limit filled — ${pos.symbol} at $${pos.entryPrice.toFixed(4)}`);
+      await patchPositionMeta(pos.symbol, {
+        sl:          pending.sl,
+        tp1:         pending.tp1,
+        tp2:         pending.tp2,
+        originalQty: pos.size,
+        entryPrice:  pos.entryPrice,
+        openedAt:    Date.now(),
+      }).catch(() => {});
+      if (pending.tp1 && pending.tp1 > 0) {
+        await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size)
+          .catch(e => console.warn(`[posMonitor] TP1 on fill ${pos.symbol}:`, (e as Error).message));
+      }
+      await alertFn?.([
+        `✅ <b>Limit filled — ${pos.symbol} ${pending.direction.toUpperCase()}</b>`,
+        `Entry: $${pos.entryPrice.toFixed(4)}`,
+        pending.sl  ? `SL:  $${pending.sl.toFixed(4)}`  : null,
+        pending.tp1 ? `TP1: $${pending.tp1.toFixed(4)}` : null,
+        pending.tp2 ? `TP2: $${pending.tp2.toFixed(4)}` : null,
+      ].filter(Boolean).join("\n")).catch(() => {});
+    }
+  }
+
   prevPositionSymbols.clear();
   positions.forEach(p => prevPositionSymbols.add(p.symbol));
 
