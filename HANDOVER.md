@@ -441,6 +441,16 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 ## 7. Fixes Deployed May 29–31, 2026
 
+### Limit order lifecycle — 4h cancel + fill detection + deferred SL/TP (commit `d5ae947`)
+
+- **Stale limit orders cancelled after 4h** — `cancelStaleOrders()` threshold changed from 10 min → 4h. On cancellation: `trade_log` entry voided (`exitAt=now, pnl=0`, no LLM reflection), `pendingLimitFills` and `positionMeta` cleared. Symbol re-enters the scan naturally — `cancelStaleOrders()` runs before `runScan()` so the next Claude evaluation uses fresh market data. Telegram: `🚫 Limit order HYPE $71.50 cancelled — unfilled after 4h, re-evaluating`.
+
+- **TP1/SL set after fill confirmation** — `openPosition()` no longer calls `trading-stop` for limit orders (position doesn't exist yet; was failing with `10001: zero position`). SL/TP full-mode on the order body still activates automatically when Bybit fills. Startup executor adds symbol to `pendingLimitFills` (in-memory map, exported from startup.ts) instead of calling `applyAtrSlTp`/`storePositionMeta`. posMonitor detects fill by checking each position against `prevPositionSymbols` — if symbol is new AND in `pendingLimitFills`: patches metadata with correct `openedAt=Date.now()`, calls `setTp1Partial()` on exchange, sends Telegram. `setTp1Partial` extracted as an exported function in `bybit.ts` (used by both market orders and limit fill handler).
+
+- **Existing HYPE/BNB limit orders placed before this fix** — not in `pendingLimitFills` (map starts empty on restart). If they fill, Bybit applies SL/TP full-mode (set on order body); self-heal logic in posMonitor applies ATR SL/TP for missing metadata; TP1 partial may not be set but software polling in `checkPartialExits` handles TP1 as fallback.
+
+---
+
 ### posMonitor — recent exit context, auto-execute, reformatted P/L (commit `baab6f0`)
 
 - **Recent exit context in posMonitor** — before building the review prompt, queries `trade_memory` for the most recent `TRADE_CLOSE` record for the position's symbol in the last 24h. If found, injects a line like `Prior exit: INJUSDT sl_hit 8h ago at $6.542 (-2.1%)` into the position context block. Previously, Claude reviewing open positions had zero awareness of prior same-symbol losses — this was only injected in Phase 2 scan, not in posMonitor.
