@@ -2,7 +2,7 @@ import { llm }                      from "./llmRouter";
 import { cache, TTL, CacheKey }     from "./contextCache";
 import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
-import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, getOrderbook, getFundingHistory, type BybitKline, type BybitPosition } from "../brokers/bybit";
+import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, getOrderbook, getFundingHistory, getOrders as bybitGetOrders, type BybitKline, type BybitPosition } from "../brokers/bybit";
 import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
 import { db, profileTable }                  from "@workspace/db";
 import { sql }                               from "drizzle-orm";
@@ -448,6 +448,7 @@ async function runPhase2(
   const orderbookLines:  string[] = [];
   const fundingHistLines:string[] = [];
   const recentExitLines: string[] = [];
+  const pendingLines:    string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
 
@@ -491,6 +492,16 @@ async function runPhase2(
     console.warn("[scanner] Recent exits query failed:", String(e));
   }
 
+  // ── Pending limit orders — fetch once, inject per matching symbol ────────────
+  const pendingMap = new Map<string, { side: string; price: number; qty: number; hoursAgo: number }>();
+  try {
+    const openOrders = await bybitGetOrders().catch(() => []);
+    for (const o of openOrders) {
+      const hoursAgo = Math.round((Date.now() - new Date(o.placedAt).getTime()) / 3_600_000);
+      pendingMap.set(o.symbol, { side: o.side, price: o.price, qty: o.qty, hoursAgo });
+    }
+  } catch { /* skip — non-critical */ }
+
   await Promise.allSettled(selectedSymbols.map(async sym => {
     try {
       const [mtfResult, fr, oi, klines, ob, fundingHist] = await Promise.all([
@@ -521,6 +532,11 @@ async function runPhase2(
       const high50 = klines.length > 0 ? Math.max(...klines.map(k => k.high)) : 0;
       const low50  = klines.length > 0 ? Math.min(...klines.map(k => k.low))  : 0;
       squeezeMap.set(sym, detectSqueeze(fr.rate, price, high50, low50));
+      const pending = pendingMap.get(sym);
+      if (pending) {
+        const dir = pending.side === "Buy" ? "BUY" : "SELL";
+        pendingLines.push(`${sym} Pending: ${dir} limit $${pending.price} qty=${pending.qty} placed ${pending.hoursAgo}h ago — unfilled`);
+      }
     } catch { /* skip */ }
   }));
 
@@ -630,6 +646,7 @@ async function runPhase2(
     fundingHistLines.length? `Funding rate history (24 periods, oldest→newest):\n${fundingHistLines.join("\n")}\n`      : "",
     liqLines.length        ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
     recentExitLines.length ? `Recent exits (last 24h — context for re-entry decisions):\n${recentExitLines.join("\n")}\n` : "",
+    pendingLines.length    ? `Pending limit orders (unfilled — consider cancel/hold/skip):\n${pendingLines.join("\n")}\n` : "",
     rsContext ? `\n${rsContext}\n` : "",
     sweepContext   ? `\n${sweepContext}` : "",
     squeezeContext ? `\nSqueeze setups:\n${squeezeContext}` : "",

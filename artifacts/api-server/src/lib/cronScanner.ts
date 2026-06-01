@@ -368,8 +368,12 @@ async function applyHardFilters(
 }
 
 // ── Layer 5: Stale order cancellation ────────────────────────────────────────
-async function cancelStaleOrders(): Promise<Array<{ symbol: string; price: number }>> {
+async function cancelStaleOrders(): Promise<{
+  cancelled: Array<{ symbol: string; price: number }>;
+  active:    Array<{ symbol: string; side: string; price: number; qty: number; placedAt: string }>;
+}> {
   const cancelled: Array<{ symbol: string; price: number }> = [];
+  const active:    Array<{ symbol: string; side: string; price: number; qty: number; placedAt: string }> = [];
   try {
     const orders   = await bybitGetOrders();
     const fourHAgo = Date.now() - 4 * 60 * 60 * 1000;
@@ -389,12 +393,14 @@ async function cancelStaleOrders(): Promise<Array<{ symbol: string; price: numbe
         await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 4h, re-evaluating`).catch(() => {});
         console.log(`[cronScanner] Cancelled stale 4h order ${order.orderId} ${order.symbol}`);
         cancelled.push({ symbol: order.symbol, price: order.price });
+      } else {
+        active.push({ symbol: order.symbol, side: order.side, price: order.price, qty: order.qty, placedAt: order.placedAt });
       }
     }
   } catch (e) {
     console.warn("[cronScanner] staleOrderCheck failed:", (e as Error).message);
   }
-  return cancelled;
+  return { cancelled, active };
 }
 
 // ── Layer 5: 48h hold timer → Claude review ──────────────────────────────────

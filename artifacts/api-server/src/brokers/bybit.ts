@@ -156,9 +156,11 @@ export async function getPositions(): Promise<BybitPosition[]> {
 
 export async function getOrders(): Promise<BybitOrder[]> {
   const r = await get<{ list: Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string }> }>(
-    "/v5/order/realtime", { category: "linear" }
+    "/v5/order/realtime", { category: "linear", orderFilter: "Order" }
   ).catch(() => ({ list: [] as Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string }> }));
-  return r.list.map(o => ({ orderId: o.orderId, symbol: o.symbol, side: o.side, qty: parseFloat(o.qty), price: parseFloat(o.price), placedAt: new Date(parseInt(o.createdTime)).toISOString() }));
+  return r.list
+    .filter(o => parseFloat(o.price) > 0) // exclude market/conditional orders (price=0)
+    .map(o => ({ orderId: o.orderId, symbol: o.symbol, side: o.side, qty: parseFloat(o.qty), price: parseFloat(o.price), placedAt: new Date(parseInt(o.createdTime)).toISOString() }));
 }
 
 export async function cancelOrder(symbol: string, orderId: string): Promise<void> {
