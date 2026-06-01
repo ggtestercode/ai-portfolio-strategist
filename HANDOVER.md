@@ -449,6 +449,14 @@ Trade closed by posMonitor 4h review at $5.779 (one cent below TP2). Exchange Fu
 
 - **Existing HYPE/BNB limit orders placed before this fix** — not in `pendingLimitFills` (map starts empty on restart). If they fill, Bybit applies SL/TP full-mode (set on order body); self-heal logic in posMonitor applies ATR SL/TP for missing metadata; TP1 partial may not be set but software polling in `checkPartialExits` handles TP1 as fallback.
 
+**Post-investigation notes (live session):**
+
+- **LINK TP1 "miss" — directional loss, not execution gap.** LINK was a limit order (pre-fix). TP1 exchange set failed with `10001` as expected. Limit filled at $9.030, price immediately dropped to SL $8.95, closed $8.986. TP1 at $9.18 was never reachable — price never went up. Reflection label `late_entry` is a mislabel; outcome was a clean directional loss with correct SL behaviour.
+
+- **HYPE metadata collision — pre-d5ae947 artifact.** Two simultaneous HYPEUSDT positions: old (entry $65.953, TP2 $71.2) and new limit (entry $71.50, SL $69.8). Pre-fix `storePositionMeta` call on the new limit overwrote old HYPE's metadata in the shared `positionMetadata["HYPEUSDT"]` key. Startup `setSlTpForExistingPositions` detected old HYPE mark ~$69.3 vs stored SL $69.8 → "SL wrong side" → ATR reset → `34040: not modified`. d5ae947 fixes this: limit orders no longer call `storePositionMeta` at placement.
+
+- **Old HYPE closed WIN +7.84% at TP2 cleanly.** Exit $71.188 against TP2 $71.2. Reflection: `mistake=cut_winner_early`.
+
 ---
 
 ### posMonitor — recent exit context, auto-execute, reformatted P/L (commit `baab6f0`)
