@@ -1068,6 +1068,7 @@ export async function generateTradingRules(): Promise<void> {
       r.signalsThatFailed   ? `  Failed: ${r.signalsThatFailed}` : "",
       r.lessonsLearned      ? `  Lesson: ${r.lessonsLearned}` : "",
       r.nextTimeWouldDo     ? `  Next: ${r.nextTimeWouldDo}` : "",
+      r.failureType         ? `  Type: ${r.failureType}` : "",
     ].filter(Boolean).join("\n");
   }).join("\n---\n");
 
@@ -1076,7 +1077,7 @@ export async function generateTradingRules(): Promise<void> {
   ).join("\n");
 
   const prompt = [
-    `Analyse trade reflections and generate exactly 5 actionable trading rules.`,
+    `Analyse trade reflections and generate exactly 8 actionable trading rules.`,
     ``,
     verdictAggregates,
     ``,
