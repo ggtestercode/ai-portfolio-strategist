@@ -14,6 +14,7 @@ import {
   cancelOrder     as bybitCancelOrder,
   getOrders       as bybitGetOrders,
   setTp1Partial   as bybitSetTp1Partial,
+  setTp2Partial   as bybitSetTp2Partial,
   closePercentPosition,
   setStopLoss     as bybitSetStopLoss,
   setTrailingStop,
@@ -662,25 +663,25 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
       if (tp2Reached) {
         console.log(`[cronScanner] TP2 exit: ${pos.symbol} price=$${currentPrice.toFixed(4)} tp2=$${effectiveTp2}`);
         try {
-          // Close 30% of original qty (another 30%, total 60% out)
-          const qty30pctOfOrig = origQty * 0.30;
-          const closePctTp2 = Math.round((qty30pctOfOrig / pos.size) * 100);
-          await closePercentPosition(pos.symbol, closePctTp2);
+          const tp2Pct    = pm.tp2ClosePercent ?? 100;
+          await closePercentPosition(pos.symbol, tp2Pct);
           await patchPositionMeta(pos.symbol, { tp2Executed: true }).catch(() => {});
-          const banked        = pos.pnl * 0.30;
+          const closedQty     = +(pos.size * (tp2Pct / 100)).toFixed(4);
+          const banked        = pos.pnl * (tp2Pct / 100);
           const base2         = pos.symbol.replace(/USDT$/, "");
-          const remainQty2    = +(pos.size - qty30pctOfOrig).toFixed(4);
+          const remainQty2    = +(pos.size - closedQty).toFixed(4);
           const remainMargin2 = remainQty2 * pos.entryPrice / Math.max(pos.leverage, 1);
-          const dustLine2     = remainMargin2 < 1 ? `⚠️ Remaining margin < $1 — consider closing` : null;
+          const trailLine     = tp2Pct < 100 ? `Remaining: ${remainQty2} ${base2} ($${remainMargin2.toFixed(2)} margin) with trailing SL` : null;
+          const dustLine2     = remainMargin2 < 1 && tp2Pct < 100 ? `⚠️ Remaining margin < $1 — consider closing` : null;
           await alertFn?.([
             `💰 TP2 profit banked — ${pos.symbol}`,
-            `Closed: another 30% at ~$${currentPrice.toFixed(4)}`,
+            `Closed: ${tp2Pct}% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
-            `Remaining: ${remainQty2} ${base2} ($${remainMargin2.toFixed(2)} margin) with trailing SL`,
+            trailLine,
             dustLine2,
           ].filter(Boolean).join("\n")).catch(() => {});
           const pnlPctTp2 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
-          logPartialClose({ symbol: pos.symbol, partialType: "tp2", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp2, remainingPct: 40 }).catch(() => {});
+          logPartialClose({ symbol: pos.symbol, partialType: "tp2", closePct: tp2Pct, priceAtClose: currentPrice, pnlPct: pnlPctTp2, remainingPct: 100 - tp2Pct }).catch(() => {});
         } catch (e) {
           console.error(`[cronScanner] TP2 exit ${pos.symbol} failed:`, (e as Error).message);
         }
@@ -1385,9 +1386,11 @@ async function runWatchScan(): Promise<void> {
           score:           signal.score,
           currentPrice:    signal.price,
           dataTimestamp:   signal.dataTimestamp,
-          stopLossPrice:   signal.stopLoss,
-          takeProfitPrice: signal.tp2 ?? signal.takeProfit,
-          tp1Price:        signal.tp1,
+          stopLossPrice:    signal.stopLoss,
+          takeProfitPrice:  signal.tp2 ?? signal.takeProfit,
+          tp1Price:         signal.tp1,
+          tp1ClosePercent:  signal.tp1ClosePercent,
+          tp2ClosePercent:  signal.tp2ClosePercent,
         });
         const gateResult = await approvalGate.submit(proposal).catch(e => {
           console.error(`[watchScan] submit ${sym}:`, e);
@@ -1667,10 +1670,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         score:           opp.score,
         currentPrice:    opp.price,
         dataTimestamp:   opp.dataTimestamp,
-        stopLossPrice:   opp.stopLoss,
-        takeProfitPrice: opp.tp2 ?? opp.takeProfit,
-        tp1Price:        opp.tp1,
-        limitPrice:      opp.limitPrice ?? opp.entry,
+        stopLossPrice:    opp.stopLoss,
+        takeProfitPrice:  opp.tp2 ?? opp.takeProfit,
+        tp1Price:         opp.tp1,
+        limitPrice:       opp.limitPrice ?? opp.entry,
+        tp1ClosePercent:  opp.tp1ClosePercent,
+        tp2ClosePercent:  opp.tp2ClosePercent,
       });
       const gateResult = await approvalGate.submit(proposal).catch(e => {
         console.error(`[cronScanner] submit ${sym}:`, e);
@@ -1953,16 +1958,22 @@ async function checkPositionMonitor(): Promise<void> {
       await removePendingLimitFill(pos.symbol).catch(() => {});
       console.log(`[posMonitor] Limit filled — ${pos.symbol} at $${pos.entryPrice.toFixed(4)}`);
       await patchPositionMeta(pos.symbol, {
-        sl:          pending.sl,
-        tp1:         pending.tp1,
-        tp2:         pending.tp2,
-        originalQty: pos.size,
-        entryPrice:  pos.entryPrice,
-        openedAt:    Date.now(),
+        sl:              pending.sl,
+        tp1:             pending.tp1,
+        tp2:             pending.tp2,
+        originalQty:     pos.size,
+        entryPrice:      pos.entryPrice,
+        openedAt:        Date.now(),
+        tp1ClosePercent: pending.tp1ClosePercent,
+        tp2ClosePercent: pending.tp2ClosePercent,
       }).catch(() => {});
       if (pending.tp1 && pending.tp1 > 0) {
-        await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size)
+        await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size, pending.tp1ClosePercent)
           .catch(e => console.warn(`[posMonitor] TP1 on fill ${pos.symbol}:`, (e as Error).message));
+      }
+      if (pending.tp2 && pending.tp2 > 0 && (pending.tp2ClosePercent ?? 100) < 100) {
+        await bybitSetTp2Partial(pos.symbol, pending.tp2, pos.positionIdx, pos.size, pending.tp2ClosePercent)
+          .catch(e => console.warn(`[posMonitor] TP2 on fill ${pos.symbol}:`, (e as Error).message));
       }
       await alertFn?.([
         `✅ <b>Limit filled — ${pos.symbol} ${pending.direction.toUpperCase()}</b>`,

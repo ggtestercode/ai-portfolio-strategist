@@ -9,6 +9,7 @@ import {
   setTakeProfit   as bybitSetTakeProfit,
   getClosedPnl    as bybitGetClosedPnl,
   setTp1Partial   as bybitSetTp1Partial,
+  setTp2Partial   as bybitSetTp2Partial,
   getKlines,
   getTicker,
   type BybitKline,
@@ -167,9 +168,14 @@ async function recoverPendingLimitFills(): Promise<void> {
     toKeep[symbol] = fill;
     const tp1Executed = (posMeta[symbol]?.tp1Executed ?? false);
     if (!tp1Executed && fill.tp1 && fill.tp1 > 0) {
-      console.log(`[startup] Recovering TP1 partial for ${symbol} at $${fill.tp1}`);
-      await bybitSetTp1Partial(symbol, fill.tp1, fill.positionIdx, livePos.size)
+      console.log(`[startup] Recovering TP1 partial for ${symbol} at $${fill.tp1} (${fill.tp1ClosePercent ?? 30}%)`);
+      await bybitSetTp1Partial(symbol, fill.tp1, fill.positionIdx, livePos.size, fill.tp1ClosePercent)
         .catch(e => console.warn(`[startup] Recovery TP1 ${symbol}:`, (e as Error).message));
+    }
+    if (fill.tp2 && fill.tp2 > 0 && (fill.tp2ClosePercent ?? 100) < 100) {
+      console.log(`[startup] Recovering TP2 partial for ${symbol} at $${fill.tp2} (${fill.tp2ClosePercent}%)`);
+      await bybitSetTp2Partial(symbol, fill.tp2, fill.positionIdx, livePos.size, fill.tp2ClosePercent)
+        .catch(e => console.warn(`[startup] Recovery TP2 ${symbol}:`, (e as Error).message));
     }
   }
 
@@ -225,24 +231,30 @@ export async function initBrokers(): Promise<void> {
 
     console.log(`[startup] Opening position with SL/TP: ${p.symbol} ${bSide}`, { sl: sl ?? "none", tp: tp ?? "none" });
 
-    const tp1        = (p.tp1Price   && p.tp1Price   > 0) ? p.tp1Price   : undefined;
-    const limitPrice = (p.limitPrice && p.limitPrice > 0) ? p.limitPrice : undefined;
+    const tp1             = (p.tp1Price           && p.tp1Price   > 0) ? p.tp1Price   : undefined;
+    const limitPrice      = (p.limitPrice         && p.limitPrice > 0) ? p.limitPrice : undefined;
+    const tp1ClosePercent = p.tp1ClosePercent ?? undefined;
+    const tp2ClosePercent = p.tp2ClosePercent ?? undefined;
     const result = await bybitOpen(p.symbol, bSide, p.amountUsd * leverage, leverage, {
-      stopLoss:   sl,
-      takeProfit: tp,
-      tp1:        tp1,
-      limitPrice: limitPrice,
+      stopLoss:         sl,
+      takeProfit:       tp,
+      tp1:              tp1,
+      limitPrice:       limitPrice,
+      tp1ClosePercent,
+      tp2ClosePercent,
     });
 
     if (result.isLimitOrder) {
       // Position doesn't exist yet — defer SL/TP and metadata to fill detection in posMonitor
       const fillData: PendingLimitFill = {
-        sl:          sl,
-        tp1:         tp1 ?? undefined,
-        tp2:         tp ?? undefined,
-        direction:   isShort ? "short" : "long",
-        qty:         result.qty,
-        positionIdx: result.positionIdx,
+        sl:              sl,
+        tp1:             tp1 ?? undefined,
+        tp2:             tp ?? undefined,
+        direction:       isShort ? "short" : "long",
+        qty:             result.qty,
+        positionIdx:     result.positionIdx,
+        tp1ClosePercent,
+        tp2ClosePercent,
       };
       pendingLimitFills.set(p.symbol, fillData);
       persistPendingLimitFillsToDB().catch(() => {});
@@ -255,13 +267,15 @@ export async function initBrokers(): Promise<void> {
           .catch(e2 => console.warn(`[startup] applyAtrSlTp ${p.symbol}:`, e2.message));
       } else {
         storePositionMeta(p.symbol, {
-          originalQty: result.qty,
-          entryPrice:  result.entryPrice,
+          originalQty:     result.qty,
+          entryPrice:      result.entryPrice,
           sl,
-          tp1: tp1 ?? tp,
-          tp2: tp,
-          atr:         0,
-          openedAt:    Date.now(),
+          tp1:             tp1 ?? tp,
+          tp2:             tp,
+          atr:             0,
+          openedAt:        Date.now(),
+          tp1ClosePercent,
+          tp2ClosePercent,
         }).catch(e => console.warn(`[startup] storePositionMeta ${p.symbol}:`, e.message));
       }
     }

@@ -205,13 +205,13 @@ export async function setLeverage(symbol: string, leverage: number): Promise<voi
     .catch(e => { if (!e.message.includes("110043")) throw e; }); // 110043 = leverage not modified
 }
 
-export async function setTp1Partial(symbol: string, tp1Price: number, positionIdx: number, posQty: number): Promise<boolean> {
+export async function setTp1Partial(symbol: string, tp1Price: number, positionIdx: number, posQty: number, tp1ClosePercent = 30): Promise<boolean> {
   const sym     = normalise(symbol);
   const filters = await getInstrumentFilters(sym).catch(() => null);
   if (!filters) return false;
   const tickDp    = String(filters.tickSize).split(".")[1]?.length ?? 2;
   const tp1Str    = (Math.round(tp1Price / filters.tickSize) * filters.tickSize).toFixed(tickDp);
-  const tp1Qty    = Math.floor(posQty * 0.30 / filters.qtyStep) * filters.qtyStep;
+  const tp1Qty    = Math.floor(posQty * (tp1ClosePercent / 100) / filters.qtyStep) * filters.qtyStep;
   const tp1QtyStr = Math.max(tp1Qty, filters.minQty).toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
   let tp1Set = false;
   for (let attempt = 1; attempt <= 3 && !tp1Set; attempt++) {
@@ -233,12 +233,33 @@ export async function setTp1Partial(symbol: string, tp1Price: number, positionId
   return tp1Set;
 }
 
+export async function setTp2Partial(symbol: string, tp2Price: number, positionIdx: number, posQty: number, tp2ClosePercent = 100): Promise<void> {
+  const sym = normalise(symbol);
+  if (tp2ClosePercent >= 100) {
+    await setTakeProfit(sym, tp2Price, positionIdx);
+    return;
+  }
+  const filters = await getInstrumentFilters(sym).catch(() => null);
+  if (!filters) return;
+  const tickDp    = String(filters.tickSize).split(".")[1]?.length ?? 2;
+  const tp2Str    = (Math.round(tp2Price / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+  const tp2Qty    = Math.floor(posQty * (tp2ClosePercent / 100) / filters.qtyStep) * filters.qtyStep;
+  const tp2QtyStr = Math.max(tp2Qty, filters.minQty).toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+  await bpost("/v5/position/trading-stop", {
+    category: "linear", symbol: sym,
+    takeProfit: tp2Str, tpSize: tp2QtyStr,
+    tpTriggerBy: "LastPrice", tpslMode: "Partial",
+    positionIdx,
+  }).catch(e => console.warn(`[Bybit] TP2 partial set ${sym}:`, (e as Error).message));
+  console.log(`[Bybit] TP2 partial set ${sym}: ${tp2ClosePercent}% (${tp2QtyStr}) at $${tp2Str}`);
+}
+
 export async function openPosition(
   symbol: string,
   side: "Buy" | "Sell",
   amountUsd: number,
   leverage = 10,
-  opts?: { stopLoss?: number; takeProfit?: number; tp1?: number; limitPrice?: number },
+  opts?: { stopLoss?: number; takeProfit?: number; tp1?: number; limitPrice?: number; tp1ClosePercent?: number; tp2ClosePercent?: number },
 ): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number; isLimitOrder: boolean }> {
   // ── Leverage cap ─────────────────────────────────────────────────────────
   const MAX_LEVERAGE = 10;
@@ -332,8 +353,12 @@ export async function openPosition(
     reduceOnly: false, positionIdx,
     ...(useLimit ? { price: limitPxStr } : {}),
   };
-  if (opts?.stopLoss)   orderBody["stopLoss"]   = (Math.round(opts.stopLoss   / filters.tickSize) * filters.tickSize).toFixed(tickDp);
-  if (opts?.takeProfit) orderBody["takeProfit"] = (Math.round(opts.takeProfit / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+  if (opts?.stopLoss) orderBody["stopLoss"] = (Math.round(opts.stopLoss / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+  // Only set Full-mode TP on order body when tp2ClosePercent = 100 (default).
+  // For partial TP2, skip order body — setTp2Partial called after fill instead.
+  if (opts?.takeProfit && (opts.tp2ClosePercent ?? 100) >= 100) {
+    orderBody["takeProfit"] = (Math.round(opts.takeProfit / filters.tickSize) * filters.tickSize).toFixed(tickDp);
+  }
 
   const r = await bpost<{ orderId: string }>("/v5/order/create", orderBody);
   if (useLimit) {
@@ -343,11 +368,16 @@ export async function openPosition(
     console.log(`[Bybit] Market ${side} ${sym} qty=${finalQtyStr} mark=$${markPrice.toFixed(2)} ${leverage}x posIdx=${positionIdx} ${reason}SL=${opts?.stopLoss ?? "none"} TP=${opts?.takeProfit ?? "none"} TP1=${opts?.tp1 ?? "none"} → orderId=${r.orderId}`);
   }
 
-  // For market orders only: set TP1 partial immediately (position exists).
-  // Limit orders defer TP1 to posMonitor fill detection — position doesn't exist yet.
-  if (!useLimit && opts?.tp1 && opts.tp1 > 0) {
+  // For market orders only: set TP1/TP2 partials immediately (position exists).
+  // Limit orders defer to posMonitor fill detection — position doesn't exist yet.
+  if (!useLimit) {
     await new Promise(res => setTimeout(res, 600)); // let position settle
-    await setTp1Partial(sym, opts.tp1, positionIdx, qty);
+    if (opts?.tp1 && opts.tp1 > 0) {
+      await setTp1Partial(sym, opts.tp1, positionIdx, qty, opts.tp1ClosePercent);
+    }
+    if (opts?.takeProfit && opts.takeProfit > 0 && (opts.tp2ClosePercent ?? 100) < 100) {
+      await setTp2Partial(sym, opts.takeProfit, positionIdx, qty, opts.tp2ClosePercent!);
+    }
   }
 
   return { orderId: r.orderId, entryPrice: useLimit ? execPrice! : markPrice, positionIdx, qty: useLimit ? limitQty : qty, isLimitOrder: !!useLimit };

@@ -28,6 +28,8 @@ export interface PositionMeta {
   tp1Executed?:     boolean; // TP1 partial has been executed
   tp2Executed?:     boolean; // TP2 partial has been executed
   peakPnlPct?:      number;  // highest unrealized P/L% seen since entry
+  tp1ClosePercent?: number;  // % of position to close at TP1 (default 30)
+  tp2ClosePercent?: number;  // % of remaining position to close at TP2 (default 100)
 }
 
 export interface PositionMonitorState {
@@ -38,12 +40,14 @@ export interface PositionMonitorState {
 }
 
 export interface PendingLimitFill {
-  sl?:         number;
-  tp1?:        number;
-  tp2?:        number;
-  direction:   "long" | "short";
-  qty:         number;
-  positionIdx: number;
+  sl?:              number;
+  tp1?:             number;
+  tp2?:             number;
+  direction:        "long" | "short";
+  qty:              number;
+  positionIdx:      number;
+  tp1ClosePercent?: number;
+  tp2ClosePercent?: number;
 }
 
 export const botStateTable = pgTable("bot_state", {
