@@ -33,7 +33,7 @@ const TASK_CONFIG = {
   performance_analysis: { model: "sonnet" as ModelTier, maxTokens: 600,  cache: true  },
   deep_research:        { model: "opus"   as ModelTier, maxTokens: 2000, cache: true  },
   trade_reflection:     { model: "sonnet" as ModelTier, maxTokens: 3000, cache: false },
-  rule_generation:      { model: "sonnet" as ModelTier, maxTokens: 4000, cache: false },
+  rule_generation:      { model: "sonnet" as ModelTier, maxTokens: 8000, cache: false },
 } as const;
 
 export type TaskType = keyof typeof TASK_CONFIG;
