@@ -578,6 +578,16 @@ Removed the hardcoded `1.0×ATR` trailing SL block from `checkPositionMonitor`. 
 
 ---
 
+### Reward:Risk hard gate — minimum 1.0 (commit `f16b917`)
+
+- **`rewardRiskRatio` added to scan signal schema** — renamed from `riskRewardRatio` across `ScanOpportunity` interface, `marketScanner.ts` schema prompt, and `paperScanner.ts`. Claude is required to compute and return it for every signal.
+- **Prompt explanation added** — systemContext now includes: "rewardRiskRatio: reward divided by risk. Reward = distance from entry to TP1. Risk = distance from entry to SL. Example: entry $10, TP1 $11, SL $9 = 1.0 (reward $1 / risk $1). Higher is better. Required."
+- **Hard gate in both cron and watchScan paths** — after the SL/TP/setupType/score presence check, R:R is computed independently from raw `entry`, `stopLoss`, and `tp1` values (not from Claude's reported `rewardRiskRatio` field). If computed ratio < 1.0 → rejected with `🚫 Entry rejected — Reward:Risk {n} below minimum 1.0 (reward must equal or exceed risk)`.
+- **Misreporting-proof** — because the gate recomputes from first principles, Claude cannot bypass it by reporting a falsely high ratio.
+- **Retroactive impact** — pre-fix investigation showed 11 of last 20 valid trades (55%) had R:R < 1.0, concentrated in the May 27 batch (AVAX 0.59, ATOM 0.52, HYPE 0.57, APT 0.65). Two rows also had corrupted metadata (SL above entry or TP1 below entry) that this gate would also catch via ratio = 0.
+
+---
+
 ### generateTradingRules — full reflection coverage + force bypass (commits `d40210a`–`be9e4c7`)
 
 - **Removed `LIMIT 60`** — generator now fetches all TRADE_CLOSE rows (was capping at 60, then filtering to ~37 strategy-only).
