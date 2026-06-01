@@ -3,7 +3,7 @@ import { runScan, runFocusedScan, type ScanResult, type ScanOpportunity, calcATR
 import { runPaperScan, runMode3PaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
 import { approvalGate, buildProposal } from "./approvalGate";
-import { applyAtrSlTp, pendingLimitFills } from "./startup";
+import { applyAtrSlTp, pendingLimitFills, removePendingLimitFill } from "./startup";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
 import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose, getActiveRules } from "./tradeMemoryLib";
@@ -383,7 +383,7 @@ async function cancelStaleOrders(): Promise<Array<{ symbol: string; price: numbe
           .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
           .where(and(eq(tradeLogTable.symbol, order.symbol), isNull(tradeLogTable.exitAt)))
           .catch(() => {});
-        pendingLimitFills.delete(order.symbol);
+        await removePendingLimitFill(order.symbol).catch(() => {});
         await clearPositionMeta(order.symbol).catch(() => {});
         await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 4h, re-evaluating`).catch(() => {});
         console.log(`[cronScanner] Cancelled stale 4h order ${order.orderId} ${order.symbol}`);
@@ -1950,7 +1950,7 @@ async function checkPositionMonitor(): Promise<void> {
   for (const pos of positions) {
     if (!prevPositionSymbols.has(pos.symbol) && pendingLimitFills.has(pos.symbol)) {
       const pending = pendingLimitFills.get(pos.symbol)!;
-      pendingLimitFills.delete(pos.symbol);
+      await removePendingLimitFill(pos.symbol).catch(() => {});
       console.log(`[posMonitor] Limit filled — ${pos.symbol} at $${pos.entryPrice.toFixed(4)}`);
       await patchPositionMeta(pos.symbol, {
         sl:          pending.sl,

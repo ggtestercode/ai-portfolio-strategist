@@ -37,6 +37,15 @@ export interface PositionMonitorState {
   lastRSI1h:       number;
 }
 
+export interface PendingLimitFill {
+  sl?:         number;
+  tp1?:        number;
+  tp2?:        number;
+  direction:   "long" | "short";
+  qty:         number;
+  positionIdx: number;
+}
+
 export const botStateTable = pgTable("bot_state", {
   id:                   integer("id").primaryKey().default(1),
   portfolioLeverage:    integer("portfolio_leverage").notNull().default(10),
@@ -60,6 +69,7 @@ export const botStateTable = pgTable("bot_state", {
   watchList:            jsonb("watch_list").$type<WatchCoin[]>().default([]),
   watchListUpdatedAt:   timestamp("watch_list_updated_at", { withTimezone: true }),
   resumeAt:             timestamp("resume_at", { withTimezone: true }),
+  pendingLimitFills:    jsonb("pending_limit_fills").$type<Record<string, PendingLimitFill>>(),
 });
 
 export type BotState       = typeof botStateTable.$inferSelect;

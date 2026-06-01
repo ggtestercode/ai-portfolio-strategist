@@ -8,6 +8,7 @@ import {
   setStopLoss     as bybitSetStopLoss,
   setTakeProfit   as bybitSetTakeProfit,
   getClosedPnl    as bybitGetClosedPnl,
+  setTp1Partial   as bybitSetTp1Partial,
   getKlines,
   getTicker,
   type BybitKline,
@@ -17,19 +18,26 @@ import { openPositionPaper }       from "../brokers/okxPaper";
 import { sendApprovalRequest, sendAlert } from "../notifications/telegram";
 import { syncAllHoldingsToDB }     from "./aiResponder";
 import { syncTotalCapitalToDB }    from "./brokerBalance";
-import { db, botStateTable, tradeLogTable, type PositionMeta } from "@workspace/db";
+import { db, botStateTable, tradeLogTable, type PositionMeta, type PendingLimitFill } from "@workspace/db";
 import { eq, isNull }              from "drizzle-orm";
 
 export let okxPaperMode = false;
 
-export const pendingLimitFills = new Map<string, {
-  sl?:         number;
-  tp1?:        number;
-  tp2?:        number;
-  direction:   "long" | "short";
-  qty:         number;
-  positionIdx: number;
-}>();
+export const pendingLimitFills = new Map<string, PendingLimitFill>();
+
+async function persistPendingLimitFillsToDB(): Promise<void> {
+  const obj: Record<string, PendingLimitFill> = {};
+  for (const [sym, v] of pendingLimitFills) obj[sym] = v;
+  await db.update(botStateTable)
+    .set({ pendingLimitFills: Object.keys(obj).length ? obj : null, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1))
+    .catch(e => console.warn("[startup] pendingLimitFills DB write failed:", (e as Error).message));
+}
+
+export async function removePendingLimitFill(symbol: string): Promise<void> {
+  pendingLimitFills.delete(symbol);
+  await persistPendingLimitFillsToDB();
+}
 
 // ── ATR (Wilder's smoothing) ──────────────────────────────────────────────────
 function calcATR(klines: BybitKline[], period = 14): number {
@@ -135,6 +143,44 @@ async function logPositionMetadata(): Promise<void> {
   console.log("[startup] Position metadata:", JSON.stringify(row?.positionMetadata ?? {}, null, 2));
 }
 
+async function recoverPendingLimitFills(): Promise<void> {
+  const [row] = await db.select({
+    pendingLimitFills: botStateTable.pendingLimitFills,
+    positionMetadata:  botStateTable.positionMetadata,
+  }).from(botStateTable).limit(1).catch(() => [null]);
+
+  const dbFills = (row?.pendingLimitFills ?? {}) as Record<string, PendingLimitFill>;
+  if (!Object.keys(dbFills).length) return;
+
+  const livePositions = await bybitGetPositions().catch(() => []);
+  const liveMap = new Map(livePositions.map(p => [p.symbol, p]));
+  const posMeta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+  const toKeep: Record<string, PendingLimitFill> = {};
+
+  for (const [symbol, fill] of Object.entries(dbFills)) {
+    const livePos = liveMap.get(symbol);
+    if (!livePos) {
+      console.log(`[startup] pendingLimitFill ${symbol} — no live position, removing from DB`);
+      continue;
+    }
+    pendingLimitFills.set(symbol, fill);
+    toKeep[symbol] = fill;
+    const tp1Executed = (posMeta[symbol]?.tp1Executed ?? false);
+    if (!tp1Executed && fill.tp1 && fill.tp1 > 0) {
+      console.log(`[startup] Recovering TP1 partial for ${symbol} at $${fill.tp1}`);
+      await bybitSetTp1Partial(symbol, fill.tp1, fill.positionIdx, livePos.size)
+        .catch(e => console.warn(`[startup] Recovery TP1 ${symbol}:`, (e as Error).message));
+    }
+  }
+
+  await db.update(botStateTable)
+    .set({ pendingLimitFills: Object.keys(toKeep).length ? toKeep : null, lastUpdated: new Date() })
+    .where(eq(botStateTable.id, 1))
+    .catch(e => console.warn("[startup] pendingLimitFills recovery update failed:", (e as Error).message));
+
+  console.log(`[startup] pendingLimitFills recovered: ${Object.keys(toKeep).length} active`);
+}
+
 export async function initBrokers(): Promise<void> {
   approvalGate.registerExecutor("etoro", async (p) => {
     const symbol = p.symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
@@ -190,14 +236,16 @@ export async function initBrokers(): Promise<void> {
 
     if (result.isLimitOrder) {
       // Position doesn't exist yet — defer SL/TP and metadata to fill detection in posMonitor
-      pendingLimitFills.set(p.symbol, {
+      const fillData: PendingLimitFill = {
         sl:          sl,
         tp1:         tp1 ?? undefined,
         tp2:         tp ?? undefined,
         direction:   isShort ? "short" : "long",
         qty:         result.qty,
         positionIdx: result.positionIdx,
-      });
+      };
+      pendingLimitFills.set(p.symbol, fillData);
+      persistPendingLimitFillsToDB().catch(() => {});
       console.log(`[startup] ${p.symbol} limit order pending — SL/TP deferred to fill detection`);
     } else {
       // Market order — position exists, apply SL/TP immediately
@@ -249,6 +297,9 @@ export async function initBrokers(): Promise<void> {
 
   // Set SL/TP for any existing positions that don't have them
   setSlTpForExistingPositions().catch(e => console.error("[startup] SL/TP setup failed:", e));
+
+  // Restore pending limit fills from DB — sets TP1 partial on positions that filled across a restart
+  recoverPendingLimitFills().catch(e => console.error("[startup] pendingLimitFills recovery failed:", e));
 
   // Always log current position metadata for debugging
   logPositionMetadata().catch(() => {});
