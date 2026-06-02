@@ -67,6 +67,7 @@
 ## Recent Commits (last 15)
 | Commit | Description |
 |--------|-------------|
+| `449b0fc` | docs: HANDOVER.md — tp1 enforcement fix details |
 | `d3bfcf2` | fix: enforce tp1 > 0 — prompt + hard gate |
 | `267b8f2` | docs: HANDOVER.md slim + archive |
 | `6843be7` | feat: pending limit orders in Phase 2 scan prompt |
@@ -101,7 +102,10 @@
 - **Self-heal ATR TP can be wrong-side on shorts:** if metadata is stale or position qty changed, the ATR calculation uses wrong `entryPrice` and places TP above entry for a short (loss direction, not profit direction)
 - SOL closed via posMonitor CLOSE (restart cleared `lastReviewAt` → immediate review) not exchange TP
 
-**Fix required:** Signal schema prompt must enforce `tp1` as a required field (same as `stopLoss`). The hard gate already requires `tp1` to be present — but the signal must actually set it to a valid price (not zero). Consider adding `tp1 > 0` to the gate check alongside the existing presence check.
+**Fixed in `d3bfcf2` / `449b0fc`:**
+- `tp1` required field instruction added to Phase 2 scan prompt — explicit note that `tp1=0` is rejected and must be a specific price matching trade direction
+- Hard gate `tp1`/`stopLoss` check hardened from falsy `!v` to explicit `typeof v === 'number' ? v <= 0 : !v` — catches zero and negative prices by name
+- Prevents `setTp1Partial` being skipped on limit fills (root cause: `pendingLimitFills.tp1 = undefined` when signal omits or zeros `tp1`)
 
 ---
 
