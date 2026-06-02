@@ -1362,11 +1362,11 @@ async function runWatchScan(): Promise<void> {
         const riskDist = Math.abs(rrEntry - (signal.stopLoss ?? 0));
         const rewardDist = Math.abs((signal.tp1 ?? 0) - rrEntry);
         const rrRatio  = riskDist > 0 ? rewardDist / riskDist : 0;
-        if (rrRatio < 1.0) {
-          console.log(`[gate] REJECTED ${sym} (watchScan) — R:R ${rrRatio.toFixed(2)} < 1.0`);
+        if (rrRatio < 1.5) {
+          console.log(`[gate] REJECTED ${sym} (watchScan) — R:R ${rrRatio.toFixed(2)} < 1.5`);
           alertFn?.([
             `🚫 Entry rejected — ${sym}`,
-            `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.0 (reward must equal or exceed risk)`,
+            `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.5`,
           ].join("\n")).catch(() => {});
           await removeFromWatchList(signal.symbol);
           continue;
@@ -1647,11 +1647,11 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         const riskDist = Math.abs(rrEntry - (opp.stopLoss ?? 0));
         const rewardDist = Math.abs((opp.tp1 ?? 0) - rrEntry);
         const rrRatio  = riskDist > 0 ? rewardDist / riskDist : 0;
-        if (rrRatio < 1.0) {
-          console.log(`[gate] REJECTED ${sym} — R:R ${rrRatio.toFixed(2)} < 1.0`);
+        if (rrRatio < 1.5) {
+          console.log(`[gate] REJECTED ${sym} — R:R ${rrRatio.toFixed(2)} < 1.5`);
           alertFn?.([
             `🚫 Entry rejected — ${sym}`,
-            `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.0 (reward must equal or exceed risk)`,
+            `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.5`,
           ].join("\n")).catch(() => {});
           continue;
         }
