@@ -156,7 +156,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
 
 export async function getOrders(): Promise<BybitOrder[]> {
   const r = await get<{ list: Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string; orderType?: string; stopLoss?: string; takeProfit?: string }> }>(
-    "/v5/order/realtime", { category: "linear", orderFilter: "Order" }
+    "/v5/order/realtime", { category: "linear", orderFilter: "Order", settleCoin: "USDT" }
   ).catch(e => {
     console.error('[orders] getOrders failed:', (e as Error).message);
     throw e;
