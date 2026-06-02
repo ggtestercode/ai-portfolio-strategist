@@ -199,7 +199,7 @@ async function checkDailyLossLimit(bybitBalance: number): Promise<boolean> {
       tradingPaused = true;
       pausedReason  = msg;
       await saveBotState({ tradingPaused: true, pausedReason: msg }).catch(() => {});
-      await alertFn?.(msg).catch(() => {});
+      await alertFn?.(msg).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.warn("[cronScanner] Peak drawdown halt triggered");
       return false;
     }
@@ -218,7 +218,7 @@ async function checkDailyLossLimit(bybitBalance: number): Promise<boolean> {
       tradingPaused = true;
       pausedReason  = msg;
       await saveBotState({ tradingPaused: true, pausedReason: msg }).catch(() => {});
-      await alertFn?.(msg).catch(() => {});
+      await alertFn?.(msg).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.warn("[cronScanner] Daily loss limit hit — trading paused");
       return false;
     }
@@ -388,7 +388,7 @@ async function cancelStaleOrders(): Promise<{
     }
   }
   if (fetchErr) {
-    await alertFn?.("⚠️ Order fetch failed — stale order cancellation may have been skipped").catch(() => {});
+    await alertFn?.("⚠️ Order fetch failed — stale order cancellation may have been skipped").catch(e => console.error("[telegram] Send failed:", (e as Error).message));
     return { cancelled, active };
   }
   try {
@@ -406,7 +406,7 @@ async function cancelStaleOrders(): Promise<{
           .catch(() => {});
         await removePendingLimitFill(order.symbol).catch(() => {});
         await clearPositionMeta(order.symbol).catch(() => {});
-        await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 4h, re-evaluating`).catch(() => {});
+        await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 4h, re-evaluating`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
         console.log(`[cronScanner] Cancelled stale 4h order ${order.orderId} ${order.symbol}`);
         cancelled.push({ symbol: order.symbol, price: order.price });
       } else {
@@ -955,7 +955,7 @@ async function makePositionReview(
   });
 
   if (!res.parseSuccess) {
-    await alertFn?.("⚠️ Position review parse failed — defaulting to HOLD for all positions").catch(() => {});
+    await alertFn?.("⚠️ Position review parse failed — defaulting to HOLD for all positions").catch(e => console.error("[telegram] Send failed:", (e as Error).message));
   }
 
   return res.data;
@@ -1028,7 +1028,7 @@ async function handlePositionDecision(
       await logScalingDecision(sym, "CUT", decision.reason, pos.pnlPct);
       outcomes.push({ symbol: sym, action: "CUT", reason: decision.reason, pnlPct: pos.pnlPct });
       const sign = pos.pnl >= 0 ? "+" : "";
-      await alertFn?.(`✂️ Position CUT: ${sym}\nP/L: ${sign}$${pos.pnl.toFixed(2)} (${sign}${pos.pnlPct.toFixed(2)}%)\nReason: ${decision.reason}`).catch(() => {});
+      await alertFn?.(`✂️ Position CUT: ${sym}\nP/L: ${sign}$${pos.pnl.toFixed(2)} (${sign}${pos.pnlPct.toFixed(2)}%)\nReason: ${decision.reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[cronScanner] CUT ${sym} failed:`, msg);
@@ -1813,7 +1813,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           `Risk: $${(bybitBalance * 0.05 * rMult).toFixed(2)} | Size: $${amountUsd.toFixed(0)} (${opp.leverage ?? 10}×)`,
           opp.rewardRiskRatio ? `R:R 1:${opp.rewardRiskRatio.toFixed(1)}` : null,
         ].filter(Boolean).join("\n");
-        await alertFn?.(entryLines).catch(() => {});
+        await alertFn?.(entryLines).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       }
 
       outcomes.push({
@@ -1826,7 +1826,8 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     // Telegram summary
     const dailyPnl = await getDailyPnl().catch(() => 0);
     const summary  = formatScanSummary(outcomes, result.opportunities.length, regime, rejected, dailyPnl, bybitBalance, livePositions.length, filteredSignals.length, result.opportunities);
-    await alertFn?.(summary).catch(() => {});
+    console.log('[telegram] Sending scan summary...');
+    await alertFn?.(summary).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
 
     // Merge new WATCH-recommendation coins into the watch list (don't overwrite existing watches)
     const newWatchCoins: WatchCoin[] = cryptoOpps
@@ -1876,7 +1877,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         ...mergedWatch.map(w => `  • ${w.symbol} ${w.direction.toUpperCase()} — score ${w.score}`),
         `Rescanning every 30 min...`,
       ].join("\n");
-      await alertFn?.(watchMsg).catch(() => {});
+      await alertFn?.(watchMsg).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       startWatchScan();
     }
 
@@ -2076,7 +2077,7 @@ async function checkPositionMonitor(): Promise<void> {
       const hsFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
       await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: hsFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "sl_hit" }).catch(() => {});
       await clearPositionMeta(pos.symbol).catch(() => {});
-      await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(() => {});
+      await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       void closeSide; // suppress unused variable warning
       continue;
     }
@@ -2374,7 +2375,7 @@ async function runPositionReview(
         .catch(e => console.error(`[posMonitor] ADJUST_SL ${pos.symbol}:`, (e as Error).message));
       const lastNotify = lastAdjustSlNotifyAt[pos.symbol] ?? 0;
       if (Date.now() - lastNotify >= ADJUST_SL_NOTIFY_COOLDOWN_MS) {
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(() => {});
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
         lastAdjustSlNotifyAt[pos.symbol] = Date.now();
       } else {
         console.log(`[posMonitor] ADJUST_SL ${pos.symbol} → $${newSl.toFixed(4)} (notify suppressed — cooldown)`);
@@ -2406,7 +2407,7 @@ async function runPositionReview(
     const closeFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
     await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: closeFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
     await clearPositionMeta(pos.symbol).catch(() => {});
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ executed\n${reason}`).catch(() => {});
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ executed\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
 
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
     const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
@@ -2423,16 +2424,16 @@ async function runPositionReview(
         const dustFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
         await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: dustFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(() => {});
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       } else {
         // Partial would leave dust — skip and hold
         console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} skipped — would leave dust ($${afterPartialUsd.toFixed(2)})`);
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial close skipped — would leave dust ($${afterPartialUsd.toFixed(2)})\nHOLDING\n${reason}`).catch(() => {});
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial close skipped — would leave dust ($${afterPartialUsd.toFixed(2)})\nHOLDING\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       }
     } else {
       await closePercentPosition(pos.symbol, pct)
         .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
-      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ executed\n${reason}`).catch(() => {});
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ executed\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
     }
   }
 
@@ -2464,11 +2465,11 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
   cron.schedule("0 1 * * *", async () => {
     try {
       await db.select({ id: botStateTable.id }).from(botStateTable).limit(1);
-      await alertFn?.("✅ DB healthy — Neon connection OK").catch(() => {});
+      await alertFn?.("✅ DB healthy — Neon connection OK").catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.log("[dbHealth] Daily check: OK");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await alertFn?.(`⚠️ DB connection failed — check Neon limits\n${msg.slice(0, 200)}`).catch(() => {});
+      await alertFn?.(`⚠️ DB connection failed — check Neon limits\n${msg.slice(0, 200)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.error("[dbHealth] Daily check FAILED:", e);
     }
   });
@@ -2478,7 +2479,7 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
     try {
       const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
       if (!positions.length) {
-        await alertFn?.("🌙 Daily summary — no open positions").catch(() => {});
+        await alertFn?.("🌙 Daily summary — no open positions").catch(e => console.error("[telegram] Send failed:", (e as Error).message));
         return;
       }
       const state   = await loadBotState().catch(() => null);
@@ -2503,7 +2504,7 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
           `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%${peakStr} | SL: ${sl ? "$" + (typeof sl === "number" ? sl.toFixed(4) : sl) : "—"} | TP1: ${tp1 ? "$" + (typeof tp1 === "number" ? tp1.toFixed(4) : tp1) : "—"} | Held: ${held}`,
         ].join("\n");
       });
-      await alertFn?.([`🌙 <b>Daily summary — 00:00 SGT</b>`, "", ...lines].join("\n\n")).catch(() => {});
+      await alertFn?.([`🌙 <b>Daily summary — 00:00 SGT</b>`, "", ...lines].join("\n\n")).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.log(`[dailySummary] Sent — ${positions.length} open positions`);
     } catch (e) {
       console.error("[dailySummary] Failed:", e);
