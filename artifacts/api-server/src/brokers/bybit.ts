@@ -67,7 +67,7 @@ function normalise(symbol: string): string {
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface BybitTicker  { symbol: string; lastPrice: number; bid: number; ask: number; change24h: number }
 export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; markPrice: number; leverage: number; pnl: number; pnlPct: number; margin: number; stopLoss?: number; takeProfit?: number; liqPrice?: number; positionIdx: number; openTime: number }
-export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string }
+export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string; orderType?: string; sl?: number; tp?: number }
 export interface BybitBalance { totalEquity: number; availableBalance: number; usedMargin: number; currency: string }
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
 
@@ -155,7 +155,7 @@ export async function getPositions(): Promise<BybitPosition[]> {
 }
 
 export async function getOrders(): Promise<BybitOrder[]> {
-  const r = await get<{ list: Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string }> }>(
+  const r = await get<{ list: Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string; orderType?: string; stopLoss?: string; takeProfit?: string }> }>(
     "/v5/order/realtime", { category: "linear", orderFilter: "Order" }
   ).catch(e => {
     console.error('[orders] getOrders failed:', (e as Error).message);
@@ -163,7 +163,17 @@ export async function getOrders(): Promise<BybitOrder[]> {
   });
   return r.list
     .filter(o => parseFloat(o.price) > 0) // exclude market/conditional orders (price=0)
-    .map(o => ({ orderId: o.orderId, symbol: o.symbol, side: o.side, qty: parseFloat(o.qty), price: parseFloat(o.price), placedAt: new Date(parseInt(o.createdTime)).toISOString() }));
+    .map(o => ({
+      orderId:   o.orderId,
+      symbol:    o.symbol,
+      side:      o.side,
+      qty:       parseFloat(o.qty),
+      price:     parseFloat(o.price),
+      placedAt:  new Date(parseInt(o.createdTime)).toISOString(),
+      orderType: o.orderType,
+      sl:        o.stopLoss   ? parseFloat(o.stopLoss)   : undefined,
+      tp:        o.takeProfit ? parseFloat(o.takeProfit) : undefined,
+    }));
 }
 
 export async function cancelOrder(symbol: string, orderId: string): Promise<void> {

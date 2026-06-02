@@ -838,36 +838,35 @@ export function startPolling(): void {
   b.onText(/^\/orders(?:@\w+)?$/, async (msg) => {
     const chatId = String(msg.chat.id);
     try {
-      const [bybitOrders, okxOrders, etoroOrders, localPending] = await Promise.all([
-        getOrders().catch(() => []),
-        okxGetOrders().catch(() => []),
-        etoroGetOrders().catch(() => []),
-        Promise.resolve(getPendingOrders()),
-      ]);
+      const bybitOrders = await getOrders().catch(() => []);
+      const now = Date.now();
+      const STALE_MS = 4 * 60 * 60 * 1000;
 
-      type Row = { id: string; symbol: string; side: string; amountUsd: number; broker: string; placedAt?: string };
-      const map = new Map<string, Row>();
-      for (const o of bybitOrders)  map.set(o.orderId, { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.qty * o.price, broker: "bybit", placedAt: o.placedAt });
-      for (const o of okxOrders)    map.set(o.orderId, { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.price > 0 && o.size > 0 ? o.price * o.size : 0, broker: "okx", placedAt: o.placedAt });
-      for (const o of etoroOrders)  map.set(o.orderId, { id: o.orderId, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: "etoro", placedAt: o.placedAt });
-      for (const o of localPending) if (!map.has(o.id)) map.set(o.id, { id: o.id, symbol: o.symbol, side: o.side, amountUsd: o.amountUsd, broker: o.broker, placedAt: o.queuedAt.toISOString() });
-      const orders = Array.from(map.values());
-
-      if (!orders.length) {
+      if (!bybitOrders.length) {
         await b.sendMessage(chatId, `📋 No pending orders.\n<i>${utcNow()}</i>`, { parse_mode: "HTML" });
         return;
       }
 
-      const lines = orders.map(o => {
-        const t = o.placedAt
-          ? new Date(o.placedAt).toLocaleTimeString("en-SG", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Singapore" }) + " SGT"
-          : "recently";
-        const amtStr = o.amountUsd > 0 ? ` $${o.amountUsd.toFixed(2)}` : "";
-        return `• <b>${escapeHtml(o.symbol)}</b> — ${o.side.toUpperCase()}${amtStr} [${o.broker}] · placed ${t}`;
-      }).join("\n");
+      const lines = bybitOrders.map(o => {
+        const ageMs      = now - new Date(o.placedAt).getTime();
+        const ageH       = ageMs / 3600000;
+        const remainMs   = STALE_MS - ageMs;
+        const remainH    = remainMs / 3600000;
+        const orderType  = o.orderType ?? "Limit";
+        const slStr      = o.sl  ? ` | SL: $${o.sl.toFixed(2)}`  : "";
+        const tpStr      = o.tp  ? ` | TP: $${o.tp.toFixed(2)}`  : "";
+        const staleStr   = remainH > 0
+          ? `cancels in ${remainH.toFixed(1)}h`
+          : `⚠️ ${Math.abs(remainH).toFixed(1)}h overdue for cancel`;
+        return [
+          `• <b>${escapeHtml(o.symbol)}</b> ${o.side.toUpperCase()} ${orderType.toLowerCase()} $${o.price.toFixed(2)} qty=${o.qty}`,
+          `  Age: ${ageH.toFixed(1)}h${slStr}${tpStr}`,
+          `  (${staleStr})`,
+        ].join("\n");
+      }).join("\n\n");
 
       await b.sendMessage(chatId, [
-        `📋 <b>Pending Orders (${orders.length})</b>`,
+        `📋 <b>Open Orders (${bybitOrders.length})</b>`,
         ``,
         lines,
         ``,
