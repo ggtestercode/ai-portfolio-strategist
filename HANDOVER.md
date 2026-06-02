@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 3, 2026 (commit 9ef7c64)
+**Last updated:** June 3, 2026 (commit 8b11f89)
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -71,26 +71,21 @@
 ## Recent Commits (last 15)
 | Commit | Description |
 |--------|-------------|
+| `8b11f89` | docs: HANDOVER — SL ladder + accurate liq price (June 3) |
+| `9ef7c64` | feat: SL ladder + accurate liquidation price |
+| `5291d3f` | fix: SL integrity — priority chain + trailingActive inheritance |
+| `eda8458` | docs: HANDOVER.md — reconciler overwrite bug + DB corrections (June 2) |
+| `a999186` | fix: log Telegram send failures in cronScanner; confirm scan summary send |
+| `47afff4` | feat: /orders shows Bybit order age, SL/TP, stale cancel countdown |
+| `de99305` | fix: retry getOrders up to 3× with 2s delay in cancelStaleOrders |
 | `cb11b2f` | fix: getOrders logs+rethrows; recoverPendingLimitFills checks open orders |
 | `70b2d2c` | fix: lower R:R hard gate from 1.5 to 1.1 — both scan paths |
 | `ba3361d` | fix: raise R:R hard gate from 1.0 to 1.5 — both scan paths |
 | `449b0fc` | docs: HANDOVER.md — tp1 enforcement fix details |
 | `d3bfcf2` | fix: enforce tp1 > 0 — prompt + hard gate |
-| `267b8f2` | docs: HANDOVER.md slim + archive |
 | `6843be7` | feat: pending limit orders in Phase 2 scan prompt |
-| `6db3bef` | docs: HANDOVER.md tp1/tp2ClosePercent |
 | `68400c7` | feat: tp1ClosePercent/tp2ClosePercent — Claude controls exit sizing |
-| `3bc2618` | docs: HANDOVER.md pendingLimitFills + TP exit structure |
 | `1ef2339` | fix: pendingLimitFills persists to DB — survives restarts |
-| `e624890` | docs: HANDOVER.md R:R hard gate |
-| `f16b917` | feat: rewardRiskRatio field + 1:1 R:R hard gate (misreporting-proof) |
-| `2dcc731` | docs: HANDOVER.md June 1 deploy.sh fix + rule generator |
-| `d1e0a8d` | fix: deploy.sh — git push first + commit hash verification |
-| `db87ae6` | fix: rule_generation maxTokens 8000 |
-| `97b75f0` | fix: generateTradingRules — retry + logging |
-| `be9e4c7` | fix: forceRules bypasses gate, DELETE+INSERT |
-| `7417f71` | fix: generateTradingRules fresh generation each time |
-| `5ed500b` | fix: generateTradingRules evidence-driven rule count (5–15) |
 
 ---
 
@@ -154,6 +149,26 @@ Backfill generated a `trade_memory` row 33 seconds after the reconciler phantom-
 - `tp1` required field instruction added to Phase 2 scan prompt — explicit note that `tp1=0` is rejected and must be a specific price matching trade direction
 - Hard gate `tp1`/`stopLoss` check hardened from falsy `!v` to explicit `typeof v === 'number' ? v <= 0 : !v` — catches zero and negative prices by name
 - Prevents `setTp1Partial` being skipped on limit fills (root cause: `pendingLimitFills.tp1 = undefined` when signal omits or zeros `tp1`)
+
+---
+
+## Investigation Finding — Learning Loop Health (June 3)
+
+**Finding: learning loop has no systematic blind spot for SL-hit trades.**
+
+Queried live Neon DB:
+- 99 closed `trade_log` rows, 131 `TRADE_CLOSE` reflections (extra 32 are Version B / old integer IDs)
+- 130/131 complete (have `lessons_learned` + `entry_timing_verdict`)
+- **All 16 SL-hit reflections are complete** — 16/16 have lessons + verdict, spanning May 24–Jun 2
+
+**Only gap found:** 2 trades (SOLUSDT, XRPUSDT) closed with `exit_price = NULL` by the reconciler when Bybit returned no `closedPnl` record. Both `generateReflection` and `backfillStructuredReflections` skip trades with `exitPrice = 0`. Permanently unlearned — would need manual exit price patches to fix.
+
+**Reflection trigger chain:**
+1. `closeOpenTrade()` calls `generateReflection()` inline for all real-time closes (SL, TP, review, hard_stop)
+2. Startup backfill (`max=60`) catches bot-offline closes and failed generations
+3. Daily midnight SGT `learningHealth` cron re-triggers backfill if any incomplete reflections detected
+
+No action required. Learning loop is healthy.
 
 ---
 
