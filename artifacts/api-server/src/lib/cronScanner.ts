@@ -1341,7 +1341,9 @@ async function runWatchScan(): Promise<void> {
           setupType: signal.setupType,
           score:     signal.score,
         };
-        const gateMissing = Object.entries(gateRequired).filter(([, v]) => !v).map(([k]) => k);
+        const gateMissing = Object.entries(gateRequired)
+          .filter(([, v]) => typeof v === 'number' ? v <= 0 : !v)
+          .map(([k]) => k);
         if (gateMissing.length > 0) {
           console.log(`[gate] REJECTED ${sym} (watchScan) — missing required fields: ${gateMissing.join(", ")}`);
           alertFn?.([
@@ -1625,7 +1627,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           setupType: opp.setupType,
           score:     opp.score,
         };
-        const gateMissing = Object.entries(gateRequired).filter(([, v]) => !v).map(([k]) => k);
+        const gateMissing = Object.entries(gateRequired)
+          .filter(([, v]) => typeof v === 'number' ? v <= 0 : !v)
+          .map(([k]) => k);
         if (gateMissing.length > 0) {
           console.log(`[gate] REJECTED ${sym} — missing required fields: ${gateMissing.join(", ")}`);
           alertFn?.([
