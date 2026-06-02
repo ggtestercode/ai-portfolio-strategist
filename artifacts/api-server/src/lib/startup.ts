@@ -5,6 +5,7 @@ import {
   openPosition    as bybitOpen,
   setOneWayMode   as bybitSetOneWayMode,
   getPositions    as bybitGetPositions,
+  getOrders       as bybitGetOrders,
   setStopLoss     as bybitSetStopLoss,
   setTakeProfit   as bybitSetTakeProfit,
   getClosedPnl    as bybitGetClosedPnl,
@@ -155,13 +156,21 @@ async function recoverPendingLimitFills(): Promise<void> {
 
   const livePositions = await bybitGetPositions().catch(() => []);
   const liveMap = new Map(livePositions.map(p => [p.symbol, p]));
+  const openOrders  = await bybitGetOrders().catch(() => [] as Awaited<ReturnType<typeof bybitGetOrders>>);
+  const openOrderSymbols = new Set(openOrders.map(o => o.symbol));
   const posMeta = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   const toKeep: Record<string, PendingLimitFill> = {};
 
   for (const [symbol, fill] of Object.entries(dbFills)) {
     const livePos = liveMap.get(symbol);
     if (!livePos) {
-      console.log(`[startup] pendingLimitFill ${symbol} — no live position, removing from DB`);
+      if (openOrderSymbols.has(symbol)) {
+        console.log(`[startup] pendingLimitFill ${symbol} — no position yet but limit order still open, keeping`);
+        pendingLimitFills.set(symbol, fill);
+        toKeep[symbol] = fill;
+      } else {
+        console.log(`[startup] pendingLimitFill ${symbol} — no live position and no open order, removing`);
+      }
       continue;
     }
     pendingLimitFills.set(symbol, fill);

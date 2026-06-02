@@ -398,7 +398,8 @@ async function cancelStaleOrders(): Promise<{
       }
     }
   } catch (e) {
-    console.warn("[cronScanner] staleOrderCheck failed:", (e as Error).message);
+    console.error("[cronScanner] staleOrderCheck failed:", (e as Error).message);
+    await alertFn?.("⚠️ Order fetch failed — stale order cancellation may have been skipped").catch(() => {});
   }
   return { cancelled, active };
 }

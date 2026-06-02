@@ -157,7 +157,10 @@ export async function getPositions(): Promise<BybitPosition[]> {
 export async function getOrders(): Promise<BybitOrder[]> {
   const r = await get<{ list: Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string }> }>(
     "/v5/order/realtime", { category: "linear", orderFilter: "Order" }
-  ).catch(() => ({ list: [] as Array<{ orderId: string; symbol: string; side: string; qty: string; price: string; createdTime: string }> }));
+  ).catch(e => {
+    console.error('[orders] getOrders failed:', (e as Error).message);
+    throw e;
+  });
   return r.list
     .filter(o => parseFloat(o.price) > 0) // exclude market/conditional orders (price=0)
     .map(o => ({ orderId: o.orderId, symbol: o.symbol, side: o.side, qty: parseFloat(o.qty), price: parseFloat(o.price), placedAt: new Date(parseInt(o.createdTime)).toISOString() }));
