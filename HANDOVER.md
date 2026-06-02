@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 2, 2026
+**Last updated:** June 3, 2026
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -95,6 +95,31 @@
 - **Capital top-up** — consider if performance confirmed
 - **tp1 always required in signal** — fixed `d3bfcf2`: prompt hardened + gate uses `v <= 0` for numerics
 - **Run `/forceRules`** after 5+ more clean trades — regenerate rules without corrupted reflection influence
+- **SL-to-liquidation buffer gate** — no code gate prevents SL from being dangerously close to liqPrice; ADAUSDT currently has this gap. Future work: add hard gate at entry rejecting SL within 5% of estimated liqPrice.
+
+## Fix — SL Integrity (June 3)
+
+Three bugs in `startup.ts` caused exchange SL to diverge from Claude's planned SL across restarts.
+
+**Bug 1 — ATR overwrote Claude's SL on restart:**  
+`setSlTpForExistingPositions()` fell through to ATR×1.5 whenever metadata was stale/missing (common after 347 restarts). The ATR formula placed wider SLs than Claude planned — confirmed to be the cause of HYPEUSDT/NEARUSDT closing -2–4% below their DB-stored SL prices on June 2.
+
+**Fix:** SL priority chain on restart:
+1. Read `trade_log.sl` (Claude's planned value, written by cronScanner at entry) → use if valid vs live price
+2. Read exchange `stopLoss` → preserve it if valid vs live price
+3. ATR fallback — only if no SL exists anywhere
+
+**Bug 2 — `trailingActive` inherited by new position on same symbol:**  
+`storePositionMeta()` copied `trailingActive` and `lastTrailPrice` from existing metadata when storing new position data. Since `reconcileClosedPositions()` doesn't call `clearPositionMeta()`, metadata from a closed profitable position (with `trailingActive: true`) persisted to the next trade on the same symbol. Startup then saw `trailingActive: true` and skipped all SL validation, preserving a stale ATR SL.
+
+**Fix:** `storePositionMeta()` always writes `trailingActive: false`. Trailing state is re-activated by `patchPositionMeta()` only when the large-profit partial triggers in the current session.
+
+**Bug 3 — Orphaned INJUSDT reflection:**  
+Backfill generated a `trade_memory` row 33 seconds after the reconciler phantom-closed INJUSDT, but without `source_trade_id`. Fixed with a direct SQL UPDATE.
+
+**Commit:** see `fix: SL integrity — priority chain + trailingActive inheritance`
+
+---
 
 ## Investigation Finding — Reconciler Overwrite Bug (June 2)
 

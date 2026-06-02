@@ -21,7 +21,7 @@ import { sendApprovalRequest, sendAlert } from "../notifications/telegram";
 import { syncAllHoldingsToDB }     from "./aiResponder";
 import { syncTotalCapitalToDB }    from "./brokerBalance";
 import { db, botStateTable, tradeLogTable, type PositionMeta, type PendingLimitFill } from "@workspace/db";
-import { eq, isNull }              from "drizzle-orm";
+import { and, desc, eq, isNull }   from "drizzle-orm";
 
 export let okxPaperMode = false;
 
@@ -61,8 +61,7 @@ async function storePositionMeta(symbol: string, meta: PositionMeta): Promise<vo
   const existing = (row?.positionMetadata ?? {}) as Record<string, PositionMeta>;
   existing[symbol] = {
     entrySource:    existing[symbol]?.entrySource,
-    trailingActive: existing[symbol]?.trailingActive,
-    lastTrailPrice: existing[symbol]?.lastTrailPrice,
+    trailingActive: false,   // never inherit — new positions always start clean
     ...meta,
   };
   await db.update(botStateTable)
@@ -402,65 +401,83 @@ async function setSlTpForExistingPositions(): Promise<void> {
   }
 
   for (const pos of positions) {
-    const hasSl  = pos.stopLoss   && pos.stopLoss   > 0;
-    const hasTp  = pos.takeProfit && pos.takeProfit > 0;
-    const hasMeta = !!existingMeta[pos.symbol];
+    const direction = pos.side === "Buy" ? "long" : "short" as "long" | "short";
+    const mult = direction === "long" ? 1 : -1;
+    const pm   = existingMeta[pos.symbol];
 
-    if (hasSl && hasTp && hasMeta) {
-      const pm = existingMeta[pos.symbol]!;
+    // Live price fetched once — used for SL validity checks across all priorities
+    const livePrice = await getTicker(pos.symbol).then(t => t.lastPrice).catch(() => 0);
+    const ref = livePrice > 0 ? livePrice : pos.entryPrice;
 
-      // Trailing SL above entry = locked-in profit — NEVER reset regardless of qty staleness
-      if (pm.trailingActive) {
-        console.log(`[startup] ${pos.symbol} — trailing SL active (SL=${pm.sl?.toFixed(4)}) preserving, not resetting`);
+    // ── Priority 1: Claude's planned SL from trade_log ──────────────────────
+    // Skip if trailing SL is active — exchange is authoritative for the current trailing level
+    if (!pm?.trailingActive) {
+      const dbRows = await db.select({ sl: tradeLogTable.sl, tp1: tradeLogTable.tp1, tp2: tradeLogTable.tp2 })
+        .from(tradeLogTable)
+        .where(and(
+          eq(tradeLogTable.symbol,  pos.symbol),
+          eq(tradeLogTable.broker,  "bybit"),
+          isNull(tradeLogTable.exitAt),
+        ))
+        .orderBy(desc(tradeLogTable.entryAt))
+        .limit(1)
+        .catch(() => [] as { sl: string | null; tp1: string | null; tp2: string | null }[]);
+
+      const claudeSl = dbRows[0]?.sl ? parseFloat(dbRows[0].sl) : null;
+      const claudeSlValid = claudeSl != null && claudeSl > 0 &&
+        (direction === "long" ? claudeSl < ref : claudeSl > ref);
+
+      if (claudeSlValid) {
+        await bybitSetStopLoss(pos.symbol, claudeSl, pos.positionIdx)
+          .catch(e => console.warn(`[startup] setStopLoss ${pos.symbol}:`, e.message));
+        await storePositionMeta(pos.symbol, {
+          originalQty: pm?.originalQty ?? pos.size,
+          entryPrice:  pos.entryPrice,
+          sl:          claudeSl,
+          atr:         pm?.atr ?? 0,
+          tp1:         pm?.tp1 ?? (dbRows[0]?.tp1 ? parseFloat(dbRows[0].tp1!) : pos.entryPrice + mult * 0.01),
+          tp2:         pm?.tp2 ?? (dbRows[0]?.tp2 ? parseFloat(dbRows[0].tp2!) : pos.entryPrice + mult * 0.02),
+          openedAt:    pm?.openedAt ?? (pos.openTime ?? Date.now()),
+        }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}:`, e.message));
+        console.log(`[startup] ${pos.symbol} — Claude SL from trade_log: $${claudeSl.toFixed(4)}`);
         continue;
       }
-
-      // Validate stored metadata is plausible for the current position.
-      // If qty or TP1 is wildly off (stale from an old session), fall through and refresh.
-      const liveMarkPrice = (pos as any).markPrice as number | undefined;
-      const refPrice = liveMarkPrice ?? pos.entryPrice;
-      const metaQtyValid = pm.originalQty != null &&
-        Math.abs(pm.originalQty / pos.size - 1) < 2.0;        // within 3× current size
-      const metaTp1Valid = !pm.tp1 ||                           // no tp1 stored = ok (won't block)
-        Math.abs(pm.tp1 / refPrice - 1) < 0.50;               // tp1 within 50% of current price
-
-      if (metaQtyValid && metaTp1Valid) {
-        // Validate SL direction plausibility against mark price (not entry)
-        // For trailing stops, SL > entryPrice is expected — check SL < markPrice instead
-        if (pm.sl && pos.side !== "None") {
-          const direction = pos.side === "Buy" ? "long" : "short";
-          const slAboveMark = direction === "long"  && pm.sl >= (pos.markPrice ?? refPrice);
-          const slBelowMark = direction === "short" && pm.sl <= (pos.markPrice ?? refPrice);
-          if (slAboveMark || slBelowMark) {
-            console.error(`[startup] ${pos.symbol} SL=$${pm.sl.toFixed(4)} is on WRONG SIDE of mark $${refPrice.toFixed(4)} for ${direction} — ATR reset required`);
-            // Fall through to ATR reset
-          } else {
-            const trailingNote = pm.trailingActive && pm.sl > pos.entryPrice ? " (trailing, locked in profit)" : "";
-            console.log(`[startup] ${pos.symbol} — metadata valid, preserving Claude SL/TP${trailingNote}`);
-            continue;
-          }
-        } else {
-          console.log(`[startup] ${pos.symbol} — metadata valid, preserving Claude SL/TP`);
-          continue;
-        }
-      }
-      console.log(`[startup] ${pos.symbol} — stale metadata detected (qty=${pm.originalQty} vs pos.size=${pos.size}, tp1=${pm.tp1}, refPrice=${refPrice.toFixed(4)}) → refreshing with ATR`);
     }
 
-    const direction = pos.side === "Buy" ? "long" : "short" as "long" | "short";
-    const klines    = await getKlines(pos.symbol, "240", 28).catch(() => [] as BybitKline[]);
-    const atr       = calcATR(klines, 14);
+    // ── Priority 2: Exchange already has a valid SL — preserve it ────────────
+    const exchangeSl = pos.stopLoss ?? 0;
+    const exchangeSlValid = exchangeSl > 0 &&
+      (direction === "long" ? exchangeSl < ref : exchangeSl > ref);
+
+    if (exchangeSlValid) {
+      const note = pm?.trailingActive
+        ? `trailing SL active (SL=$${exchangeSl.toFixed(4)}) preserving`
+        : `exchange SL preserved: $${exchangeSl.toFixed(4)}`;
+      console.log(`[startup] ${pos.symbol} — ${note}`);
+      await storePositionMeta(pos.symbol, {
+        originalQty: pm?.originalQty ?? pos.size,
+        entryPrice:  pos.entryPrice,
+        sl:          exchangeSl,
+        atr:         pm?.atr ?? 0,
+        tp1:         pm?.tp1 ?? pos.entryPrice + mult * 0.01,
+        tp2:         pm?.tp2 ?? pos.entryPrice + mult * 0.02,
+        openedAt:    pm?.openedAt ?? (pos.openTime ?? Date.now()),
+      }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}:`, e.message));
+      continue;
+    }
+
+    // ── Priority 3: ATR fallback — only when no SL exists anywhere ───────────
+    const klines = await getKlines(pos.symbol, "240", 28).catch(() => [] as BybitKline[]);
+    const atr    = calcATR(klines, 14);
 
     if (atr === 0) {
       console.warn(`[startup] ATR=0 for ${pos.symbol} — skipping`);
       continue;
     }
 
-    // Always recompute from current ATR — don't rely on stored values for exchange sync
-    const mult = direction === "long" ? 1 : -1;
-    let   sl   = pos.entryPrice - mult * atr * 1.5;   // LONG: below entry; SHORT: above entry
-    const tp1  = pos.entryPrice + mult * atr * 1.0;
-    const tp2  = pos.entryPrice + mult * atr * 2.0;
+    let sl   = pos.entryPrice - mult * atr * 1.5;
+    const tp1 = pos.entryPrice + mult * atr * 1.0;
+    const tp2 = pos.entryPrice + mult * atr * 2.0;
 
     if (direction === "long" && sl > pos.entryPrice) {
       console.error(`[startup] SL above entry for long — recalculating: SL=$${sl.toFixed(4)} entry=$${pos.entryPrice.toFixed(4)}`);
@@ -472,36 +489,31 @@ async function setSlTpForExistingPositions(): Promise<void> {
     }
 
     const maxSlDist = pos.entryPrice * 0.40;
-    if (Math.abs(sl - pos.entryPrice) > maxSlDist) {
+    if (Math.abs(sl - pos.entryPrice) > maxSlDist)
       sl = direction === "long" ? pos.entryPrice - maxSlDist : pos.entryPrice + maxSlDist;
-    }
 
-    // Validate SL is on the correct side of the current price before submitting
-    const livePrice = await getTicker(pos.symbol).then(t => t.lastPrice).catch(() => 0);
     const slValid = livePrice === 0 ||
-      (direction === "long"  && sl < livePrice) ||
-      (direction === "short" && sl > livePrice);
+      (direction === "long" ? sl < livePrice : sl > livePrice);
 
     if (!slValid) {
-      console.warn(`[startup] ${pos.symbol} ATR SL=$${sl.toFixed(4)} above live price $${livePrice.toFixed(4)} — skipping SL, keeping existing`);
+      console.warn(`[startup] ${pos.symbol} ATR SL=$${sl.toFixed(4)} invalid vs live $${livePrice.toFixed(4)} — skipping SL`);
     }
 
     await Promise.allSettled([
-      slValid ? bybitSetStopLoss(pos.symbol,  sl,  pos.positionIdx) : Promise.resolve(),
+      slValid ? bybitSetStopLoss(pos.symbol, sl, pos.positionIdx) : Promise.resolve(),
       bybitSetTakeProfit(pos.symbol, tp2, pos.positionIdx),
     ]);
 
-    // Always upsert metadata so sl field is populated
     await storePositionMeta(pos.symbol, {
-      originalQty: existingMeta[pos.symbol]?.originalQty ?? pos.size,
+      originalQty: pm?.originalQty ?? pos.size,
       entryPrice:  pos.entryPrice,
       sl,
       atr,
       tp1,
       tp2,
-      openedAt:    existingMeta[pos.symbol]?.openedAt ?? (pos.openTime ?? Date.now()),
+      openedAt: pm?.openedAt ?? (pos.openTime ?? Date.now()),
     }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}: ${e.message}`));
 
-    console.log(`[startup] ATR SL/TP for ${pos.symbol} ${direction}: SL=$${sl.toFixed(4)} TP1=$${tp1.toFixed(4)} TP2=$${tp2.toFixed(4)}`);
+    console.log(`[startup] ${pos.symbol} — ATR fallback SL (no prior SL found): $${sl.toFixed(4)}`);
   }
 }
