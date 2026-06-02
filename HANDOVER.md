@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 3, 2026
+**Last updated:** June 3, 2026 (commit 9ef7c64)
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -30,8 +30,12 @@
 `symbol, direction, score, entry, stopLoss, tp1, tp2, rewardRiskRatio (required), setupType, tp1ClosePercent (default 30), tp2ClosePercent (default 100), limitPrice`
 
 ### Exit System
-- **TP1:** close `tp1ClosePercent`% (default 30%), SL → breakeven, set `tp1Executed=true`
+- **TP1:** close `tp1ClosePercent`% (default 30%), SL → entry×1.01 (long) / entry×0.99 (short), set `tp1Executed=true`
 - **TP2:** close `tp2ClosePercent`% of remaining (default 100% = Full-mode). If <100%, exchange sets Partial TP via `trading-stop`
+- **Mechanical breakeven ladder (posMonitor, zero API cost):**
+  - P/L ≥ +2% → SL to entry price (self-gating: only fires when SL still below/above entry)
+  - TP1 hit → SL to +1% (above entry for longs, below for shorts)
+  - SL only ratchets tighter, never loosened; Claude's NEW_SL can further tighten above this floor
 - **Large profit:** ≥+15% close 50%; ≥+20% full close
 - **Hard stop:** ≤-40% immediate | **Daily loss limit:** -30%
 - **Trailing SL:** Claude outputs `NEW_SL [$price]` on 3rd line of any HOLD/PARTIAL_CLOSE (ratchet-only)
@@ -47,7 +51,7 @@
 - Last 50 × 1h and 50 × 15m candles (OHLCV)
 - Order book top 50 bids/asks
 - 24-period funding rate history + current funding + OI
-- Estimated liq price at 10× leverage
+- Accurate liq price using actual portfolioLeverage (capped 10×, formula: entry×(1-1/lev+0.005) for longs) + scan prompt rule: SL ≥2% above liq (longs) / ≤2% below (shorts)
 - Relative strength vs BTC (4h/1D/7D)
 - Liquidity sweep + squeeze detection
 - Trade memory (last reflections) + performance summary
@@ -95,7 +99,7 @@
 - **Capital top-up** — consider if performance confirmed
 - **tp1 always required in signal** — fixed `d3bfcf2`: prompt hardened + gate uses `v <= 0` for numerics
 - **Run `/forceRules`** after 5+ more clean trades — regenerate rules without corrupted reflection influence
-- **SL-to-liquidation buffer gate** — no code gate prevents SL from being dangerously close to liqPrice; ADAUSDT currently has this gap. Future work: add hard gate at entry rejecting SL within 5% of estimated liqPrice.
+- **SL-to-liquidation buffer** — scan prompt now instructs Claude to keep SL ≥2% above (longs) / ≤2% below (shorts) liquidation price; liq price is now computed accurately from portfolioLeverage (capped 10×) not hardcoded. Informational — not a hard gate.
 
 ## Fix — SL Integrity (June 3)
 
