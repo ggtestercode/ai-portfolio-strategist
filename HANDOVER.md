@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 3, 2026 (commit 8b11f89)
+**Last updated:** June 3, 2026
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -149,6 +149,19 @@ Backfill generated a `trade_memory` row 33 seconds after the reconciler phantom-
 - `tp1` required field instruction added to Phase 2 scan prompt — explicit note that `tp1=0` is rejected and must be a specific price matching trade direction
 - Hard gate `tp1`/`stopLoss` check hardened from falsy `!v` to explicit `typeof v === 'number' ? v <= 0 : !v` — catches zero and negative prices by name
 - Prevents `setTp1Partial` being skipped on limit fills (root cause: `pendingLimitFills.tp1 = undefined` when signal omits or zeros `tp1`)
+
+---
+
+## DB Cleanup (June 3)
+
+**trade_log is now fully clean — every row has `exit_at`.**
+
+Two batches of ghost rows voided (`exit_price = entry_price`, `pnl = 0`, no P/L impact):
+
+- **2 Bybit orphans** — `ETH` (dc064f9e, short, May 9, $2314.04) and `SOL` (7c38b5bd, long, May 15, $91.01). Old bare-symbol format from an earlier bot version. Were triggering `[reconcile] no closedPnl found` noise on every restart. Voided → reconciler now finds 0 open bybit rows.
+- **15 OKX ghosts** — SOL-USDT ×8, ETH-USDT ×3, BTC-USDT ×2, AVAX-USDT ×1, LINK-USDT ×1. All May 6–7, all longs, from the old OKX paper trading era. Were not causing runtime noise (reconciler only processes bybit rows) but were polluting open-row counts.
+
+Post-cleanup: `SELECT COUNT(*) FROM trade_log WHERE exit_at IS NULL` → **0**.
 
 ---
 
