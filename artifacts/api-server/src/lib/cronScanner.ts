@@ -374,8 +374,24 @@ async function cancelStaleOrders(): Promise<{
 }> {
   const cancelled: Array<{ symbol: string; price: number }> = [];
   const active:    Array<{ symbol: string; side: string; price: number; qty: number; placedAt: string }> = [];
+  let orders: Awaited<ReturnType<typeof bybitGetOrders>> = [];
+  let fetchErr: Error | null = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      orders = await bybitGetOrders();
+      fetchErr = null;
+      break;
+    } catch (e) {
+      fetchErr = e as Error;
+      console.error(`[cronScanner] getOrders attempt ${attempt}/3 failed:`, fetchErr.message);
+      if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  if (fetchErr) {
+    await alertFn?.("⚠️ Order fetch failed — stale order cancellation may have been skipped").catch(() => {});
+    return { cancelled, active };
+  }
   try {
-    const orders   = await bybitGetOrders();
     const fourHAgo = Date.now() - 4 * 60 * 60 * 1000;
     for (const order of orders) {
       const placedAt = new Date(order.placedAt).getTime();
@@ -399,7 +415,6 @@ async function cancelStaleOrders(): Promise<{
     }
   } catch (e) {
     console.error("[cronScanner] staleOrderCheck failed:", (e as Error).message);
-    await alertFn?.("⚠️ Order fetch failed — stale order cancellation may have been skipped").catch(() => {});
   }
   return { cancelled, active };
 }
