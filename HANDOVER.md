@@ -67,6 +67,7 @@
 ## Recent Commits (last 15)
 | Commit | Description |
 |--------|-------------|
+| `d3bfcf2` | fix: enforce tp1 > 0 — prompt + hard gate |
 | `267b8f2` | docs: HANDOVER.md slim + archive |
 | `6843be7` | feat: pending limit orders in Phase 2 scan prompt |
 | `6db3bef` | docs: HANDOVER.md tp1/tp2ClosePercent |
@@ -88,7 +89,7 @@
 ## Open Items
 - **Scan to 30min** — currently 4h; restore when balance >$50 and stable
 - **Capital top-up** — consider if performance confirmed
-- **tp1 always required in signal** — see investigation finding below
+- **tp1 always required in signal** — fixed `d3bfcf2`: prompt hardened + gate uses `v <= 0` for numerics
 
 ## Investigation Finding — SOLUSDT (June 2)
 
