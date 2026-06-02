@@ -652,9 +652,11 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
           // Set flag BEFORE close — prevents double-close if exchange partial order already executed
           await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
           await closePercentPosition(pos.symbol, 30);
-          // Move SL to breakeven
-          await bybitSetStopLoss(pos.symbol, pm.entryPrice, pos.positionIdx)
-            .catch(e => console.warn(`[cronScanner] Breakeven SL failed ${pos.symbol}:`, e.message));
+          // Move SL to +1% beyond entry (longs: entry×1.01, shorts: entry×0.99)
+          const tp1Sl = pos.side === "Buy" ? pm.entryPrice * 1.01 : pm.entryPrice * 0.99;
+          await bybitSetStopLoss(pos.symbol, tp1Sl, pos.positionIdx)
+            .catch(e => console.warn(`[cronScanner] TP1 +1% SL failed ${pos.symbol}:`, e.message));
+          await patchPositionMeta(pos.symbol, { sl: tp1Sl }).catch(() => {});
           const banked        = pos.pnl * 0.30;
           const base          = pos.symbol.replace(/USDT$/, "");
           const remainQty     = +(pos.size * 0.70).toFixed(4);
@@ -664,7 +666,7 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
             `💰 TP1 profit banked — ${pos.symbol}`,
             `Closed: 30% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
-            `SL moved to breakeven: $${pm.entryPrice.toFixed(4)}`,
+            `SL locked to +1%: $${tp1Sl.toFixed(4)}`,
             `Remaining: ${remainQty} ${base} ($${remainMargin.toFixed(2)} margin)`,
             dustLine,
           ].filter(Boolean).join("\n")).catch(() => {});
@@ -2080,6 +2082,22 @@ async function checkPositionMonitor(): Promise<void> {
       await alertFn?.(`🛑 <b>Hard stop — ${pos.symbol}</b>\nP/L: ${pnlPct.toFixed(1)}% hit -40% limit. Position closed.`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       void closeSide; // suppress unused variable warning
       continue;
+    }
+
+    // Mechanical breakeven: when P/L ≥ +2% and SL is still below entry (longs) or above entry (shorts),
+    // move SL to entry. Self-gating — fires once, then the condition is never true again.
+    if (pnlPct >= 2 && pos.entryPrice > 0) {
+      const beSlRaw = posMeta[pos.symbol]?.sl ?? pos.stopLoss ?? 0;
+      const beSl    = typeof beSlRaw === "number" ? beSlRaw : parseFloat(String(beSlRaw) || "0");
+      const isLong  = pos.side === "Buy";
+      const needsBe = beSl > 0 && (isLong ? beSl < pos.entryPrice : beSl > pos.entryPrice);
+      if (needsBe) {
+        await bybitSetStopLoss(pos.symbol, pos.entryPrice, pos.positionIdx)
+          .catch(e => console.warn(`[posMonitor] Breakeven SL failed ${pos.symbol}:`, (e as Error).message));
+        await patchPositionMeta(pos.symbol, { sl: pos.entryPrice }).catch(() => {});
+        console.log(`[posMonitor] ${pos.symbol} SL → breakeven $${pos.entryPrice.toFixed(4)} (P/L ${pnlPct.toFixed(1)}% ≥ +2%)`);
+        await alertFn?.(`🛡️ <b>Breakeven SL — ${pos.symbol}</b>\nP/L +${pnlPct.toFixed(1)}% → SL moved to entry $${pos.entryPrice.toFixed(4)}`).catch(() => {});
+      }
     }
 
     // Review interval by P/L tier

@@ -4,7 +4,7 @@ import { getWatchlist, type WatchlistEntry } from "./watchlist";
 import { fetchAssetData, type AssetData }    from "../data/marketData";
 import { getKlines, getFundingRate, getOpenInterest, getTicker, getPositions as bybitGetPositions, getOrderbook, getFundingHistory, getOrders as bybitGetOrders, type BybitKline, type BybitPosition } from "../brokers/bybit";
 import { getRecentMemory, getPerformanceSummary, getActiveRules } from "./tradeMemoryLib";
-import { db, profileTable }                  from "@workspace/db";
+import { db, profileTable, botStateTable }    from "@workspace/db";
 import { sql }                               from "drizzle-orm";
 
 export type Recommendation = "STRONG BUY" | "BUY" | "WATCH" | "AVOID";
@@ -438,6 +438,7 @@ async function runPhase2(
   tradeMemory:     string,
   perfSummary:     string,
   activeRules:     Awaited<ReturnType<typeof getActiveRules>>,
+  leverage:        number,
 ): Promise<ScanOpportunity[]> {
   // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
   const mtfLines:        string[] = [];
@@ -517,7 +518,7 @@ async function runPhase2(
       const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
       mtfLines.push(`${sym} MTF: ${mtf}`);
       fundingLines.push(`${sym} fundingRate=${rSign}${(fr.rate * 100).toFixed(4)}% OI=${oi > 1e9 ? `${(oi/1e9).toFixed(2)}B` : oi > 1e6 ? `${(oi/1e6).toFixed(1)}M` : oi.toFixed(0)}`);
-      if (price > 0) liqLines.push(`${sym} liq@10x: long=$${(price * 0.9).toFixed(4)} short=$${(price * 1.1).toFixed(4)}`);
+      if (price > 0) liqLines.push(`${sym} liq@${leverage}x: long=$${(price * (1 - 1/leverage + 0.005)).toFixed(4)} short=$${(price * (1 + 1/leverage - 0.005)).toFixed(4)}`);
       if (klines1h.length  > 0) candle1hLines.push(`${sym} 1h candles (O,H,L,C,V): ${klines1h.slice(-50).map(fmtCandle).join(" | ")}`);
       if (klines15m.length > 0) candle15mLines.push(`${sym} 15m candles (O,H,L,C,V): ${klines15m.slice(-50).map(fmtCandle).join(" | ")}`);
       if (ob.bids.length > 0 && ob.asks.length > 0) {
@@ -645,7 +646,7 @@ async function runPhase2(
     fundingLines.length    ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n`                             : "",
     orderbookLines.length  ? `Order book depth (top 50 bids/asks):\n${orderbookLines.join("\n")}\n`                     : "",
     fundingHistLines.length? `Funding rate history (24 periods, oldest→newest):\n${fundingHistLines.join("\n")}\n`      : "",
-    liqLines.length        ? `Estimated liquidation prices (10× leverage, at current price):\n${liqLines.join("\n")}\n` : "",
+    liqLines.length        ? `Liquidation prices (@${leverage}x leverage, ~0.5% maint margin):\n${liqLines.join("\n")}\nSL must stay ≥2% above (longs) or ≤2% below (shorts) liquidation price.\n` : "",
     recentExitLines.length ? `Recent exits (last 24h — context for re-entry decisions):\n${recentExitLines.join("\n")}\n` : "",
     pendingLines.length    ? `Pending limit orders (unfilled — consider cancel/hold/skip):\n${pendingLines.join("\n")}\n` : "",
     rsContext ? `\n${rsContext}\n` : "",
@@ -693,14 +694,16 @@ export async function runScan(): Promise<ScanResult> {
     // ── Phase 0: Regime + basic data ─────────────────────────────────────────
     const regime = await detectMarketRegime();
 
-    const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules] = await Promise.all([
+    const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules, botState] = await Promise.all([
       getWatchlist(),
       db.select().from(profileTable).limit(1).then(r => r[0] ?? null),
       bybitGetPositions().catch(() => [] as BybitPosition[]),
       getRecentMemory(20).catch(() => ""),
       getPerformanceSummary().catch(() => ""),
       getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>),
+      db.select({ portfolioLeverage: botStateTable.portfolioLeverage }).from(botStateTable).limit(1).then(r => r[0] ?? null),
     ]);
+    const leverage = Math.min(botState?.portfolioLeverage ?? 10, 10);
 
     const classMap  = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
     const assetData = await fetchAllData(watchlist);
@@ -741,7 +744,7 @@ export async function runScan(): Promise<ScanResult> {
       : cryptoData.slice(0, 10).map(d => d.symbol);
     console.log(`[scanner] Phase 1 → ${selectedSymbols.join(", ")}`);
 
-    const opportunities = await runPhase2(selectedSymbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules);
+    const opportunities = await runPhase2(selectedSymbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules, leverage);
 
     const result: ScanResult = { opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "" };
     return result;
@@ -750,14 +753,16 @@ export async function runScan(): Promise<ScanResult> {
 
 export async function runFocusedScan(symbols: string[]): Promise<ScanResult> {
   const regime = await detectMarketRegime();
-  const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules] = await Promise.all([
+  const [watchlist, profile, bybitPositions, tradeMemory, perfSummary, activeRules, botState] = await Promise.all([
     getWatchlist(),
     db.select().from(profileTable).limit(1).then(r => r[0] ?? null),
     bybitGetPositions().catch(() => [] as BybitPosition[]),
     getRecentMemory(20).catch(() => ""),
     getPerformanceSummary().catch(() => ""),
     getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>),
+    db.select({ portfolioLeverage: botStateTable.portfolioLeverage }).from(botStateTable).limit(1).then(r => r[0] ?? null),
   ]);
+  const leverage = Math.min(botState?.portfolioLeverage ?? 10, 10);
 
   const watchlistClassMap = Object.fromEntries(watchlist.map(e => [e.symbol, e.assetClass]));
   // Default to "Crypto" for watch coins not in the portfolio watchlist
@@ -774,7 +779,7 @@ export async function runFocusedScan(symbols: string[]): Promise<ScanResult> {
     ? bybitPositions.map(p => `${p.symbol} ${p.side} size=${p.size} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
     : "none";
 
-  const opportunities = await runPhase2(symbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules);
+  const opportunities = await runPhase2(symbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules, leverage);
 
   return { opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "" };
 }
