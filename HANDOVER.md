@@ -88,6 +88,19 @@
 ## Open Items
 - **Scan to 30min** — currently 4h; restore when balance >$50 and stable
 - **Capital top-up** — consider if performance confirmed
+- **tp1 always required in signal** — see investigation finding below
+
+## Investigation Finding — SOLUSDT (June 2)
+
+**Root cause: limit orders without `tp1` in the signal skip `setTp1Partial` entirely.**
+
+- `pendingLimitFills` stores `tp1: undefined` when signal has no `tp1Price`
+- Fill detection condition `fill.tp1 && fill.tp1 > 0` → FALSE → `setTp1Partial` never called
+- ATR self-heal fires instead → sets Full-mode TP via `bybitSetTakeProfit()` (not a partial)
+- **Self-heal ATR TP can be wrong-side on shorts:** if metadata is stale or position qty changed, the ATR calculation uses wrong `entryPrice` and places TP above entry for a short (loss direction, not profit direction)
+- SOL closed via posMonitor CLOSE (restart cleared `lastReviewAt` → immediate review) not exchange TP
+
+**Fix required:** Signal schema prompt must enforce `tp1` as a required field (same as `stopLoss`). The hard gate already requires `tp1` to be present — but the signal must actually set it to a valid price (not zero). Consider adding `tp1 > 0` to the gate check alongside the existing presence check.
 
 ---
 
