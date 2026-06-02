@@ -85,35 +85,49 @@ export async function applyAtrSlTp(
     return;
   }
 
-  const mult = direction === "long" ? 1 : -1;
-  let   sl   = entryPrice - mult * atr * 1.5;   // LONG: below entry; SHORT: above entry
-  const tp1  = entryPrice + mult * atr * 1.0;
-  const tp2  = entryPrice + mult * atr * 2.0;
+  const mult   = direction === "long" ? 1 : -1;
+  const atrSl  = entryPrice - mult * atr * 1.5;
+  const atrTp1 = entryPrice + mult * atr * 1.0;
+  const atrTp2 = entryPrice + mult * atr * 2.0;
 
-  // Defensive: ensure SL is on the correct side of entry regardless of formula bugs
-  if (direction === "long" && sl > entryPrice) {
-    console.error(`[startup] SL above entry for long — recalculating: SL=$${sl.toFixed(4)} entry=$${entryPrice.toFixed(4)}`);
-    sl = entryPrice - atr * 1.5;
-  }
-  if (direction === "short" && sl < entryPrice) {
-    console.error(`[startup] SL below entry for short — recalculating: SL=$${sl.toFixed(4)} entry=$${entryPrice.toFixed(4)}`);
-    sl = entryPrice + atr * 1.5;
-  }
-
-  // Hard cap: SL cannot be more than 40% from entry
-  const maxSlDist = entryPrice * 0.40;
-  if (Math.abs(sl - entryPrice) > maxSlDist) {
-    sl = direction === "long" ? entryPrice - maxSlDist : entryPrice + maxSlDist;
-    console.warn(`[startup] ${symbol} ATR SL capped at 40% from entry`);
-  }
-
-  // Validate SL is on the correct side before submitting
   const livePrice = await getTicker(symbol).then(t => t.lastPrice).catch(() => entryPrice);
-  const slValid = (direction === "long" && sl < livePrice) || (direction === "short" && sl > livePrice);
+  const slOnside  = (n: number) => (direction === "long" && n < livePrice) || (direction === "short" && n > livePrice);
+
+  // Priority 1: Claude's planned SL/TP from trade_log — never override with ATR if Claude's values exist
+  const dbRows = await db.select({ sl: tradeLogTable.sl, tp1: tradeLogTable.tp1, tp2: tradeLogTable.tp2 })
+    .from(tradeLogTable)
+    .where(and(eq(tradeLogTable.symbol, symbol), eq(tradeLogTable.broker, "bybit"), isNull(tradeLogTable.exitAt)))
+    .orderBy(desc(tradeLogTable.entryAt))
+    .limit(1)
+    .catch(() => [] as Array<{ sl: unknown; tp1: unknown; tp2: unknown }>);
+
+  const dbSl  = dbRows[0]?.sl  ? parseFloat(String(dbRows[0].sl))  : 0;
+  const dbTp1 = dbRows[0]?.tp1 ? parseFloat(String(dbRows[0].tp1)) : 0;
+  const dbTp2 = dbRows[0]?.tp2 ? parseFloat(String(dbRows[0].tp2)) : 0;
+
+  let sl: number;
+  if (dbSl > 0 && slOnside(dbSl)) {
+    sl = dbSl;
+    console.log(`[startup] ${symbol} SL priority: trade_log $${sl.toFixed(4)} (skipping ATR override)`);
+  } else {
+    // ATR fallback — apply defensive checks
+    sl = atrSl;
+    if (direction === "long" && sl > entryPrice) sl = entryPrice - atr * 1.5;
+    if (direction === "short" && sl < entryPrice) sl = entryPrice + atr * 1.5;
+    const maxSlDist = entryPrice * 0.40;
+    if (Math.abs(sl - entryPrice) > maxSlDist)
+      sl = direction === "long" ? entryPrice - maxSlDist : entryPrice + maxSlDist;
+  }
+
+  // TP for exchange: use Claude's TP2 (full-mode close target) if available; else ATR TP1
+  // TP1 for metadata: used by software polling (checkPartialExits) — use Claude's TP1 if available
+  const tp1        = dbTp1 > 0 ? dbTp1 : atrTp1;
+  const tp2        = dbTp2 > 0 ? dbTp2 : atrTp2;
+  const exchangeTp = dbTp2 > 0 ? dbTp2 : atrTp1; // Full-mode TP on exchange = TP2 if known
 
   await Promise.allSettled([
-    slValid ? bybitSetStopLoss(symbol, sl, positionIdx) : Promise.resolve(),
-    bybitSetTakeProfit(symbol, tp1, positionIdx),
+    slOnside(sl) ? bybitSetStopLoss(symbol, sl, positionIdx) : Promise.resolve(),
+    bybitSetTakeProfit(symbol, exchangeTp, positionIdx),
   ]);
 
   await storePositionMeta(symbol, {
@@ -347,11 +361,22 @@ async function reconcileClosedPositions(): Promise<void> {
   const bybitOpen = openInDb.filter(t => t.broker === "bybit");
   if (!bybitOpen.length) return;
 
+  // Load pending limit fills from DB — don't reconcile-close a row while its limit order is still open
+  const [stateRow] = await db.select({ pendingLimitFills: botStateTable.pendingLimitFills })
+    .from(botStateTable).limit(1).catch(() => [null]);
+  const pendingSymbols = new Set(Object.keys(stateRow?.pendingLimitFills ?? {}));
+
   const livePositions = await bybitGetPositions().catch(() => []);
   const liveSymbols   = new Set(livePositions.map(p => p.symbol));
 
   for (const trade of bybitOpen) {
     if (liveSymbols.has(trade.symbol)) continue;
+
+    // Pending limit order — position may not have opened yet; reconciler must not touch it
+    if (pendingSymbols.has(trade.symbol)) {
+      console.log(`[reconcile] ${trade.symbol} — pending limit fill exists, skipping reconcile`);
+      continue;
+    }
 
     console.log(`[reconcile] ${trade.symbol} open in DB but not on Bybit — fetching closedPnl`);
     const closed = await bybitGetClosedPnl(5, undefined, trade.symbol).catch(() => []);
