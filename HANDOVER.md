@@ -67,6 +67,7 @@
 ## Recent Commits (last 15)
 | Commit | Description |
 |--------|-------------|
+| `ba3361d` | fix: raise R:R hard gate from 1.0 to 1.5 — both scan paths |
 | `449b0fc` | docs: HANDOVER.md — tp1 enforcement fix details |
 | `d3bfcf2` | fix: enforce tp1 > 0 — prompt + hard gate |
 | `267b8f2` | docs: HANDOVER.md slim + archive |
