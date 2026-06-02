@@ -94,6 +94,22 @@
 - **Scan to 30min** — currently 4h; restore when balance >$50 and stable
 - **Capital top-up** — consider if performance confirmed
 - **tp1 always required in signal** — fixed `d3bfcf2`: prompt hardened + gate uses `v <= 0` for numerics
+- **Run `/forceRules`** after 5+ more clean trades — regenerate rules without corrupted reflection influence
+
+## Investigation Finding — Reconciler Overwrite Bug (June 2)
+
+**Root cause: reconciler stamps prior closed PnL onto pending limit order rows when a same-symbol position closes while the limit order is still unfilled.**
+
+- On restart, `recoverPendingLimitFills()` cleared limit-order rows when no live position existed (treating unfilled = closed)
+- Reconciler then called `bybitGetClosedPnl()` for that symbol → found the *previous* trade's exit data → wrote wrong entry/exit/pnl onto the pending row
+- Two trades affected: **LINKUSDT** (a0f713d6) had -$1.63 loss overwritten onto what was a +$1.17 win; **HYPEUSDT** (384a9874) was phantom-closed with May 30 position's +$1.498 PnL while the Jun 1 $71.50 fill is still open
+- Two corrupted reflections in `trade_memory` deleted (LINK `-3.03%` and HYPE `+7.84%`, both created Jun 1 00:24 UTC)
+
+**Fixed in `cb11b2f`:** `recoverPendingLimitFills()` now checks for open orders on Bybit before removing a fill entry — only removes when both no live position AND no open order exist.
+
+**DB corrections applied June 2:**
+- `a0f713d6` LINKUSDT: entry $9.253→$9.030, exit $8.986→$9.189, pnl -$1.63→+$1.17, pnl_pct -3.03%→+1.72%
+- `384a9874` HYPEUSDT: entry $65.953→$71.50, exit_at/exit_price/pnl cleared (position still open)
 
 ## Investigation Finding — SOLUSDT (June 2)
 
