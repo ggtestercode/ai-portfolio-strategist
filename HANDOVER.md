@@ -22,7 +22,7 @@
 ### Signal Flow
 1. **Phase 1 (Haiku)** — selects top 10 symbols by RS vs BTC from 27 watchlist symbols
 2. **Phase 2 (Sonnet)** — per-symbol: MTF, 50 candles, order book, funding history, recent exits, pending orders → signal JSON
-3. **Hard gates** — SL/TP1/setupType/score present; R:R ≥ 1.5 (computed from raw values); extreme funding >0.1%; HTF boundary; EMA alignment; liquidity <$10M
+3. **Hard gates** — SL/TP1/setupType/score present; R:R ≥ 1.1 (computed from raw values); extreme funding >0.1%; HTF boundary; EMA alignment; liquidity <$10M
 4. **Position limit** — max 3 open (live Bybit count before any new entry)
 5. **posMonitor** — 5-min tick; Claude review every 4h (sooner at drawdown or RSI/OI triggers)
 
