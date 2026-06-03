@@ -453,18 +453,27 @@ async function setSlTpForExistingPositions(): Promise<void> {
         (direction === "long" ? claudeSl < ref : claudeSl > ref);
 
       if (claudeSlValid) {
-        await bybitSetStopLoss(pos.symbol, claudeSl, pos.positionIdx)
+        // Take the more protective SL: trade_log (Claude's plan) vs positionMetadata (in-session ratchet)
+        // Longs: higher SL is more protective. Shorts: lower SL is more protective.
+        const metaSl      = pm?.sl ?? 0;
+        const metaSlValid = metaSl > 0 && (direction === "long" ? metaSl < ref : metaSl > ref);
+        const chosenSl    = metaSlValid
+          ? (direction === "long" ? Math.max(claudeSl, metaSl) : Math.min(claudeSl, metaSl))
+          : claudeSl;
+        const slSource    = chosenSl !== claudeSl ? "positionMeta ratchet" : "trade_log";
+
+        await bybitSetStopLoss(pos.symbol, chosenSl, pos.positionIdx)
           .catch(e => console.warn(`[startup] setStopLoss ${pos.symbol}:`, e.message));
         await storePositionMeta(pos.symbol, {
           originalQty: pm?.originalQty ?? pos.size,
           entryPrice:  pos.entryPrice,
-          sl:          claudeSl,
+          sl:          chosenSl,
           atr:         pm?.atr ?? 0,
           tp1:         pm?.tp1 ?? (dbRows[0]?.tp1 ? parseFloat(dbRows[0].tp1!) : pos.entryPrice + mult * 0.01),
           tp2:         pm?.tp2 ?? (dbRows[0]?.tp2 ? parseFloat(dbRows[0].tp2!) : pos.entryPrice + mult * 0.02),
           openedAt:    pm?.openedAt ?? (pos.openTime ?? Date.now()),
         }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}:`, e.message));
-        console.log(`[startup] ${pos.symbol} — Claude SL from trade_log: $${claudeSl.toFixed(4)}`);
+        console.log(`[startup] ${pos.symbol} — SL $${chosenSl.toFixed(4)} (${slSource})`);
         continue;
       }
     }
