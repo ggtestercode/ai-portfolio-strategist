@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 3, 2026
+**Last updated:** June 3, 2026 (commit ec5df72)
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -117,6 +117,21 @@ Three bugs in `startup.ts` caused exchange SL to diverge from Claude's planned S
 Backfill generated a `trade_memory` row 33 seconds after the reconciler phantom-closed INJUSDT, but without `source_trade_id`. Fixed with a direct SQL UPDATE.
 
 **Commit:** see `fix: SL integrity — priority chain + trailingActive inheritance`
+
+**Bug 4 (June 3) — posMonitor self-heal (`applyAtrSlTp`) also overwrote SL with ATR:**
+`setSlTpForExistingPositions` was fixed but `applyAtrSlTp` — called by posMonitor when metadata fields are missing — had the same bug: applied ATR SL unconditionally. Additionally, the exchange TP was set to ATR TP1 (Full-mode), overriding Claude's TP2. This was the direct cause of NEAR's exchange SL changing from $2.54 → $2.4743 after the first restart post-fix.
+
+**Fix (`4156480`):** `applyAtrSlTp` now reads `trade_log.sl/tp1/tp2` first. Exchange SL uses Claude's planned value if valid; exchange TP uses `trade_log.tp2` (Full-mode target) rather than ATR TP1. ATR is a true fallback only.
+
+**Bug 5 (June 3) — `reconcileClosedPositions` phantom-closed pending limit rows:**
+Reconciler found symbols open in DB but absent from live Bybit positions (because limit order hadn't filled yet) and used stale `closedPnl` records to close them. Affected HYPE twice (June 2 and June 3).
+
+**Fix (`4156480`):** `reconcileClosedPositions` now loads `pendingLimitFills` from DB at startup and skips any symbol with an outstanding limit order.
+
+**Bug 6 (June 3) — Restart reset ratcheted SL back to Claude's original wider value:**
+`setSlTpForExistingPositions` Priority 1 used only `trade_log.sl`. If posMonitor had already ratcheted SL to breakeven ($2.70) during the session, a restart reset it back to $2.54 (trade_log.sl), widening the stop.
+
+**Fix (`ec5df72`):** Priority 1 now takes the more protective of `trade_log.sl` and `positionMetadata.sl` — `Math.max()` for longs, `Math.min()` for shorts — both validated against live price. SL only ratchets toward profit on restart, never backward.
 
 ---
 
