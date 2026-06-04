@@ -1042,7 +1042,10 @@ export async function generateTradingRules(force = false): Promise<void> {
 
   const reflections = await db.select()
     .from(tradeMemoryTable)
-    .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+    .where(and(
+      eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
+      inArray(tradeMemoryTable.exitMethod, ["sl_hit", "tp_hit"]),
+    ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
 
