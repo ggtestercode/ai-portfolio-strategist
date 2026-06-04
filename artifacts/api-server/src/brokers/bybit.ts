@@ -556,12 +556,13 @@ export interface BybitClosedPnl {
   avgExitPrice:  number;
   closedPnl:     number;
   leverage:      number;
+  orderId:              string;
   closedAt:             number; // epoch ms (updatedTime) — when this close executed
   closeOrderCreatedAt:  number; // epoch ms (createdTime) — when this close ORDER was placed (not position open time)
 }
 
 export async function getClosedPnl(limit = 20, startTime?: number, symbol?: string): Promise<BybitClosedPnl[]> {
-  type Raw = { symbol: string; side: string; closedSize: string; avgEntryPrice: string; avgExitPrice: string; closedPnl: string; leverage: string; updatedTime: string; createdTime: string };
+  type Raw = { symbol: string; side: string; closedSize: string; avgEntryPrice: string; avgExitPrice: string; closedPnl: string; leverage: string; updatedTime: string; createdTime: string; orderId: string };
   const params: Record<string, string> = { category: "linear", limit: String(limit) };
   if (startTime !== undefined) params.startTime = String(startTime);
   if (symbol   !== undefined) params.symbol    = symbol;
@@ -574,7 +575,17 @@ export async function getClosedPnl(limit = 20, startTime?: number, symbol?: stri
     avgExitPrice:  parseFloat(p.avgExitPrice),
     closedPnl:     parseFloat(p.closedPnl),
     leverage:      parseFloat(p.leverage),
+    orderId:              p.orderId,
     closedAt:             parseInt(p.updatedTime),
     closeOrderCreatedAt:  parseInt(p.createdTime),
   }));
+}
+
+// Looks up stopOrderType for a single close orderId — used to distinguish exchange-triggered
+// SL/TP from bot software closes and manual human closes. Bybit retains order history for 2 years.
+export async function getOrderStopType(symbol: string, orderId: string): Promise<string> {
+  type Raw = { stopOrderType?: string };
+  const params: Record<string, string> = { category: "linear", symbol: normalise(symbol), orderId };
+  const r = await get<{ list: Raw[] }>("/v5/order/history", params);
+  return r.list[0]?.stopOrderType ?? "";
 }

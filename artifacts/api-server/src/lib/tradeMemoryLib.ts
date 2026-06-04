@@ -5,7 +5,7 @@ import {
 import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
-import { getClosedPnl as bybitGetClosedPnl, getKlines, fetchKlines, type BybitKline }  from "../brokers/bybit";
+import { getClosedPnl as bybitGetClosedPnl, getOrderStopType, getKlines, fetchKlines, type BybitKline }  from "../brokers/bybit";
 
 // ─── Rule alert notifier ──────────────────────────────────────────────────────
 
@@ -570,9 +570,11 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     postAnalysis15m.candles.length > 0
       ? `15m immediate reaction:\n${postAnalysis15m.candles.map((c, i) => `Post-15m-${i + 1}: ${c.direction} | body:${c.bodyPct.toFixed(0)}%`).join("\n")}` : "",
     ``,
-    exitMethod === "sl_hit"
-      ? `SL EXIT: Max additional loss avoided if SL held: ${maxAdditionalLossPct.toFixed(2)}%\nDid price continue against position? ${maxAdditionalLossPct > 1 ? "YES — SL saved further loss" : "NO — SL may have been premature"}`
-      : `TP EXIT: Additional gain available after exit: ${additionalGainPct.toFixed(2)}%\nDid price continue in our direction? ${additionalGainPct > 2 ? "YES — TP too conservative" : "NO — TP well timed"}`,
+    ["manual_full","manual_partial"].includes(exitMethod)
+      ? `MANUAL EXIT: Position closed by human, not by bot SL/TP. Price moved ${fmt2(additionalGainPct)}% in trade direction after close.`
+      : exitMethod === "sl_hit"
+        ? `SL EXIT: Max additional loss avoided if SL held: ${maxAdditionalLossPct.toFixed(2)}%\nDid price continue against position? ${maxAdditionalLossPct > 1 ? "YES — SL saved further loss" : "NO — SL may have been premature"}`
+        : `TP EXIT: Additional gain available after exit: ${additionalGainPct.toFixed(2)}%\nDid price continue in our direction? ${additionalGainPct > 2 ? "YES — TP too conservative" : "NO — TP well timed"}`,
     ``,
     `═══ EXECUTION ANALYSIS ═══`,
     `TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
@@ -604,7 +606,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Max adverse move DURING hold: ${maxAdverseMoveHoldPct.toFixed(2)}% from entry`,
     `Was SL hit this trade: ${exitMethod === "sl_hit" ? "YES" : "NO"}`,
     `Post-exit adverse continuation: ${maxAdditionalLossPct.toFixed(2)}%`,
-    `Verdict needed: too_tight (SL hit but price recovered — premature), good (appropriate), too_wide (absorbed excessive loss)`,
+    ["manual_full","manual_partial"].includes(exitMethod)
+      ? `Verdict needed: na — human closed position, SL was not the exit mechanism`
+      : `Verdict needed: too_tight (SL hit but price recovered — premature), good (appropriate), too_wide (absorbed excessive loss)`,
     ``,
     `═══ TP ASSESSMENT ═══`,
     `TP1: $${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"} — reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}`,
@@ -621,11 +625,15 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Verdict needed: correct (reduced risk at right time), too_early (missed larger gain), too_late (gave back profit), na (no partials)`,
     ``,
     `═══ MANUAL CLOSE ASSESSMENT ═══`,
-    exitMethod === "review"
-      ? [`Trade closed by posMonitor review (not SL/TP).`,
+    ["review","manual_full","manual_partial"].includes(exitMethod)
+      ? [`Trade closed by ${
+           exitMethod === "review"          ? "posMonitor review (Claude decision)" :
+           exitMethod === "manual_partial"  ? "human — manual close (prior bot TP1 partial existed)" :
+                                             "human — full manual close (no prior bot partials)"
+         } — not by exchange SL/TP.`,
          `Price 4h after close: ${fmt2(immediateReactionPct)}%`,
          `Price 24h after close: ${fmt2(fullMove24hPct)}%`,
-         `Verdict needed: correct (price reversed — right call), wrong (price continued in our direction — should have held), neutral (price moved <1% either way), na`].join("\n")
+         `Verdict needed: correct (price reversed — right call), wrong (price continued in our direction — should have held), neutral (<1% move), na`].join("\n")
       : `Exit method was ${exitMethod} — no manual close to assess. Use "na".`,
     ``,
     `═══ OPTIMAL TRADE HINDSIGHT ═══`,
@@ -898,6 +906,39 @@ export async function logPartialClose(params: {
     pnlPct:       String(pnlPct.toFixed(4)),
     reflection:   `PARTIAL ${partialType.toUpperCase()}: closed ${closePct}% at $${priceAtClose.toFixed(4)} (${sign}${pnlPct.toFixed(2)}%), ${remainingPct}% remaining`,
   }).catch(e => console.error("[tradeMemory] logPartialClose failed:", e));
+}
+
+// ─── Manual-close detection ───────────────────────────────────────────────────
+// Resolves the true exit reason for a position close by mechanism:
+// 1. Looks up stopOrderType on the final close order → definitive for exchange SL/TP
+// 2. For plain Market orders, checks trade_memory for bot PARTIAL records → manual if none found
+export async function resolveExitReason(params: {
+  symbol:   string;
+  orderId:  string;
+  entryAt?: Date;
+  exitAt?:  Date;
+}): Promise<string> {
+  const stopType = await getOrderStopType(params.symbol, params.orderId).catch(() => "");
+  if (stopType === "StopLoss")          return "sl_hit";
+  if (stopType === "TakeProfit")        return "tp_hit";
+  if (stopType === "PartialTakeProfit") return "tp_hit";
+  // Market order — check for bot TP1/TP2 PARTIAL records in trade window
+  if (params.entryAt && params.exitAt) {
+    const windowStart = new Date(params.entryAt.getTime() - 30 * 60_000);
+    const windowEnd   = new Date(params.exitAt.getTime()  + 30 * 60_000);
+    const partials = await db.select({ partialType: tradeMemoryTable.partialType })
+      .from(tradeMemoryTable)
+      .where(and(
+        eq(tradeMemoryTable.symbol,     params.symbol),
+        eq(tradeMemoryTable.action,     "PARTIAL"),
+        gte(tradeMemoryTable.createdAt, windowStart),
+        lte(tradeMemoryTable.createdAt, windowEnd),
+      ))
+      .catch(() => [] as { partialType: string | null }[]);
+    if (partials.some(p => p.partialType === "tp1" || p.partialType === "tp2"))
+      return "manual_partial";
+  }
+  return "manual_full";
 }
 
 // ─── Trading rules helpers ────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { approvalGate }           from "./approvalGate";
-import { backfillStructuredReflections, closeOpenTrade } from "./tradeMemoryLib";
+import { backfillStructuredReflections, closeOpenTrade, resolveExitReason } from "./tradeMemoryLib";
 import { openPosition }            from "../brokers/etoro";
 import {
   openPosition    as bybitOpen,
@@ -393,7 +393,14 @@ async function reconcileClosedPositions(): Promise<void> {
     const record   = matching[matching.length - 1]; // final close = exit price
 
     if (record && matching.length > 0) {
-      const totalAmt = matching.reduce((s, c) => s + c.closedSize * c.avgEntryPrice, 0);
+      const totalAmt  = matching.reduce((s, c) => s + c.closedSize * c.avgEntryPrice, 0);
+      const exitReason = await resolveExitReason({
+        symbol:  trade.symbol,
+        orderId: record.orderId,
+        entryAt: trade.entryAt ?? undefined,
+        exitAt:  new Date(),
+      }).catch(() => undefined);
+      console.log(`[reconcile] ${trade.symbol} exit reason resolved: ${exitReason ?? "unknown"}`);
       await closeOpenTrade({
         symbol:             trade.symbol,
         broker:             "bybit",
@@ -401,6 +408,7 @@ async function reconcileClosedPositions(): Promise<void> {
         amountUsd:          totalAmt,
         pnlOverride:        totalPnl,
         entryPriceOverride: record.avgEntryPrice,
+        exitReason,
       }).catch(e => console.warn(`[reconcile] closeOpenTrade ${trade.symbol}:`, (e as Error).message));
       console.log(`[reconcile] ${trade.symbol} closed — exit $${record.avgExitPrice} pnl $${totalPnl.toFixed(2)} (${matching.length} close record${matching.length > 1 ? "s" : ""})`);
       await sendAlert?.([

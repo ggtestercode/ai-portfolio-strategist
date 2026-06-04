@@ -6,7 +6,7 @@ import { approvalGate, buildProposal } from "./approvalGate";
 import { applyAtrSlTp, pendingLimitFills, removePendingLimitFill } from "./startup";
 import { syncTotalCapitalToDB }        from "./brokerBalance";
 import { isCoinSuspended, updateDailyPnl } from "./leverageManager";
-import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose, getActiveRules } from "./tradeMemoryLib";
+import { getDailyPnl, logOpenTrade, closeOpenTrade, getOpenTrades, logPartialClose, getActiveRules, resolveExitReason } from "./tradeMemoryLib";
 import { llm }                         from "./llmRouter";
 import {
   getPositions    as bybitGetPositions,
@@ -1961,8 +1961,9 @@ async function checkPositionMonitor(): Promise<void> {
       // Known limit: re-opening the same symbol at a similar price within 4h could merge two trades.
       // Use positionMetadata for entry anchor; fall back to DB if meta missing (avoids unbounded fetch)
       const meta    = posMeta[sym];
-      let entryPx   = meta?.entryPrice ?? 0;
-      let startMs   = meta?.openedAt   ? Math.max(0, meta.openedAt - 4 * 60 * 60 * 1000) : undefined;
+      let entryPx      = meta?.entryPrice ?? 0;
+      let startMs      = meta?.openedAt ? Math.max(0, meta.openedAt - 4 * 60 * 60 * 1000) : undefined;
+      let entryAtDate: Date | undefined = meta?.openedAt ? new Date(meta.openedAt) : undefined;
       if (entryPx <= 0 || startMs === undefined) {
         // Meta incomplete — look up open trade from DB to get a safe time/price anchor
         const [dbTrade] = await db.select({ entryPrice: tradeLogTable.entryPrice, entryAt: tradeLogTable.entryAt })
@@ -1975,6 +1976,7 @@ async function checkPositionMonitor(): Promise<void> {
           if (entryPx <= 0)      entryPx = parseFloat(dbTrade.entryPrice ?? "0");
           if (startMs === undefined && dbTrade.entryAt)
             startMs = Math.max(0, dbTrade.entryAt.getTime() - 4 * 60 * 60 * 1000);
+          if (!entryAtDate && dbTrade.entryAt) entryAtDate = dbTrade.entryAt;
         }
       }
       const closed   = await bybitGetClosedPnl(50, startMs, sym).catch(() => []);
@@ -1984,7 +1986,14 @@ async function checkPositionMonitor(): Promise<void> {
       const totalPnl = matching.reduce((s, c) => s + c.closedPnl, 0);
       const trade    = matching[matching.length - 1]; // final close = exit price
       if (trade && matching.length > 0) {
-        const totalAmt = matching.reduce((s, c) => s + c.closedSize * c.avgEntryPrice, 0);
+        const totalAmt   = matching.reduce((s, c) => s + c.closedSize * c.avgEntryPrice, 0);
+        const exitReason = await resolveExitReason({
+          symbol:  sym,
+          orderId: trade.orderId,
+          entryAt: entryAtDate,
+          exitAt:  new Date(),
+        }).catch(() => undefined);
+        console.log(`[posMonitor] ${sym} exit reason resolved: ${exitReason ?? "unknown"}`);
         await closeOpenTrade({
           symbol:             sym,
           broker:             "bybit",
@@ -1992,7 +2001,7 @@ async function checkPositionMonitor(): Promise<void> {
           amountUsd:          totalAmt,
           pnlOverride:        totalPnl,
           entryPriceOverride: trade.avgEntryPrice,
-          exitReason:         trade.closedPnl >= 0 ? "tp_hit" : "sl_hit",
+          exitReason,
         }).catch(e => console.warn(`[posMonitor] closeOpenTrade ${sym}:`, (e as Error).message));
         const won = totalPnl >= 0;
         await alertFn?.([
