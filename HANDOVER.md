@@ -95,6 +95,7 @@
 - **tp1 always required in signal** — fixed `d3bfcf2`: prompt hardened + gate uses `v <= 0` for numerics
 - **Run `/forceRules`** after 5–10 clean trades closed post-June 3 (commit `5291d3f`). Two contamination sources in current 15 rules: (1) deleted LINK/HYPE corrupted reflections, (2) "SL too wide in 46/130" evidence was largely the ATR override bug, not Claude's actual SL choices. After clean post-fix closes, new reflections show Claude's true SL placement. Verify: if "SL too wide" count drops sharply in regenerated rules, confirms ATR was the cause. Track clean count via `/history`.
 - **SL-to-liquidation buffer** — scan prompt now instructs Claude to keep SL ≥2% above (longs) / ≤2% below (shorts) liquidation price; liq price is now computed accurately from portfolioLeverage (capped 10×) not hardcoded. Informational — not a hard gate.
+- **Per-rule attribution (Option 2 — code-evaluated)** — Replace current `appliedRuleIds` approach (all active rules credited to every trade, making per-rule stats meaningless) with: code records which active rules were RELEVANT to each trade (e.g. Rule 1 only relevant if regime=TRENDING_DOWN) and whether the trade COMPLIED or VIOLATED each. Goal: "trades following Rule X win Y% vs violating Z%" — real signal on rule helpfulness. Only works for mechanically-checkable rules (regime, direction, TP/SL distance). Build AFTER DB reconciler fix — needs accurate P&L first.
 
 ## Fix — SL Integrity (June 3)
 
