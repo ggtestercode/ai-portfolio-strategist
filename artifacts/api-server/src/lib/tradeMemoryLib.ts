@@ -197,7 +197,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const sign = input.pnl >= 0 ? "+" : "";
 
   // 1. Fetch Bybit closed-pnl for this symbol within the trade window
-  type BybitClose = { closedSize: number; avgExitPrice: number; avgEntryPrice: number; closedPnl: number; closedAt: number; openedAt: number; side: string };
+  type BybitClose = { closedSize: number; avgExitPrice: number; avgEntryPrice: number; closedPnl: number; closedAt: number; closeOrderCreatedAt: number; side: string };
   let bybitCloses: BybitClose[] = [];
   if (input.entryAt) {
     try {

@@ -1316,7 +1316,7 @@ export function startPolling(): void {
             symbol: closes[0]!.symbol, side, entryPrice: closes[0]!.avgEntryPrice,
             closes, totalPnl, totalSize, bestExit,
             finalExit:    closes[closes.length - 1]!.avgExitPrice,
-            firstOpenedAt: closes[0]!.openedAt,
+            firstCloseOrderAt: closes[0]!.closeOrderCreatedAt,
             lastCloseAt:  closes[closes.length - 1]!.closedAt,
             pnlPct: calcPnlPct(side, closes[0]!.avgEntryPrice, weightedAvgExit),
           };
@@ -1332,7 +1332,7 @@ export function startPolling(): void {
           const dir      = t.side === "Sell" ? "▲" : "▼";
           const sign     = t.totalPnl >= 0 ? "+" : "";
           const pctSign  = t.pnlPct >= 0 ? "+" : "";
-          const durMs    = t.lastCloseAt - t.firstOpenedAt;
+          const durMs    = t.lastCloseAt - t.firstCloseOrderAt;
           const nPartial = t.closes.length - 1;
 
           if (isFull) {

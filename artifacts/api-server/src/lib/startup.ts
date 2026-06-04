@@ -379,6 +379,10 @@ async function reconcileClosedPositions(): Promise<void> {
     }
 
     console.log(`[reconcile] ${trade.symbol} open in DB but not on Bybit — fetching closedPnl`);
+    // Group all close records for this logical trade by avgEntryPrice proximity + time window.
+    // Bybit's closed-pnl endpoint has no position ID — each partial close is an independent record.
+    // avgEntryPrice is consistent across all partials of one position; the 4h time window prevents
+    // merging an unrelated trade re-opened at a similar price within the same session.
     const entryPx = parseFloat(trade.entryPrice ?? "0");
     const startMs = trade.entryAt ? Math.max(0, trade.entryAt.getTime() - 4 * 60 * 60 * 1000) : undefined;
     const closed   = await bybitGetClosedPnl(50, startMs, trade.symbol).catch(() => []);

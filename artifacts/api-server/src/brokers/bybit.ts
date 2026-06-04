@@ -556,8 +556,8 @@ export interface BybitClosedPnl {
   avgExitPrice:  number;
   closedPnl:     number;
   leverage:      number;
-  closedAt:      number; // epoch ms (updatedTime)
-  openedAt:      number; // epoch ms (createdTime)
+  closedAt:             number; // epoch ms (updatedTime) — when this close executed
+  closeOrderCreatedAt:  number; // epoch ms (createdTime) — when this close ORDER was placed (not position open time)
 }
 
 export async function getClosedPnl(limit = 20, startTime?: number, symbol?: string): Promise<BybitClosedPnl[]> {
@@ -574,7 +574,7 @@ export async function getClosedPnl(limit = 20, startTime?: number, symbol?: stri
     avgExitPrice:  parseFloat(p.avgExitPrice),
     closedPnl:     parseFloat(p.closedPnl),
     leverage:      parseFloat(p.leverage),
-    closedAt:      parseInt(p.updatedTime),
-    openedAt:      parseInt(p.createdTime),
+    closedAt:             parseInt(p.updatedTime),
+    closeOrderCreatedAt:  parseInt(p.createdTime),
   }));
 }

@@ -1956,6 +1956,9 @@ async function checkPositionMonitor(): Promise<void> {
       await clearPositionMeta(sym).catch(() => {});
       selfHealAttempted.delete(sym);
       // Always fetch closed PnL and close trade_log — regardless of trailing state
+      // Group close records by avgEntryPrice proximity + time window. Bybit's closed-pnl endpoint
+      // has no position ID; avgEntryPrice is consistent across all partials of one position.
+      // Known limit: re-opening the same symbol at a similar price within 4h could merge two trades.
       // Use positionMetadata for entry anchor; fall back to DB if meta missing (avoids unbounded fetch)
       const meta    = posMeta[sym];
       let entryPx   = meta?.entryPrice ?? 0;
