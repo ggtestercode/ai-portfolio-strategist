@@ -48,14 +48,15 @@ export interface PendingApproval {
 }
 
 export interface GateResult {
-  action:    "queued" | "executed" | "rejected" | "failed";
-  proposal:  TradeProposal;
-  message:   string;
-  orderId?:  string;
-  error?:    string;
+  action:          "queued" | "executed" | "rejected" | "failed";
+  proposal:        TradeProposal;
+  message:         string;
+  orderId?:        string;
+  error?:          string;
+  actualMarginUsd?: number;
 }
 
-export type BrokerExecutor = (p: TradeProposal) => Promise<{ orderId?: string }>;
+export type BrokerExecutor = (p: TradeProposal) => Promise<{ orderId?: string; actualMarginUsd?: number }>;
 
 const mockExecutor: BrokerExecutor = async (p) => {
   console.log(`[MOCK] ${p.side.toUpperCase()} ${p.symbol} $${p.amountUsd} via ${p.broker}`);
@@ -266,7 +267,7 @@ class ApprovalGate {
         occurredAt: new Date(),
       }).catch(() => {});
 
-      return { action:"executed", proposal, orderId:result.orderId,
+      return { action:"executed", proposal, orderId:result.orderId, actualMarginUsd:result.actualMarginUsd,
                message:`Executed: ${proposal.side.toUpperCase()} ${proposal.symbol} $${proposal.amountUsd} [${proposal.broker}]` };
     } catch (err: any) {
       await db.update(tradeProposals)

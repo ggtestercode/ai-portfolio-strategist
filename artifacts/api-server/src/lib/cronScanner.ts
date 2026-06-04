@@ -1448,12 +1448,14 @@ async function runWatchScan(): Promise<void> {
               }
             }
             if (pos2) {
-              const plannedEntry = signal.entry ?? signal.price;
+              const plannedEntry    = signal.entry ?? signal.price;
+              const actualMarginUsd = pos2.size * pos2.entryPrice / pos2.leverage;
               await db.update(tradeLogTable)
-                .set({ entryPrice: String(pos2.entryPrice), leverage: pos2.leverage })
+                .set({ entryPrice: String(pos2.entryPrice), leverage: pos2.leverage,
+                       amountUsd:  String(actualMarginUsd.toFixed(2)) })
                 .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
                 .catch(e => console.warn(`[watchScan] entry reconcile ${sym}:`, e.message));
-              console.log(`[trade] Entry price reconciled ${sym}: planned $${plannedEntry} → actual $${pos2.entryPrice} | leverage: ${signal.leverage ?? 10}× → ${pos2.leverage}×`);
+              console.log(`[trade] Entry reconciled ${sym}: planned $${plannedEntry} → actual $${pos2.entryPrice} | leverage: ${signal.leverage ?? 10}× → ${pos2.leverage}× | margin: $${actualMarginUsd.toFixed(2)}`);
             }
           }, 5000);
           await logOpenTrade({
@@ -1748,6 +1750,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           }
         } catch { /* non-fatal — fall back to signal direction */ }
 
+        // Use actual deployed margin from live position (market orders fill immediately);
+        // limit orders: livePos is undefined here, defer amountUsd reconcile to posMonitor fill
+        const deployedMargin = livePos
+          ? livePos.size * livePos.entryPrice / livePos.leverage
+          : amountUsd;
+
         // Log to trade memory so history page and future reviews have entry context
         await logOpenTrade({
           symbol:          sym,
@@ -1755,7 +1763,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           direction:       actualDirection,
           entryPrice:      opp.entry ?? opp.price,
           leverage:        opp.leverage ?? 10,
-          amountUsd,
+          amountUsd:       deployedMargin,
           reasoning:       `[Cron] score=${opp.score} regime=${regime?.regime ?? "?"} setup=${opp.setupType ?? "?"} whyNow=${opp.whyNow ?? opp.reasoning?.slice(0, 200) ?? ""}`,
           stopLoss:        opp.stopLoss,
           takeProfit:      opp.takeProfit,

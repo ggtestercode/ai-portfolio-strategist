@@ -302,7 +302,7 @@ export async function initBrokers(): Promise<void> {
       }
     }
 
-    return { orderId: result.orderId };
+    return { orderId: result.orderId, actualMarginUsd: result.actualMarginUsd };
   });
 
   // Probe OKX credentials; fall back to paper trading if keys are invalid

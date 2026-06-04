@@ -275,7 +275,7 @@ export async function openPosition(
   amountUsd: number,
   leverage = 10,
   opts?: { stopLoss?: number; takeProfit?: number; tp1?: number; limitPrice?: number; tp1ClosePercent?: number; tp2ClosePercent?: number },
-): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number; isLimitOrder: boolean }> {
+): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number; isLimitOrder: boolean; actualMarginUsd: number }> {
   // ── Leverage cap ─────────────────────────────────────────────────────────
   const MAX_LEVERAGE = 10;
   if (leverage > MAX_LEVERAGE) {
@@ -286,21 +286,8 @@ export async function openPosition(
   // ── Position sizing ───────────────────────────────────────────────────────
   const { totalEquity, availableBalance } = await getBalance();
   const bybitBalance   = availableBalance;
-  const riskAmount     = bybitBalance * 0.05;
   const minimumMargin  = 5;                    // Bybit minimum
   const maximumMargin  = bybitBalance * 0.30;
-
-  const finalMargin = Math.max(
-    minimumMargin,
-    Math.min(riskAmount, maximumMargin),
-  );
-
-  console.log("Position sizing:", {
-    riskAmount,
-    minimumMargin,
-    maximumMargin,
-    finalMargin,
-  });
 
   // amountUsd arrives as notional; derive requested margin then apply limits
   const requestedMargin = amountUsd / leverage;
@@ -337,13 +324,20 @@ export async function openPosition(
   const markPrice = ticker.lastPrice;
   const tickDp    = String(filters.tickSize).split(".")[1]?.length ?? 2;
 
-  const rawQty  = amountUsd / markPrice;
-  const steps   = Math.ceil(rawQty / filters.qtyStep);
-  const qty     = Math.max(steps * filters.qtyStep, filters.minQty);
-  const qtyStr  = qty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
-
-  const orderValue = qty * markPrice;
-  console.log(`[Bybit] Order:`, { symbol: sym, side, positionIdx, direction: side === "Buy" ? "long" : "short", qty: qtyStr, SL: opts?.stopLoss ?? "none", TP: opts?.takeProfit ?? "none", orderValue: orderValue.toFixed(2) });
+  const qtyDp    = String(filters.qtyStep).split(".")[1]?.length ?? 3;
+  const rawQty   = amountUsd / markPrice;
+  const steps    = Math.floor(rawQty / filters.qtyStep);          // floor: never over-deploy
+  let   qty      = Math.max(steps * filters.qtyStep, filters.minQty);
+  // Re-check margin cap after rounding — minQty guard can push over cap
+  if (qty * markPrice / leverage > maximumMargin) {
+    const reduced = parseFloat((qty - filters.qtyStep).toFixed(qtyDp));
+    if (reduced >= filters.minQty) {
+      qty = reduced;
+    } else {
+      throw new Error(`[sizing-skip] ${sym}: minQty margin ($${(filters.minQty * markPrice / leverage).toFixed(2)}) exceeds 30% cap ($${maximumMargin.toFixed(2)}) — balance too low`);
+    }
+  }
+  const qtyStr  = qty.toFixed(qtyDp);
 
   // Use limit order if Claude provided limitPrice within 2% of current mark price
   const lp          = opts?.limitPrice;
@@ -353,10 +347,17 @@ export async function openPosition(
 
   // Recalculate qty at limit price so notional is correct
   const limitRawQty  = useLimit ? (amountUsd / execPrice!) : rawQty;
-  const limitSteps   = Math.ceil(limitRawQty / filters.qtyStep);
-  const limitQty     = Math.max(limitSteps * filters.qtyStep, filters.minQty);
-  const limitQtyStr  = limitQty.toFixed(String(filters.qtyStep).split(".")[1]?.length ?? 3);
+  const limitSteps   = Math.floor(limitRawQty / filters.qtyStep); // floor: never over-deploy
+  let   limitQty     = Math.max(limitSteps * filters.qtyStep, filters.minQty);
+  if (useLimit && limitQty * execPrice! / leverage > maximumMargin) {
+    const reduced = parseFloat((limitQty - filters.qtyStep).toFixed(qtyDp));
+    if (reduced >= filters.minQty) limitQty = reduced;
+  }
+  const limitQtyStr  = limitQty.toFixed(qtyDp);
   const finalQtyStr  = useLimit ? limitQtyStr : qtyStr;
+
+  const orderValue = (useLimit ? limitQty : qty) * (useLimit ? execPrice! : markPrice);
+  console.log(`[Bybit] Order:`, { symbol: sym, side, positionIdx, direction: side === "Buy" ? "long" : "short", qty: finalQtyStr, SL: opts?.stopLoss ?? "none", TP: opts?.takeProfit ?? "none", orderValue: orderValue.toFixed(2), margin: (orderValue / leverage).toFixed(2) });
 
   const limitPxStr   = useLimit ? (Math.round(execPrice! / filters.tickSize) * filters.tickSize).toFixed(tickDp) : undefined;
 
@@ -395,7 +396,10 @@ export async function openPosition(
     }
   }
 
-  return { orderId: r.orderId, entryPrice: useLimit ? execPrice! : markPrice, positionIdx, qty: useLimit ? limitQty : qty, isLimitOrder: !!useLimit };
+  const finalQty        = useLimit ? limitQty : qty;
+  const finalExecPrice  = useLimit ? execPrice! : markPrice;
+  const actualMarginUsd = finalQty * finalExecPrice / leverage;
+  return { orderId: r.orderId, entryPrice: finalExecPrice, positionIdx, qty: finalQty, isLimitOrder: !!useLimit, actualMarginUsd };
 }
 
 export async function closePosition(symbol: string): Promise<{ orderId: string; entryPrice: number; size: number; side: "Buy" | "Sell" }> {
