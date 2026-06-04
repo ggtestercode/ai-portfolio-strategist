@@ -398,7 +398,7 @@ async function reconcileClosedPositions(): Promise<void> {
         symbol:  trade.symbol,
         orderId: record.orderId,
         entryAt: trade.entryAt ?? undefined,
-        exitAt:  new Date(),
+        exitAt:  new Date(record.closedAt), // actual close time, not bot-restart time
       }).catch(() => undefined);
       console.log(`[reconcile] ${trade.symbol} exit reason resolved: ${exitReason ?? "unknown"}`);
       await closeOpenTrade({
