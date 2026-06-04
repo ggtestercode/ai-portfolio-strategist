@@ -1956,22 +1956,45 @@ async function checkPositionMonitor(): Promise<void> {
       await clearPositionMeta(sym).catch(() => {});
       selfHealAttempted.delete(sym);
       // Always fetch closed PnL and close trade_log — regardless of trailing state
-      const closed = await bybitGetClosedPnl(10, undefined, sym).catch(() => []);
-      const trade  = closed[0]; // most recent close for this symbol
-      if (trade) {
+      // Use positionMetadata for entry anchor; fall back to DB if meta missing (avoids unbounded fetch)
+      const meta    = posMeta[sym];
+      let entryPx   = meta?.entryPrice ?? 0;
+      let startMs   = meta?.openedAt   ? Math.max(0, meta.openedAt - 4 * 60 * 60 * 1000) : undefined;
+      if (entryPx <= 0 || startMs === undefined) {
+        // Meta incomplete — look up open trade from DB to get a safe time/price anchor
+        const [dbTrade] = await db.select({ entryPrice: tradeLogTable.entryPrice, entryAt: tradeLogTable.entryAt })
+          .from(tradeLogTable)
+          .where(and(eq(tradeLogTable.symbol, sym), eq(tradeLogTable.broker, "bybit"), isNull(tradeLogTable.exitAt)))
+          .orderBy(desc(tradeLogTable.entryAt))
+          .limit(1)
+          .catch(() => []);
+        if (dbTrade) {
+          if (entryPx <= 0)      entryPx = parseFloat(dbTrade.entryPrice ?? "0");
+          if (startMs === undefined && dbTrade.entryAt)
+            startMs = Math.max(0, dbTrade.entryAt.getTime() - 4 * 60 * 60 * 1000);
+        }
+      }
+      const closed   = await bybitGetClosedPnl(50, startMs, sym).catch(() => []);
+      const matching = closed
+        .filter(c => entryPx <= 0 || Math.abs(c.avgEntryPrice / entryPx - 1) < 0.06)
+        .sort((a, b) => a.closedAt - b.closedAt);
+      const totalPnl = matching.reduce((s, c) => s + c.closedPnl, 0);
+      const trade    = matching[matching.length - 1]; // final close = exit price
+      if (trade && matching.length > 0) {
+        const totalAmt = matching.reduce((s, c) => s + c.closedSize * c.avgEntryPrice, 0);
         await closeOpenTrade({
           symbol:             sym,
           broker:             "bybit",
           exitPrice:          trade.avgExitPrice,
-          amountUsd:          trade.closedSize * trade.avgEntryPrice,
-          pnlOverride:        trade.closedPnl,
+          amountUsd:          totalAmt,
+          pnlOverride:        totalPnl,
           entryPriceOverride: trade.avgEntryPrice,
           exitReason:         trade.closedPnl >= 0 ? "tp_hit" : "sl_hit",
         }).catch(e => console.warn(`[posMonitor] closeOpenTrade ${sym}:`, (e as Error).message));
-        const won = trade.closedPnl >= 0;
+        const won = totalPnl >= 0;
         await alertFn?.([
           `${won ? "✅" : "🔴"} <b>Position closed — ${sym}</b>`,
-          `Exit: $${trade.avgExitPrice.toFixed(4)} | P/L: ${won ? "+" : ""}$${trade.closedPnl.toFixed(2)}`,
+          `Exit: $${trade.avgExitPrice.toFixed(4)} | P/L: ${won ? "+" : ""}$${totalPnl.toFixed(2)}`,
         ].join("\n")).catch(() => {});
       } else {
         console.warn(`[posMonitor] ${sym} disappeared from positions but no closedPnl record found`);

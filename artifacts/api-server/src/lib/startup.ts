@@ -379,23 +379,30 @@ async function reconcileClosedPositions(): Promise<void> {
     }
 
     console.log(`[reconcile] ${trade.symbol} open in DB but not on Bybit — fetching closedPnl`);
-    const closed = await bybitGetClosedPnl(5, undefined, trade.symbol).catch(() => []);
-    const record = closed[0];
+    const entryPx = parseFloat(trade.entryPrice ?? "0");
+    const startMs = trade.entryAt ? Math.max(0, trade.entryAt.getTime() - 4 * 60 * 60 * 1000) : undefined;
+    const closed   = await bybitGetClosedPnl(50, startMs, trade.symbol).catch(() => []);
+    const matching = closed
+      .filter(c => entryPx <= 0 || Math.abs(c.avgEntryPrice / entryPx - 1) < 0.06)
+      .sort((a, b) => a.closedAt - b.closedAt);
+    const totalPnl = matching.reduce((s, c) => s + c.closedPnl, 0);
+    const record   = matching[matching.length - 1]; // final close = exit price
 
-    if (record) {
+    if (record && matching.length > 0) {
+      const totalAmt = matching.reduce((s, c) => s + c.closedSize * c.avgEntryPrice, 0);
       await closeOpenTrade({
         symbol:             trade.symbol,
         broker:             "bybit",
         exitPrice:          record.avgExitPrice,
-        amountUsd:          record.closedSize * record.avgEntryPrice,
-        pnlOverride:        record.closedPnl,
+        amountUsd:          totalAmt,
+        pnlOverride:        totalPnl,
         entryPriceOverride: record.avgEntryPrice,
       }).catch(e => console.warn(`[reconcile] closeOpenTrade ${trade.symbol}:`, (e as Error).message));
-      console.log(`[reconcile] ${trade.symbol} closed — exit $${record.avgExitPrice} pnl $${record.closedPnl.toFixed(2)}`);
+      console.log(`[reconcile] ${trade.symbol} closed — exit $${record.avgExitPrice} pnl $${totalPnl.toFixed(2)} (${matching.length} close record${matching.length > 1 ? "s" : ""})`);
       await sendAlert?.([
         `🔄 <b>Reconciled: ${trade.symbol}</b>`,
         `Was open in DB but closed on Bybit`,
-        `Exit: $${record.avgExitPrice.toFixed(4)} | P/L: ${record.closedPnl >= 0 ? "+" : ""}$${record.closedPnl.toFixed(2)}`,
+        `Exit: $${record.avgExitPrice.toFixed(4)} | P/L: ${totalPnl >= 0 ? "+" : ""}$${totalPnl.toFixed(2)}`,
       ].join("\n")).catch(() => {});
     } else {
       console.warn(`[reconcile] ${trade.symbol} — no closedPnl found on Bybit`);
