@@ -466,24 +466,46 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     || (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct"))
     || (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct"));
 
-  // Phase 3: walk-forward reconstruction — only for manual_partial with valid tp2
+  // Phase 3: walk-forward reconstruction — manual_partial and manual_full
   let reconstruction: ReconstructionResult | null = null;
-  const tp2Val = input.tp2 ? parseFloat(input.tp2) : 0;
+  // Reuse already-parsed level values from above
+  const tp1Val = tp1Price;
+  const tp2Val = tp2Price;
+  const slVal  = plannedSL;
   if (exitMethod === "manual_partial" && tp2Val > 0 && input.exitAt) {
+    // TP1 already fired — use ratcheted SL, walk toward TP2
+    const ratchetedSL = input.direction === "long" ? input.entryPrice * 1.01 : input.entryPrice * 0.99;
     try {
       reconstruction = await reconstructForwardFromClose({
-        symbol:     input.symbol,
-        direction:  input.direction as "long" | "short",
-        entryPrice: input.entryPrice,
-        tp2:        tp2Val,
-        startAt:    input.exitAt,
+        symbol:    input.symbol,
+        direction: input.direction as "long" | "short",
+        sl:        ratchetedSL,
+        tp2:       tp2Val,
+        startAt:   input.exitAt,
+      });
+      console.log(`[reconstruction] ${input.symbol}: ${reconstruction.outcome} after ${reconstruction.candlesWalked} candles`);
+    } catch (e) {
+      console.warn(`[reconstruction] ${input.symbol} failed:`, (e as Error).message);
+    }
+  } else if (exitMethod === "manual_full" && tp1Val > 0 && slVal > 0 && input.exitAt) {
+    // Full early exit — use original SL, walk toward TP1 (and TP2 if available)
+    try {
+      reconstruction = await reconstructForwardFromClose({
+        symbol:    input.symbol,
+        direction: input.direction as "long" | "short",
+        sl:        slVal,
+        tp1:       tp1Val,
+        tp2:       tp2Val > 0 ? tp2Val : undefined,
+        startAt:   input.exitAt,
       });
       console.log(`[reconstruction] ${input.symbol}: ${reconstruction.outcome} after ${reconstruction.candlesWalked} candles`);
     } catch (e) {
       console.warn(`[reconstruction] ${input.symbol} failed:`, (e as Error).message);
     }
   } else if (exitMethod === "manual_partial" && tp2Val <= 0) {
-    console.log(`[reconstruction] ${input.symbol}: skipped — no tp2 on trade`);
+    console.log(`[reconstruction] ${input.symbol}: skipped — manual_partial but no tp2`);
+  } else if (exitMethod === "manual_full" && (tp1Val <= 0 || slVal <= 0)) {
+    console.log(`[reconstruction] ${input.symbol}: skipped — manual_full but missing tp1/sl (tp1=${tp1Val}, sl=${slVal})`);
   }
 
   // SL tightness assessment — min/max price during hold
@@ -646,17 +668,22 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     ``,
     reconstruction ? [
       `═══ RECONSTRUCTED FORWARD OUTCOME ═══`,
-      `After the human closed this position early, a 15m walk-forward was run.`,
-      `Ratcheted SL (post-TP1): $${(input.direction === "long" ? input.entryPrice * 1.01 : input.entryPrice * 0.99).toFixed(4)}`,
-      `TP2 target: $${tp2Val.toFixed(4)}`,
+      exitMethod === "manual_full"
+        ? `After the human closed the FULL position early (before TP1), a 15m walk-forward was run.`
+        : `After the human closed the remainder early (after bot TP1 partial), a 15m walk-forward was run.`,
+      exitMethod === "manual_full"
+        ? `Original SL: $${slVal.toFixed(4)}${tp1Val > 0 ? ` | TP1 target: $${tp1Val.toFixed(4)}` : ""}${tp2Val > 0 ? ` | TP2 target: $${tp2Val.toFixed(4)}` : ""}`
+        : `Ratcheted SL (post-TP1): $${(input.direction === "long" ? input.entryPrice * 1.01 : input.entryPrice * 0.99).toFixed(4)} | TP2 target: $${tp2Val.toFixed(4)}`,
       `Result: ${reconstruction.outcome}${reconstruction.hitAt ? ` — hit at ${toSGT(reconstruction.hitAt)}` : ""}${reconstruction.hitPrice ? ` ($${reconstruction.hitPrice.toFixed(4)})` : ""} (walked ${reconstruction.candlesWalked} × 15m candles)`,
       reconstruction.outcome === "inconclusive_review"
         ? `No level hit within ~50h after close. Use "neutral" for manualCloseVerdict.`
         : reconstruction.outcome === "ambiguous_excluded"
-        ? `Both TP2 and SL were hit on the same candle — ambiguous. Use "neutral" for manualCloseVerdict.`
+        ? `A TP and SL hit on the same candle — ambiguous. Use "neutral" for manualCloseVerdict.`
         : reconstruction.outcome === "tp2_hit"
-        ? `TP2 was hit → the remainder WOULD have profited. Manual close left money on table.`
-        : `SL was hit → the remainder WOULD have stopped out. Manual close protected capital.`,
+        ? `TP2 was hit → position WOULD have run to full target. Early close was premature.`
+        : reconstruction.outcome === "tp1_hit"
+        ? `TP1 was hit → position WOULD have reached first target. Early close was premature.`
+        : `SL was hit → position WOULD have stopped out. Early close protected capital.`,
       ``,
     ].join("\n") : null,
     `═══ MANUAL CLOSE ASSESSMENT ═══`,
@@ -954,40 +981,42 @@ export async function logPartialClose(params: {
 // or ratcheted SL would have been hit if the remainder ran to natural exit.
 // Only called for manual_partial exits with a valid tp2 target.
 export type ReconstructionResult = {
-  outcome:       "tp2_hit" | "sl_hit" | "inconclusive_review" | "ambiguous_excluded";
+  outcome:       "tp1_hit" | "tp2_hit" | "sl_hit" | "inconclusive_review" | "ambiguous_excluded";
   candlesWalked: number;
   hitAt?:        Date;
   hitPrice?:     number;
 };
 
 export async function reconstructForwardFromClose(params: {
-  symbol:     string;
-  direction:  "long" | "short";
-  entryPrice: number;
-  tp2:        number;
-  startAt:    Date;
+  symbol:    string;
+  direction: "long" | "short";
+  sl:        number;   // ratcheted SL for manual_partial; original SL for manual_full
+  tp1?:      number;   // only passed for manual_full (TP1 never fired)
+  tp2?:      number;   // passed for both when available
+  startAt:   Date;
 }): Promise<ReconstructionResult> {
-  const { symbol, direction, entryPrice, tp2, startAt } = params;
-  // Post-TP1 ratcheted SL: entry + 1% in trade direction (locks in small profit)
-  const ratchetedSL = direction === "long"
-    ? entryPrice * 1.01
-    : entryPrice * 0.99;
-
+  const { symbol, direction, sl, tp1, tp2, startAt } = params;
   const candles = await fetchKlines({ symbol, interval: "15", start: startAt, limit: 200 });
 
   for (let i = 0; i < candles.length; i++) {
     const c = candles[i]!;
-    const tp2Hit = direction === "long" ? c.high >= tp2  : c.low  <= tp2;
-    const slHit  = direction === "long" ? c.low  <= ratchetedSL : c.high >= ratchetedSL;
+    const tp1Hit = tp1 ? (direction === "long" ? c.high >= tp1 : c.low  <= tp1) : false;
+    const tp2Hit = tp2 ? (direction === "long" ? c.high >= tp2 : c.low  <= tp2) : false;
+    const slHit  =       direction === "long" ? c.low  <= sl  : c.high >= sl;
 
-    if (tp2Hit && slHit) {
+    // TP + SL same candle — can't tell which came first
+    if ((tp1Hit || tp2Hit) && slHit) {
       return { outcome: "ambiguous_excluded", candlesWalked: i + 1, hitAt: new Date(c.ts) };
     }
+    // TP1 + TP2 same candle → tp2_hit (price ran through both, most favorable)
     if (tp2Hit) {
-      return { outcome: "tp2_hit",  candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: tp2 };
+      return { outcome: "tp2_hit", candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: tp2 };
+    }
+    if (tp1Hit) {
+      return { outcome: "tp1_hit", candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: tp1 };
     }
     if (slHit) {
-      return { outcome: "sl_hit",   candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: ratchetedSL };
+      return { outcome: "sl_hit",  candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: sl };
     }
   }
 
