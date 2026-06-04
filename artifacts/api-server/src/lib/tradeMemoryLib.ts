@@ -466,6 +466,26 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     || (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct"))
     || (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct"));
 
+  // Phase 3: walk-forward reconstruction — only for manual_partial with valid tp2
+  let reconstruction: ReconstructionResult | null = null;
+  const tp2Val = input.tp2 ? parseFloat(input.tp2) : 0;
+  if (exitMethod === "manual_partial" && tp2Val > 0 && input.exitAt) {
+    try {
+      reconstruction = await reconstructForwardFromClose({
+        symbol:     input.symbol,
+        direction:  input.direction as "long" | "short",
+        entryPrice: input.entryPrice,
+        tp2:        tp2Val,
+        startAt:    input.exitAt,
+      });
+      console.log(`[reconstruction] ${input.symbol}: ${reconstruction.outcome} after ${reconstruction.candlesWalked} candles`);
+    } catch (e) {
+      console.warn(`[reconstruction] ${input.symbol} failed:`, (e as Error).message);
+    }
+  } else if (exitMethod === "manual_partial" && tp2Val <= 0) {
+    console.log(`[reconstruction] ${input.symbol}: skipped — no tp2 on trade`);
+  }
+
   // SL tightness assessment — min/max price during hold
   const minPriceDuringHold = tradePeriodCandles.length > 0 ? Math.min(...tradePeriodCandles.map(c => c.low)) : 0;
   const maxPriceDuringHold = tradePeriodCandles.length > 0 ? Math.max(...tradePeriodCandles.map(c => c.high)) : 0;
@@ -624,6 +644,21 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Price 4h after exit: ${fmt2(immediateReactionPct)}% | 24h: ${fmt2(fullMove24hPct)}%`,
     `Verdict needed: correct (reduced risk at right time), too_early (missed larger gain), too_late (gave back profit), na (no partials)`,
     ``,
+    reconstruction ? [
+      `═══ RECONSTRUCTED FORWARD OUTCOME ═══`,
+      `After the human closed this position early, a 15m walk-forward was run.`,
+      `Ratcheted SL (post-TP1): $${(input.direction === "long" ? input.entryPrice * 1.01 : input.entryPrice * 0.99).toFixed(4)}`,
+      `TP2 target: $${tp2Val.toFixed(4)}`,
+      `Result: ${reconstruction.outcome}${reconstruction.hitAt ? ` — hit at ${toSGT(reconstruction.hitAt)}` : ""}${reconstruction.hitPrice ? ` ($${reconstruction.hitPrice.toFixed(4)})` : ""} (walked ${reconstruction.candlesWalked} × 15m candles)`,
+      reconstruction.outcome === "inconclusive_review"
+        ? `No level hit within ~50h after close. Use "neutral" for manualCloseVerdict.`
+        : reconstruction.outcome === "ambiguous_excluded"
+        ? `Both TP2 and SL were hit on the same candle — ambiguous. Use "neutral" for manualCloseVerdict.`
+        : reconstruction.outcome === "tp2_hit"
+        ? `TP2 was hit → the remainder WOULD have profited. Manual close left money on table.`
+        : `SL was hit → the remainder WOULD have stopped out. Manual close protected capital.`,
+      ``,
+    ].join("\n") : null,
     `═══ MANUAL CLOSE ASSESSMENT ═══`,
     ["review","manual_full","manual_partial"].includes(exitMethod)
       ? [`Trade closed by ${
@@ -842,6 +877,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     optimalPnlPct:          d.optimalPnlPct     != null ? String((d.optimalPnlPct     as number).toFixed(4)) : null,
     opportunityCostPct:     d.opportunityCostPct != null ? String((d.opportunityCostPct as number).toFixed(4)) : null,
     source:                 input.source ?? null,
+    // Phase 3 reconstruction
+    pnlSource:            reconstruction
+      ? (reconstruction.outcome === "ambiguous_excluded" ? "ambiguous_excluded" : "reconstructed")
+      : exitMethod === "sl_hit" || exitMethod === "tp_hit" ? "actual"
+      : null,
+    reconstructedOutcome: reconstruction?.outcome !== "ambiguous_excluded" ? reconstruction?.outcome ?? null : null,
   });
 
   // Alert on execution failures (suppressed for backfill runs)
@@ -906,6 +947,51 @@ export async function logPartialClose(params: {
     pnlPct:       String(pnlPct.toFixed(4)),
     reflection:   `PARTIAL ${partialType.toUpperCase()}: closed ${closePct}% at $${priceAtClose.toFixed(4)} (${sign}${pnlPct.toFixed(2)}%), ${remainingPct}% remaining`,
   }).catch(e => console.error("[tradeMemory] logPartialClose failed:", e));
+}
+
+// ─── Phase 3: Forward reconstruction ─────────────────────────────────────────
+// Walk 15m candles forward from manual close to assess whether the bot's TP2
+// or ratcheted SL would have been hit if the remainder ran to natural exit.
+// Only called for manual_partial exits with a valid tp2 target.
+export type ReconstructionResult = {
+  outcome:       "tp2_hit" | "sl_hit" | "inconclusive_review" | "ambiguous_excluded";
+  candlesWalked: number;
+  hitAt?:        Date;
+  hitPrice?:     number;
+};
+
+export async function reconstructForwardFromClose(params: {
+  symbol:     string;
+  direction:  "long" | "short";
+  entryPrice: number;
+  tp2:        number;
+  startAt:    Date;
+}): Promise<ReconstructionResult> {
+  const { symbol, direction, entryPrice, tp2, startAt } = params;
+  // Post-TP1 ratcheted SL: entry + 1% in trade direction (locks in small profit)
+  const ratchetedSL = direction === "long"
+    ? entryPrice * 1.01
+    : entryPrice * 0.99;
+
+  const candles = await fetchKlines({ symbol, interval: "15", start: startAt, limit: 200 });
+
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i]!;
+    const tp2Hit = direction === "long" ? c.high >= tp2  : c.low  <= tp2;
+    const slHit  = direction === "long" ? c.low  <= ratchetedSL : c.high >= ratchetedSL;
+
+    if (tp2Hit && slHit) {
+      return { outcome: "ambiguous_excluded", candlesWalked: i + 1, hitAt: new Date(c.ts) };
+    }
+    if (tp2Hit) {
+      return { outcome: "tp2_hit",  candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: tp2 };
+    }
+    if (slHit) {
+      return { outcome: "sl_hit",   candlesWalked: i + 1, hitAt: new Date(c.ts), hitPrice: ratchetedSL };
+    }
+  }
+
+  return { outcome: "inconclusive_review", candlesWalked: candles.length };
 }
 
 // ─── Manual-close detection ───────────────────────────────────────────────────

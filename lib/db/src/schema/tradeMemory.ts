@@ -74,6 +74,9 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   opportunityCostPct:     decimal("opportunity_cost_pct", { precision: 10, scale: 4 }),
   // Source tracking — batch 6
   source:                 text("source"),  // 'mode_3' | 'version_b'
+  // Phase 3 reconstruction — batch 7
+  pnlSource:              text("pnl_source"),            // 'actual' | 'reconstructed' | 'ambiguous_excluded'
+  reconstructedOutcome:   text("reconstructed_outcome"), // 'tp2_hit' | 'sl_hit' | 'inconclusive_review'
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;
