@@ -446,6 +446,7 @@ async function runPhase2(
   const liqLines:        string[] = [];
   const candle1hLines:   string[] = [];
   const candle15mLines:  string[] = [];
+  const volRatioLines:   string[] = [];
   const orderbookLines:  string[] = [];
   const fundingHistLines:string[] = [];
   const recentExitLines: string[] = [];
@@ -521,6 +522,24 @@ async function runPhase2(
       if (price > 0) liqLines.push(`${sym} liq@${leverage}x: long=$${(price * (1 - 1/leverage + 0.005)).toFixed(4)} short=$${(price * (1 + 1/leverage - 0.005)).toFixed(4)}`);
       if (klines1h.length  > 0) candle1hLines.push(`${sym} 1h candles (O,H,L,C,V): ${klines1h.slice(-50).map(fmtCandle).join(" | ")}`);
       if (klines15m.length > 0) candle15mLines.push(`${sym} 15m candles (O,H,L,C,V): ${klines15m.slice(-50).map(fmtCandle).join(" | ")}`);
+      // Volume ratio vs 20-candle avg (excluding current forming candle)
+      if (klines1h.length >= 21 && klines15m.length >= 21) {
+        const avgVol1h      = klines1h.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
+        const vol1hRatio    = avgVol1h > 0 ? klines1h[klines1h.length - 1]!.volume / avgVol1h : 0;
+        const avgVol15m     = klines15m.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
+        const vol15mRatio   = avgVol15m > 0 ? klines15m[klines15m.length - 1]!.volume / avgVol15m : 0;
+        const c2_1h = klines1h[klines1h.length - 2];
+        const c1_1h = klines1h[klines1h.length - 1];
+        const climax1h   = c2_1h && c2_1h.close < c2_1h.open && avgVol1h > 0 && c2_1h.volume / avgVol1h >= 4.0;
+        const recovery1h = c1_1h && c1_1h.close > c1_1h.open && avgVol1h > 0 && c1_1h.volume / avgVol1h >= 1.5;
+        const flag1h     = climax1h && recovery1h ? " [BEARISH_CLIMAX_RECOVERY]" : "";
+        const c2_15m = klines15m[klines15m.length - 2];
+        const c1_15m = klines15m[klines15m.length - 1];
+        const climax15m   = c2_15m && c2_15m.close < c2_15m.open && avgVol15m > 0 && c2_15m.volume / avgVol15m >= 4.0;
+        const recovery15m = c1_15m && c1_15m.close > c1_15m.open && avgVol15m > 0 && c1_15m.volume / avgVol15m >= 1.5;
+        const flag15m     = climax15m && recovery15m ? " [BEARISH_CLIMAX_RECOVERY]" : "";
+        volRatioLines.push(`${sym} VOL: 1h last=${vol1hRatio.toFixed(1)}x avg20${flag1h} | 15m last=${vol15mRatio.toFixed(1)}x avg20${flag15m}`);
+      }
       if (ob.bids.length > 0 && ob.asks.length > 0) {
         const fmtLevel = ([p, s]: [number, number]) => `${fmtP(p)}×${Math.round(s)}`;
         orderbookLines.push(`${sym} Bids: ${ob.bids.slice(0,50).map(fmtLevel).join(",")} Asks: ${ob.asks.slice(0,50).map(fmtLevel).join(",")}`);
@@ -643,6 +662,7 @@ async function runPhase2(
     mtfLines.length      ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n`                                          : "",
     candle1hLines.length   ? `1h OHLCV (last 50, oldest→newest):\n${candle1hLines.join("\n")}\n`                       : "",
     candle15mLines.length  ? `15m OHLCV (last 50, oldest→newest):\n${candle15mLines.join("\n")}\n`                     : "",
+    volRatioLines.length   ? `Volume ratio vs 20-candle avg:\n${volRatioLines.join("\n")}\n`                           : "",
     fundingLines.length    ? `Funding rates & open interest:\n${fundingLines.join("\n")}\n`                             : "",
     orderbookLines.length  ? `Order book depth (top 50 bids/asks):\n${orderbookLines.join("\n")}\n`                     : "",
     fundingHistLines.length? `Funding rate history (24 periods, oldest→newest):\n${fundingHistLines.join("\n")}\n`      : "",
