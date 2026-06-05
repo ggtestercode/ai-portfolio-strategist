@@ -637,7 +637,7 @@ async function runPhase2(
     `tp1ClosePercent: percentage of position to close at TP1 (default 30 if omitted). tp2ClosePercent: percentage of remaining position to close at TP2 (default 100 if omitted, closes all remaining). Both are optional — omit to use defaults. Use tp2ClosePercent < 100 only when you want to trail a portion beyond TP2.`,
     `Rank exactly 5. Score reflects your own conviction (0-100). Set recommendation and conviction fields based on your judgment.`,
     `Funding: |rate|<0.03% neutral; 0.03-0.07% directional signal; >0.07% crowded/squeeze risk. OI up+price up=bullish; OI down+price up=weak; OI up+price down=bearish; OI down+price down=weak.`,
-    `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must be 1-3× 4h ATR. If structural level >3× ATR = too far, use next closest level. If <1× ATR = too tight, use level beyond it. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed by ATR range. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
+    `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must fall within the regime-calibrated band shown in the TP calibration line below — this overrides raw ATR multiples. ATR (1-3×) is a secondary sanity check only; do not override the regime band for ATR compliance. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed within regime band. TP2=2× TP1 distance. SL=entry±1.5×4h ATR. RR≥1.5. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.`,
     `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP.`,
     `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
     `RS data: set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
@@ -658,6 +658,19 @@ async function runPhase2(
     `4h EMA20: $${regime.ema20_4h.toFixed(0)} | EMA50: $${regime.ema50_4h.toFixed(0)} | EMA200: $${regime.ema200_4h.toFixed(0)}`,
     `ATR: $${regime.atr.toFixed(0)} vs 30d avg: $${regime.atrAvg30d.toFixed(0)} (${regime.atr > 0 && regime.atrAvg30d > 0 ? (regime.atr / regime.atrAvg30d).toFixed(1) : "?"}×)`,
     `Regime note: ${regime.summary}`,
+    `TP calibration for ${regime.regime}: ${
+      regime.regime === "STRONG_TREND" || regime.regime === "TRENDING_UP"
+        ? "TP1 2–3% from entry, TP2 4–8% from entry. WARNING: 6–8% TP1 sits in the empirical dead zone — no STRONG_TREND long peaked between 3% and 8%. That setting misses the early partial and pushes TP2 to unreachable 16%+."
+        : regime.regime === "RANGING"
+        ? "TP1 max 1.5%, TP2 max 2.5% (Rule 14)."
+        : regime.regime === "EXHAUSTION"
+        ? "TP1 max 2.0%, TP2 max 3.5% (Rule 14)."
+        : regime.regime === "CHOPPY"
+        ? "TP1 max 2.5%, TP2 max 4.0%."
+        : regime.regime === "TRENDING_DOWN"
+        ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 2–3%, TP2 4–6%."
+        : "TP1 within 1–3× ATR from structural level."
+    }`,
     ``,
     mtfLines.length      ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n`                                          : "",
     candle1hLines.length   ? `1h OHLCV (last 50, oldest→newest):\n${candle1hLines.join("\n")}\n`                       : "",
