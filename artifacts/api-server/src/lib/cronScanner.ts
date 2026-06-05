@@ -290,8 +290,18 @@ async function applyHardFilters(
   const rejected: Array<{ symbol: string; reason: string }> = [];
 
   for (const opp of opps) {
-    // No regime hard block — Claude receives regime label in prompt and decides freely
-    // Infrastructure-only filters below (execution risk, structural constraints)
+    // Filter 1 (hard): Block LONG entries in confirmed downtrend regimes.
+    // TRENDING_DOWN = ADX>25 DI- dominant; STRONG_TREND bearish = ADX>35 DI- dominant.
+    // NOT overridable by Claude — structurally equivalent downtrends, only ADX magnitude differs.
+    if (opp.direction === "long") {
+      const r           = regime?.regime;
+      const bearishStrong = r === "STRONG_TREND" && (regime?.diMinus ?? 0) > (regime?.diPlus ?? 0);
+      if (r === "TRENDING_DOWN" || bearishStrong) {
+        const detail = `${r} DI- ${regime?.diMinus?.toFixed(1)} > DI+ ${regime?.diPlus?.toFixed(1)}`;
+        rejected.push({ symbol: opp.symbol, reason: `downtrend gate: LONG blocked (${detail})` });
+        continue;
+      }
+    }
 
     // Filter 5: Low liquidity (volume24h < $10M)
     if (opp.volume24h && opp.volume24h < 10_000_000) {
@@ -1369,6 +1379,18 @@ async function runWatchScan(): Promise<void> {
             `Missing: ${gateMissing.join(", ")}`,
             `No trade without SL/TP/setup type.`,
           ].join("\n")).catch(() => {});
+          await removeFromWatchList(signal.symbol);
+          continue;
+        }
+      }
+
+      // Hard gate — downtrend long block (mirrors applyHardFilters; watchScan bypasses that path)
+      if (signal.direction === "long") {
+        const r           = regime?.regime;
+        const bearishStrong = r === "STRONG_TREND" && (regime?.diMinus ?? 0) > (regime?.diPlus ?? 0);
+        if (r === "TRENDING_DOWN" || bearishStrong) {
+          const detail = `${r} DI- ${regime?.diMinus?.toFixed(1)} > DI+ ${regime?.diPlus?.toFixed(1)}`;
+          console.log(`[gate] REJECTED ${sym} (watchScan) — downtrend gate: LONG blocked (${detail})`);
           await removeFromWatchList(signal.symbol);
           continue;
         }
