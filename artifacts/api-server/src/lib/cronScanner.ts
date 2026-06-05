@@ -1452,8 +1452,8 @@ async function runWatchScan(): Promise<void> {
           patchEntrySource(sym, "auto_scan").catch(() => {});
           patchPositionMeta(sym, { score: signal.score ?? 0 }).catch(() => {});
 
-          // Verify metadata completeness — atr excluded: startup stores atr=0 for Claude SL/TP
-          // Also reconcile actual entryPrice and leverage from Bybit fill
+          // Verify metadata completeness, confirm fill on Bybit, then log trade.
+          // logOpenTrade is deferred 5s so we can verify the position exists before creating a record.
           setTimeout(async () => {
             const s2   = await loadBotState().catch(() => null);
             const pm   = ((s2?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
@@ -1469,42 +1469,53 @@ async function runWatchScan(): Promise<void> {
                   .catch(e => console.warn(`[watchScan] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
               }
             }
-            if (pos2) {
-              const plannedEntry    = signal.entry ?? signal.price;
-              const actualMarginUsd = pos2.size * pos2.entryPrice / pos2.leverage;
-              await db.update(tradeLogTable)
-                .set({ entryPrice: String(pos2.entryPrice), leverage: pos2.leverage,
-                       amountUsd:  String(actualMarginUsd.toFixed(2)) })
-                .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
-                .catch(e => console.warn(`[watchScan] entry reconcile ${sym}:`, e.message));
-              console.log(`[trade] Entry reconciled ${sym}: planned $${plannedEntry} → actual $${pos2.entryPrice} | leverage: ${signal.leverage ?? 10}× → ${pos2.leverage}× | margin: $${actualMarginUsd.toFixed(2)}`);
+            // Guard: verify entry on Bybit before logging. Market orders require live position;
+            // limit orders require the orderId to exist in open orders.
+            let confirmed = !!pos2;
+            if (!confirmed) {
+              if (pendingLimitFills.has(sym)) {
+                const openOrders = await bybitGetOrders().catch(() => [] as Awaited<ReturnType<typeof bybitGetOrders>>);
+                const orderOnBybit = openOrders.find(o => o.orderId === gateResult.orderId && o.symbol === sym);
+                if (orderOnBybit) {
+                  confirmed = true;
+                  console.log(`[watchScan] ${sym} limit order confirmed on Bybit`);
+                } else {
+                  pendingLimitFills.delete(sym);
+                }
+              }
+              if (!confirmed) {
+                console.warn(`[watchScan] ⚠️ Silent entry failure ${sym}: no position after 5s — skipping logOpenTrade`);
+                await alertFn?.([`⚠️ SILENT ENTRY FAIL: ${sym} — not on Bybit. NOT logged.`]).catch(() => {});
+                return;
+              }
             }
+            await logOpenTrade({
+              symbol:    sym,
+              broker:    "bybit",
+              direction: pos2 ? (pos2.side === "Buy" ? "long" : "short") : (signal.direction === "short" ? "short" : "long"),
+              entryPrice: pos2?.entryPrice ?? signal.entry ?? signal.price,
+              leverage:  pos2?.leverage ?? signal.leverage ?? 10,
+              amountUsd: pos2 ? pos2.size * pos2.entryPrice / pos2.leverage : amountUsd,
+              reasoning: `[WatchScan] score=${signal.score} regime=${regime?.regime ?? "?"} whyNow=${signal.whyNow ?? signal.reasoning?.slice(0, 200) ?? ""}`,
+              stopLoss:  signal.stopLoss,
+              takeProfit: signal.takeProfit,
+            }).catch(() => {});
+            if (pos2) {
+              console.log(`[trade] Entry reconciled ${sym}: planned $${signal.entry ?? signal.price} → actual $${pos2.entryPrice} | leverage: ${signal.leverage ?? 10}× → ${pos2.leverage}×`);
+            }
+            await db.update(tradeLogTable)
+              .set({
+                tp1:       signal.tp1      ? String(signal.tp1)      : null,
+                tp2:       signal.tp2      ? String(signal.tp2)      : null,
+                sl:        signal.stopLoss ? String(signal.stopLoss) : null,
+                atr:       signal.atr      ? String(signal.atr)      : null,
+                setupType: signal.setupType ?? null,
+                score:     signal.score    ? String(signal.score)    : null,
+                whyNow:    signal.whyNow   ?? null,
+              })
+              .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+              .catch(e => console.warn(`[watchScan] trade_log tp patch ${sym}:`, e.message));
           }, 5000);
-          await logOpenTrade({
-            symbol:    sym,
-            broker:    "bybit",
-            direction: signal.direction === "short" ? "short" : "long",
-            entryPrice: signal.entry ?? signal.price,
-            leverage:  signal.leverage ?? 10,
-            amountUsd,
-            reasoning: `[WatchScan] score=${signal.score} regime=${regime?.regime ?? "?"} whyNow=${signal.whyNow ?? signal.reasoning?.slice(0, 200) ?? ""}`,
-            stopLoss:  signal.stopLoss,
-            takeProfit: signal.takeProfit,
-          }).catch(() => {});
-
-          // Patch trade_log with TP1/TP2/SL — durable fallback for checkPartialExits
-          await db.update(tradeLogTable)
-            .set({
-              tp1:       signal.tp1      ? String(signal.tp1)      : null,
-              tp2:       signal.tp2      ? String(signal.tp2)      : null,
-              sl:        signal.stopLoss ? String(signal.stopLoss) : null,
-              atr:       signal.atr      ? String(signal.atr)      : null,
-              setupType: signal.setupType ?? null,
-              score:     signal.score    ? String(signal.score)    : null,
-              whyNow:    signal.whyNow   ?? null,
-            })
-            .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
-            .catch(e => console.warn(`[watchScan] trade_log tp patch ${sym}:`, e.message));
 
           await alertFn?.([
             `⚡ <b>Watch list entry — ${sym} ${(signal.direction ?? "?").toUpperCase()}</b>`,
@@ -1777,6 +1788,26 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         const deployedMargin = livePos
           ? livePos.size * livePos.entryPrice / livePos.leverage
           : amountUsd;
+
+        // Guard: prevent phantom trade_log rows on silent entry failure.
+        // Market orders require a live Bybit position. Limit orders require the orderId on Bybit.
+        if (!livePos) {
+          if (pendingLimitFills.has(sym)) {
+            const openOrders = await bybitGetOrders().catch(() => [] as Awaited<ReturnType<typeof bybitGetOrders>>);
+            const orderOnBybit = openOrders.find(o => o.orderId === gateResult.orderId && o.symbol === sym);
+            if (!orderOnBybit) {
+              pendingLimitFills.delete(sym);
+              console.warn(`[cronScanner] ⚠️ Silent entry failure ${sym}: limit orderId not found on Bybit — skipping logOpenTrade`);
+              await alertFn?.([`⚠️ SILENT ENTRY FAIL: ${sym} limit order — not on Bybit. NOT logged.`]).catch(() => {});
+              continue;
+            }
+            console.log(`[cronScanner] ${sym} limit order confirmed on Bybit (orderId: ${gateResult.orderId ?? "?"})`);
+          } else {
+            console.warn(`[cronScanner] ⚠️ Silent entry failure ${sym}: no position after market order — skipping logOpenTrade`);
+            await alertFn?.([`⚠️ SILENT ENTRY FAIL: ${sym} — no Bybit position. NOT logged.`]).catch(() => {});
+            continue;
+          }
+        }
 
         // Log to trade memory so history page and future reviews have entry context
         await logOpenTrade({
