@@ -125,10 +125,12 @@ Claude sets all entry parameters (symbol, direction, entry, SL, TP1, TP2, sizing
 - Missing TP1/SL (Gate 6) — non-negotiable, position safety
 
 ### Downtrend hard gate — when to revisit
-The Gate 1 downtrend long block should be re-evaluated when:
-1. At least 5–10 clean trades accumulate under STRONG_TREND bullish regime (gated path not contaminating the dataset)
-2. BTC regime transitions to TRENDING_UP or RANGING for ≥1 week — to check if the gate ever prevents good longs vs just bad ones
-3. If a confirmed bullish STRONG_TREND long hits TP2 while Gate 1 was active on bearish STRONG_TREND, that is NOT evidence to relax the gate
+**Primary trigger:** Revisit/relax this gate only once the bot has a mature, trustworthy profitability record — meaning the clean baseline (Jun 4+) shows consistent profitable performance across 20+ trades. Until that threshold is met, the gate stays regardless of any other conditions. The historical data that prompted it (0% TP1 hit rate for bearish STRONG_TREND longs) was unambiguous; removing the gate before the bot has proven itself risks re-introducing the single largest source of losses in the dataset.
+
+Secondary conditions to evaluate at that point:
+1. At least 5–10 clean trades under STRONG_TREND bullish regime (to confirm the gate only blocked the bad direction, not good longs)
+2. BTC regime has transitioned through TRENDING_UP or RANGING for ≥1 week (context has changed enough to re-test)
+3. A bullish STRONG_TREND long hitting TP2 while Gate 1 was active on bearish STRONG_TREND is NOT evidence to relax — those are different regimes
 
 The NL path (aiResponder) currently bypasses Gate 1. Open item: fetch current regime in aiResponder and apply same check.
 
@@ -157,6 +159,7 @@ Current system credits all active rules when a trade wins/loses (Option 1 — al
 ### Known data limitations
 - **Portfolio margin cap:** Bybit account uses portfolio margin. The `positionIM` field (initial margin) does not account for cross-margin netting correctly when multiple positions are open — margin utilisation may be understated in logs.
 - **`tp1Executed` false positive bug:** `pos.size < origQty * 0.85` in `cronScanner.ts:648` falsely marks `tp1Executed=true` for manual partial closes (which reduce size but do not trigger the TP1 order). Identified, not yet fixed.
+- **TP1 order-not-on-exchange (silent miss):** Price physically crosses TP1 level (`tp1_reached=TRUE` in trade_memory) but the partial close never fires because the TP1 limit order was not placed on Bybit at entry time. Bot logs show `triggered: tp1=false` even though current price is past TP1. This is distinct from the false positive above — it is a missing order, not a mislabeled flag. Root cause: TP order placement failure at entry. Detection: posMonitor logs `triggered: tp1=false` while price is clearly past TP1 price. Mitigation: Rule 7 requires manual verification of open orders after every fill.
 - **DB reconciler misses TP partials:** `startup.ts` reconciler does not detect TP1/TP2 partials that executed while the bot was offline — these appear as full-size closes with incorrect pnl attribution.
 - **Manual closes mislabeled:** Some manual closes are labeled `sl_hit` in exit_method due to how Bybit reports market orders from stop triggers.
 
