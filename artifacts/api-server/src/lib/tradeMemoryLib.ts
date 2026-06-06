@@ -1819,7 +1819,7 @@ export async function logOpenTrade(params: {
   symbol: string; broker: string; direction: "long" | "short";
   entryPrice: number; leverage: number; amountUsd: number; reasoning?: string;
   stopLoss?: number; takeProfit?: number; stopLossMethod?: string;
-}): Promise<void> {
+}): Promise<string | null> {
   const enriched = [
     params.reasoning,
     params.stopLoss       ? `SL=$${params.stopLoss}`          : null,
@@ -1828,7 +1828,7 @@ export async function logOpenTrade(params: {
   ].filter(Boolean).join(" | ");
 
   try {
-    await db.insert(tradeLogTable).values({
+    const rows = await db.insert(tradeLogTable).values({
       symbol:     params.symbol,
       broker:     params.broker,
       direction:  params.direction,
@@ -1837,9 +1837,11 @@ export async function logOpenTrade(params: {
       leverage:   params.leverage,
       reasoning:  enriched || null,
       entryAt:    new Date(),
-    });
+    }).returning({ id: tradeLogTable.id });
+    return rows[0]?.id ?? null;
   } catch (e) {
     console.error("[tradeMemory] logOpenTrade failed:", e);
+    return null;
   }
 }
 

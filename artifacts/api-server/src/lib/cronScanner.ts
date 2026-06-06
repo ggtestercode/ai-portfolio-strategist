@@ -1489,7 +1489,7 @@ async function runWatchScan(): Promise<void> {
                 return;
               }
             }
-            await logOpenTrade({
+            const newTradeId = await logOpenTrade({
               symbol:    sym,
               broker:    "bybit",
               direction: pos2 ? (pos2.side === "Buy" ? "long" : "short") : (signal.direction === "short" ? "short" : "long"),
@@ -1499,7 +1499,7 @@ async function runWatchScan(): Promise<void> {
               reasoning: `[WatchScan] score=${signal.score} regime=${regime?.regime ?? "?"} whyNow=${signal.whyNow ?? signal.reasoning?.slice(0, 200) ?? ""}`,
               stopLoss:  signal.stopLoss,
               takeProfit: signal.takeProfit,
-            }).catch(() => {});
+            }).catch(() => null);
             if (pos2) {
               console.log(`[trade] Entry reconciled ${sym}: planned $${signal.entry ?? signal.price} → actual $${pos2.entryPrice} | leverage: ${signal.leverage ?? 10}× → ${pos2.leverage}×`);
             }
@@ -1513,7 +1513,9 @@ async function runWatchScan(): Promise<void> {
                 score:     signal.score    ? String(signal.score)    : null,
                 whyNow:    signal.whyNow   ?? null,
               })
-              .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+              .where(newTradeId
+                ? eq(tradeLogTable.id, newTradeId)
+                : and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
               .catch(e => console.warn(`[watchScan] trade_log tp patch ${sym}:`, e.message));
           }, 5000);
 
@@ -1810,7 +1812,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         }
 
         // Log to trade memory so history page and future reviews have entry context
-        await logOpenTrade({
+        const newTradeId = await logOpenTrade({
           symbol:          sym,
           broker:          "bybit",
           direction:       actualDirection,
@@ -1821,7 +1823,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           stopLoss:        opp.stopLoss,
           takeProfit:      opp.takeProfit,
           stopLossMethod:  opp.stopLossMethod,
-        }).catch(e => console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message));
+        }).catch(e => { console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message); return null; });
 
         // Determine which active rules apply to this trade
         const activeRulesForTag = await getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>);
@@ -1853,7 +1855,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             appliedRuleIds: appliedRuleIds.length ? appliedRuleIds : null,
             ...(livePos ? { entryPrice: String(livePos.entryPrice), leverage: livePos.leverage } : {}),
           })
-          .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+          .where(newTradeId
+            ? eq(tradeLogTable.id, newTradeId)
+            : and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
           .catch(e => console.warn(`[cronScanner] trade_log tp patch ${sym}:`, e.message));
 
         const rMult = (opp.score ?? 65) >= 90 ? 1.2 : (opp.score ?? 65) >= 75 ? 1.0 : 0.5;
