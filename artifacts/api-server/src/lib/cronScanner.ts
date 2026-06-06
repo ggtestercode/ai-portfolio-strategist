@@ -2020,6 +2020,7 @@ async function checkPositionMonitor(): Promise<void> {
   for (const sym of prevPositionSymbols) {
     if (!currentSymbols.has(sym)) {
       await clearPositionMeta(sym).catch(() => {});
+      await removePendingLimitFill(sym).catch(() => {});
       selfHealAttempted.delete(sym);
       // Always fetch closed PnL and close trade_log — regardless of trailing state
       // Group close records by avgEntryPrice proximity + time window. Bybit's closed-pnl endpoint
