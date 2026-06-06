@@ -415,8 +415,10 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
 
   const tp1Reached = checkCandlesReachedPrice(tradePeriodCandles, tp1Price, input.direction as "long" | "short");
   const tp2Reached = checkCandlesReachedPrice(tradePeriodCandles, tp2Price, input.direction as "long" | "short");
-  const tp1Executed = memPartials.some(p => p.partialType === "tp1");
-  const tp2Executed = memPartials.some(p => p.partialType === "tp2");
+  // Also treat as executed if Bybit shows multiple partial closes — exchange-level
+  // PartialTakeProfit fires without writing a trade_memory PARTIAL record.
+  const tp1Executed = memPartials.some(p => p.partialType === "tp1") || bybitCloses.length > 1;
+  const tp2Executed = memPartials.some(p => p.partialType === "tp2") || bybitCloses.length > 2;
 
   const maxProfitPct = getMaxProfitDuringHold(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
 
@@ -619,6 +621,11 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
         : `TP EXIT: Additional gain available after exit: ${additionalGainPct.toFixed(2)}%\nDid price continue in our direction? ${additionalGainPct > 2 ? "YES — TP too conservative" : "NO — TP well timed"}`,
     ``,
     `═══ EXECUTION ANALYSIS ═══`,
+    `CRITICAL: executed=YES/NO is derived from bot trade_memory records plus Bybit close count.`,
+    `Do NOT speculate about whether specific orders fired or failed based on price metadata alone.`,
+    `Only populate executionIssues with unambiguous failures evident in the data provided.`,
+    `If tp1_reached=YES and Bybit shows multiple partial closes, assume TP1 fired correctly.`,
+    `If uncertain, set executionIssues to []. Never fabricate partial close prices.`,
     `TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
     `TP2 ($${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"}): reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
     `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
