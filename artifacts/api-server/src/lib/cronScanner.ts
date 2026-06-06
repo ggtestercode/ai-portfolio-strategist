@@ -1998,8 +1998,6 @@ async function checkPositionMonitor(): Promise<void> {
     if (!positions.length) return;
   }
 
-  if (!positions.length) return;
-
   // Use in-memory cache for all bot_state reads — no DB call per tick
   const stateRow = await loadBotState().catch(() => null);
 
@@ -2015,6 +2013,9 @@ async function checkPositionMonitor(): Promise<void> {
   const now          = Date.now();
 
   // ── Position disappearance detection (SL/TP/liquidation) ───────────────────
+  // Runs BEFORE the positions.length guard: symbols that vanished during a transient
+  // Bybit [] response are still detected and closeOpenTrade is called correctly.
+  const prevSymbols    = new Set(prevPositionSymbols); // snapshot for limit-fill detection below
   const currentSymbols = new Set(positions.map(p => p.symbol));
   for (const sym of prevPositionSymbols) {
     if (!currentSymbols.has(sym)) {
@@ -2078,11 +2079,18 @@ async function checkPositionMonitor(): Promise<void> {
       }
     }
   }
+  // Update prevPositionSymbols before early return so it's current on the next tick
+  prevPositionSymbols.clear();
+  positions.forEach(p => prevPositionSymbols.add(p.symbol));
+
+  // Skip per-position monitoring when Bybit returned no positions (transient or genuinely flat)
+  if (!positions.length) return;
+
   // ── Limit order fill detection ────────────────────────────────────────────
   // Detect symbols that just appeared as positions (limit order filled since last tick).
   // Apply deferred SL/TP/metadata now that the position exists on Bybit.
   for (const pos of positions) {
-    if (!prevPositionSymbols.has(pos.symbol) && pendingLimitFills.has(pos.symbol)) {
+    if (!prevSymbols.has(pos.symbol) && pendingLimitFills.has(pos.symbol)) {
       const pending = pendingLimitFills.get(pos.symbol)!;
       await removePendingLimitFill(pos.symbol).catch(() => {});
       console.log(`[posMonitor] Limit filled — ${pos.symbol} at $${pos.entryPrice.toFixed(4)}`);
@@ -2113,9 +2121,6 @@ async function checkPositionMonitor(): Promise<void> {
       ].filter(Boolean).join("\n")).catch(() => {});
     }
   }
-
-  prevPositionSymbols.clear();
-  positions.forEach(p => prevPositionSymbols.add(p.symbol));
 
   for (const pos of positions) {
     const pnlPct = pos.pnlPct ?? 0;
