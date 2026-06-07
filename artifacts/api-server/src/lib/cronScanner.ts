@@ -1957,9 +1957,13 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       console.log("[paperScanner] Version B disabled via PAPER_TRADING_ENABLED=false");
     }
 
-    // Mode 3 paper — always runs, piggybacking on live scan signals at zero extra API cost
-    runMode3PaperScan(filteredSignals, regime?.regime ?? "CHOPPY")
-      .catch(err => console.error("[mode3Paper] Error:", err));
+    // Mode 3 paper — gated by MODE3_PAPER_ENABLED env var (default on)
+    if (process.env["MODE3_PAPER_ENABLED"] !== "false") {
+      runMode3PaperScan(filteredSignals, regime?.regime ?? "CHOPPY")
+        .catch(err => console.error("[mode3Paper] Error:", err));
+    } else {
+      console.log("[mode3Paper] Disabled via MODE3_PAPER_ENABLED=false");
+    }
   } catch (err) {
     console.error("[cronScanner] Scan failed:", err);
   } finally {
