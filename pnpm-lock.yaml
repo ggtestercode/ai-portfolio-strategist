@@ -204,7 +204,7 @@ importers:
         version: 17.4.2
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0)
+        version: 0.45.2(@types/pg@8.18.0)(pg@8.20.0)
       express:
         specifier: ^5
         version: 5.2.1
@@ -653,16 +653,13 @@ importers:
 
   lib/db:
     dependencies:
-      '@neondatabase/serverless':
-        specifier: ^1.1.0
-        version: 1.1.0
       drizzle-orm:
         specifier: 'catalog:'
-        version: 0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0)
+        version: 0.45.2(@types/pg@8.18.0)(pg@8.20.0)
       drizzle-zod:
         specifier: ^0.8.3
-        version: 0.8.3(drizzle-orm@0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0))(zod@3.25.76)
-      ws:
+        version: 0.8.3(drizzle-orm@0.45.2(@types/pg@8.18.0)(pg@8.20.0))(zod@3.25.76)
+      pg:
         specifier: ^8.20.0
         version: 8.20.0
       zod:
@@ -675,15 +672,9 @@ importers:
       '@types/pg':
         specifier: ^8.18.0
         version: 8.18.0
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
       drizzle-kit:
         specifier: ^0.31.9
         version: 0.31.9
-      pg:
-        specifier: ^8.20.0
-        version: 8.20.0
 
   lib/integrations-openai-ai-react: {}
 
@@ -876,10 +867,6 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
-
-  '@neondatabase/serverless@1.1.0':
-    resolution: {integrity: sha512-r3ZZhRjEcfEdKIZnoB1RusNgvHuaBRqfCzV4Gi+5A9yUX0S4HTws/ASWqt13wL4y4I+0rqsWGdA2w7EQXHi3+Q==}
-    engines: {node: '>=19.0.0'}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -1851,9 +1838,6 @@ packages:
 
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
-
-  '@types/ws@8.18.1':
-    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@vitejs/plugin-react@5.1.4':
     resolution: {integrity: sha512-VIcFLdRi/VYRU8OL/puL7QXMYafHmqOnwTZY50U1JPlCNj30PxCMx65c494b1K9be9hX83KVt0+gTEwTWLqToA==}
@@ -4810,8 +4794,6 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@neondatabase/serverless@1.1.0': {}
-
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
       '@nodelib/fs.stat': 2.0.5
@@ -5927,10 +5909,6 @@ snapshots:
 
   '@types/unist@3.0.3': {}
 
-  '@types/ws@8.18.1':
-    dependencies:
-      '@types/node': 25.3.5
-
   '@vitejs/plugin-react@5.1.4(vite@7.3.2(@types/node@25.3.5)(jiti@2.6.1)(lightningcss@1.32.0)(terser@5.46.2)(tsx@4.21.0)(yaml@2.8.2))':
     dependencies:
       '@babel/core': 7.29.0
@@ -6555,15 +6533,14 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0):
+  drizzle-orm@0.45.2(@types/pg@8.18.0)(pg@8.20.0):
     optionalDependencies:
-      '@neondatabase/serverless': 1.1.0
       '@types/pg': 8.18.0
       pg: 8.20.0
 
-  drizzle-zod@0.8.3(drizzle-orm@0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0))(zod@3.25.76):
+  drizzle-zod@0.8.3(drizzle-orm@0.45.2(@types/pg@8.18.0)(pg@8.20.0))(zod@3.25.76):
     dependencies:
-      drizzle-orm: 0.45.2(@neondatabase/serverless@1.1.0)(@types/pg@8.18.0)(pg@8.20.0)
+      drizzle-orm: 0.45.2(@types/pg@8.18.0)(pg@8.20.0)
       zod: 3.25.76
 
   dunder-proto@1.0.1:
