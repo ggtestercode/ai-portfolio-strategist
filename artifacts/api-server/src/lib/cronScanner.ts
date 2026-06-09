@@ -643,12 +643,25 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
 
     // Detect silent exchange-side TP1 fill: position already reduced ≥15% but flag not set.
     // Exchange partial TP orders fire without triggering any code hook, so tp1Executed can stay
-    // false even after Bybit reduces the position. If we detect the reduction here, set the flag
-    // to prevent a duplicate software close on the same tick.
+    // false even after Bybit reduces the position. Set the flag AND apply the same +1% SL ratchet
+    // as the software TP1 path — guarded so it only fires if it improves (tightens) the current SL.
     if (effectiveTp1 > 0 && !pm.tp1Executed && pos.size < origQty * 0.85) {
-      console.log(`[partialExit] ${pos.symbol} — exchange TP1 detected: size ${pos.size}/${origQty} (${(qtyRatio * 100).toFixed(0)}%) < 85% → marking tp1Executed, skipping software close`);
+      console.log(`[partialExit] ${pos.symbol} — exchange TP1 detected: size ${pos.size}/${origQty} (${(qtyRatio * 100).toFixed(0)}%) < 85% → marking tp1Executed, applying SL ratchet`);
       await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
       pm.tp1Executed = true; // update local copy so TP2 gate below sees it this tick
+      // Ratchet SL to +1% beyond entry — same as software TP1 path
+      const tp1SlB = pos.side === "Buy" ? pm.entryPrice * 1.01 : pm.entryPrice * 0.99;
+      const curSlRawB = pm.sl ?? pos.stopLoss ?? 0;
+      const curSlB = typeof curSlRawB === "number" ? curSlRawB : parseFloat(String(curSlRawB) || "0");
+      const wouldImproveB = pos.side === "Buy" ? tp1SlB > curSlB : (curSlB === 0 || tp1SlB < curSlB);
+      if (wouldImproveB) {
+        await bybitSetStopLoss(pos.symbol, tp1SlB, pos.positionIdx)
+          .catch(e => console.warn(`[partialExit] exchange TP1 SL ratchet failed ${pos.symbol}:`, e.message));
+        await patchPositionMeta(pos.symbol, { sl: tp1SlB }).catch(() => {});
+        db.update(tradeLogTable).set({ effectiveSl: String(tp1SlB) })
+          .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt))).catch(() => {});
+        console.log(`[partialExit] ${pos.symbol} SL ratcheted → $${tp1SlB.toFixed(4)} (exchange-side TP1)`);
+      }
     }
 
     // TP1: price reached TP1 and explicit flag not yet set
@@ -667,6 +680,8 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
           await bybitSetStopLoss(pos.symbol, tp1Sl, pos.positionIdx)
             .catch(e => console.warn(`[cronScanner] TP1 +1% SL failed ${pos.symbol}:`, e.message));
           await patchPositionMeta(pos.symbol, { sl: tp1Sl }).catch(() => {});
+          db.update(tradeLogTable).set({ effectiveSl: String(tp1Sl) })
+            .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt))).catch(() => {});
           const banked        = pos.pnl * 0.30;
           const base          = pos.symbol.replace(/USDT$/, "");
           const remainQty     = +(pos.size * 0.70).toFixed(4);
@@ -2205,6 +2220,8 @@ async function checkPositionMonitor(): Promise<void> {
         await bybitSetStopLoss(pos.symbol, pos.entryPrice, pos.positionIdx)
           .catch(e => console.warn(`[posMonitor] Breakeven SL failed ${pos.symbol}:`, (e as Error).message));
         await patchPositionMeta(pos.symbol, { sl: pos.entryPrice }).catch(() => {});
+        db.update(tradeLogTable).set({ effectiveSl: String(pos.entryPrice) })
+          .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt))).catch(() => {});
         console.log(`[posMonitor] ${pos.symbol} SL → breakeven $${pos.entryPrice.toFixed(4)} (P/L ${pnlPct.toFixed(1)}% ≥ +2%)`);
         await alertFn?.(`🛡️ <b>Breakeven SL — ${pos.symbol}</b>\nP/L +${pnlPct.toFixed(1)}% → SL moved to entry $${pos.entryPrice.toFixed(4)}`).catch(() => {});
       }
@@ -2575,6 +2592,8 @@ async function runPositionReview(
       await bybitSetStopLoss(pos.symbol, claudeNewSl, pos.positionIdx)
         .catch(e => console.warn(`[posMonitor] newSl update ${pos.symbol}:`, (e as Error).message));
       await patchPositionMeta(pos.symbol, { sl: claudeNewSl });
+      db.update(tradeLogTable).set({ effectiveSl: String(claudeNewSl) })
+        .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt))).catch(() => {});
       console.log(`[posMonitor] ${pos.symbol} SL ratchet → $${claudeNewSl.toFixed(4)} (was $${currentSlNum.toFixed(4)})`);
     } else {
       console.warn(`[posMonitor] ${pos.symbol} NEW_SL $${claudeNewSl.toFixed(4)} rejected — ratchet check failed (current $${currentSlNum.toFixed(4)}, ${isLong ? "LONG" : "SHORT"})`);

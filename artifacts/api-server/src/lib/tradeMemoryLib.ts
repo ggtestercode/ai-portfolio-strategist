@@ -651,10 +651,13 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Verdict needed: early (entered before setup confirmed), good (right time/price), late (chased extended move), wrong (entered on wrong side of structure)`,
     ``,
     `═══ SL ASSESSMENT ═══`,
-    `Planned SL: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} (${slDistancePct.toFixed(2)}% from entry)`,
+    `Effective SL at exit: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} (${slDistancePct.toFixed(2)}% from entry)${tp1Executed ? " [POST-TP1 RATCHET — SL was moved after TP1 hit; this is NOT the original entry SL]" : " [original entry SL — no ratchet applied]"}`,
     `Max adverse move DURING hold: ${maxAdverseMoveHoldPct.toFixed(2)}% from entry`,
     `Was SL hit this trade: ${exitMethod === "sl_hit" ? "YES" : "NO"}`,
     `Post-exit adverse continuation: ${maxAdditionalLossPct.toFixed(2)}%`,
+    tp1Executed && exitMethod === "sl_hit"
+      ? `IMPORTANT: TP1 was executed before SL. Any SL hit after TP1 is a profit-protected exit (ratcheted SL), NOT a premature stop. slTooTight should be false unless the ratcheted SL itself was unreasonably tight given structure.`
+      : null,
     ["manual_full","manual_partial"].includes(exitMethod)
       ? `Verdict needed: na — human closed position, SL was not the exit mechanism`
       : `Verdict needed: too_tight (SL hit but price recovered — premature), good (appropriate), too_wide (absorbed excessive loss)`,
@@ -1730,7 +1733,7 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
       setupType:      trade.setupType,
       score:          trade.score,
       whyNow:         trade.whyNow,
-      sl:             trade.sl,
+      sl:             trade.effectiveSl ?? trade.sl,
       tp1:            trade.tp1,
       tp2:            trade.tp2,
       sourceTradeId:  trade.id,
