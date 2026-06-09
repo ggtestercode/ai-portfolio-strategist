@@ -1971,8 +1971,8 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
   }
 }
 
-// ── Position monitor (5-min) ──────────────────────────────────────────────────
-const MONITOR_INTERVAL_MS = 5 * 60 * 1000;
+// ── Position monitor (10-min) ─────────────────────────────────────────────────
+const MONITOR_INTERVAL_MS = 10 * 60 * 1000;
 
 // In-memory cache: survives DB failures within a single server session.
 // Seeded from DB on first successful read; DB is the write-through target.

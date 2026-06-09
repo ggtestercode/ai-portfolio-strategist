@@ -13,10 +13,6 @@ neonConfig.webSocketConstructor = ws;
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 export const db   = drizzle(pool, { schema });
 
-// Warm up + keep alive: re-ping every 4 min so Neon doesn't auto-suspend
-pool.query("SELECT 1").catch(() => {});
-setInterval(() => { pool.query("SELECT 1").catch(() => {}); }, 4 * 60 * 1000);
-
 export * from "./schema";
 export * from "./schema/operation";
 // holdingsTable already in schema exports
