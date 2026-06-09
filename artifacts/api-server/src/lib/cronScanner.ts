@@ -2589,15 +2589,15 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
   if (alertFn) startWeeklyAbReportCron(alertFn);
   startPaperMonitorCron(alertFn);
 
-  // 9am SGT (= 1am UTC) daily Neon DB health check
+  // 9am SGT (= 1am UTC) daily DB health check
   cron.schedule("0 1 * * *", async () => {
     try {
       await db.select({ id: botStateTable.id }).from(botStateTable).limit(1);
-      await alertFn?.("✅ DB healthy — Neon connection OK").catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      await alertFn?.("✅ DB healthy — Railway connection OK").catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.log("[dbHealth] Daily check: OK");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await alertFn?.(`⚠️ DB connection failed — check Neon limits\n${msg.slice(0, 200)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      await alertFn?.(`⚠️ DB connection failed\n${msg.slice(0, 200)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.error("[dbHealth] Daily check FAILED:", e);
     }
   });
@@ -2640,7 +2640,7 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
   });
 
   console.log("[posMonitor] Started — checks every 5 min");
-  console.log("[dbHealth] Daily 9am SGT Neon health check scheduled");
+  console.log("[dbHealth] Daily 9am SGT DB health check scheduled");
   console.log("[dailySummary] Daily midnight SGT position summary scheduled");
 }
 
