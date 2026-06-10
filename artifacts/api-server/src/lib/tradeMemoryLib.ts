@@ -39,7 +39,8 @@ interface ReflectionInput {
   setupType?:    string | null;
   score?:        string | null;
   whyNow?:       string | null;
-  sl?:           string | null;
+  sl?:           string | null;   // original entry SL — never updated post-entry
+  effectiveSl?:  string | null;   // ratcheted SL if a ratchet occurred; null = no ratchet
   tp1?:          string | null;
   tp2?:          string | null;
   sourceTradeId?: string | null;
@@ -411,7 +412,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   // ── Execution quality checks ──────────────────────────────────────────────
   const tp1Price   = input.tp1   ? parseFloat(input.tp1)  : 0;
   const tp2Price   = input.tp2   ? parseFloat(input.tp2)  : 0;
-  const plannedSL  = input.sl    ? parseFloat(input.sl)   : 0;
+  const plannedSL  = input.sl    ? parseFloat(input.sl)   : 0;   // always original entry SL
+  const effectiveSL     = input.effectiveSl ? parseFloat(input.effectiveSl) : 0;
+  const slWasRatcheted  = effectiveSL > 0 && effectiveSL !== plannedSL;
 
   const tp1Reached = checkCandlesReachedPrice(tradePeriodCandles, tp1Price, input.direction as "long" | "short");
   const tp2Reached = checkCandlesReachedPrice(tradePeriodCandles, tp2Price, input.direction as "long" | "short");
@@ -456,6 +459,22 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       : bybitCloses.length > 0 && bybitCloses[bybitCloses.length-1]!.closedPnl !== undefined
         ? (input.pnlPct < -5 ? "sl_hit" : "review")
         : "unknown";
+
+  // Exit branch — keyed on tp1Executed (authoritative TP1-fill signal), not on effectiveSl
+  const exitBranch: "original_sl" | "ratcheted_sl" | "tp_hit" | "other" =
+    tp2Executed                                    ? "tp_hit"
+    : exitMethod === "tp_hit"                      ? "tp_hit"
+    : (tp1Executed && exitMethod === "sl_hit")     ? "ratcheted_sl"
+    : exitMethod === "sl_hit"                      ? "original_sl"
+    : "other";
+
+  // Effective SL display distance (for prompt context only — not used for slTooTight assessment)
+  const effectiveSlDistancePct = effectiveSL > 0 && input.entryPrice > 0
+    ? Math.abs(effectiveSL - input.entryPrice) / input.entryPrice * 100 : 0;
+
+  // Entry regime — parse from trade's stored reasoning (bot_state.currentRegime is today's regime)
+  const entryRegime = (input.reasoning?.match(/regime=([A-Z_]+)/)?.[1]) ?? "UNKNOWN";
+  const isStrongTrend = entryRegime === "STRONG_TREND";
 
   const tradeLost = input.pnlPct < 0;
   const failureType: "strategy" | "execution" | "mixed" | "success" =
@@ -651,24 +670,39 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Verdict needed: early (entered before setup confirmed), good (right time/price), late (chased extended move), wrong (entered on wrong side of structure)`,
     ``,
     `═══ SL ASSESSMENT ═══`,
-    `Effective SL at exit: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} (${slDistancePct.toFixed(2)}% from entry)${tp1Executed ? " [POST-TP1 RATCHET — SL was moved after TP1 hit; this is NOT the original entry SL]" : " [original entry SL — no ratchet applied]"}`,
+    `Exit branch: ${
+      exitBranch === "original_sl"  ? "BRANCH 1 — original entry SL hit (no TP1 fired, no ratchet)" :
+      exitBranch === "ratcheted_sl" ? "BRANCH 2 — ratcheted SL hit after TP1 (TP1 captured profit, remainder exited at lock level)" :
+      exitBranch === "tp_hit"       ? "BRANCH 3 — TP exit (target reached, clean win)" :
+                                      "BRANCH OTHER — manual/review close"
+    }`,
+    `Original entry SL: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} (${slDistancePct.toFixed(2)}% from entry)`,
+    slWasRatcheted
+      ? `Ratcheted SL at exit: $${effectiveSL.toFixed(4)} (${effectiveSlDistancePct.toFixed(2)}% from entry) — applied after TP1 hit`
+      : `No SL ratchet — original SL was the active level throughout`,
     `Max adverse move DURING hold: ${maxAdverseMoveHoldPct.toFixed(2)}% from entry`,
     `Was SL hit this trade: ${exitMethod === "sl_hit" ? "YES" : "NO"}`,
     `Post-exit adverse continuation: ${maxAdditionalLossPct.toFixed(2)}%`,
-    tp1Executed && exitMethod === "sl_hit"
-      ? `IMPORTANT: TP1 was executed before SL. Any SL hit after TP1 is a profit-protected exit (ratcheted SL), NOT a premature stop. slTooTight should be false unless the ratcheted SL itself was unreasonably tight given structure.`
-      : null,
+    exitBranch === "original_sl"
+      ? `→ slTooTight verdict: was the ORIGINAL entry SL ($${plannedSL.toFixed(4)}, ${slDistancePct.toFixed(2)}% away) placed inside the noise zone? too_tight = SL hit but price then moved in trade direction (original SL was premature). good = appropriate distance. too_wide = absorbed excessive loss before stopping out.`
+      : exitBranch === "ratcheted_sl"
+      ? `→ slTooTight MUST BE false. The ORIGINAL entry SL was never hit — it is NOT too tight. The exit was a profit-protecting ratcheted SL after TP1 was captured. Set slTooTight=false unconditionally. Instead assess tp2Verdict: was TP2 placed too far to be realistically reached after TP1?`
+      : `→ slTooTight = false (not applicable for TP exits and manual/review closes)`,
     ["manual_full","manual_partial"].includes(exitMethod)
       ? `Verdict needed: na — human closed position, SL was not the exit mechanism`
-      : `Verdict needed: too_tight (SL hit but price recovered — premature), good (appropriate), too_wide (absorbed excessive loss)`,
+      : null,
     ``,
     `═══ TP ASSESSMENT ═══`,
     `TP1: $${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"} — reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}`,
     `TP2: $${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"} — reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
     `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
     `Additional gain available after exit: ${additionalGainPct.toFixed(2)}%`,
-    `TP1 verdict: too_tight (hit quickly, price ran far further), good (reasonable), too_ambitious (never reached despite available profit)`,
-    `TP2 verdict: same logic`,
+    `TP1 verdict: too_tight (price ran far past TP1 quickly — target too conservative), good, too_ambitious (price never reached TP1)`,
+    exitBranch === "ratcheted_sl"
+      ? (isStrongTrend
+        ? `TP2 verdict (BRANCH 2, STRONG_TREND): TP1 was captured; remainder exited at ratcheted SL. Was TP2 set too far? STRONG_TREND data shows a 3–8% dead zone where price rarely continues to TP2 after TP1. TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was beyond the realistic run given this regime (should be ≤6% for STRONG_TREND shorts); good = TP2 was reasonable, price simply reversed before reaching it.`
+        : `TP2 verdict (BRANCH 2, regime=${entryRegime}): TP1 was captured; remainder exited at ratcheted SL before TP2. Was TP2 too ambitious? TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was unrealistically far given available move; good = TP2 was reasonable, price simply reversed.`)
+      : `TP2 verdict: too_tight (hit quickly, price ran far further), good (reasonable), too_ambitious (never reached despite available profit)`,
     ``,
     `═══ PARTIAL CLOSE ASSESSMENT ═══`,
     `Exit method: ${exitMethod}`,
@@ -838,6 +872,14 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   });
 
   const d = res.data;
+
+  // Hard override — Branch 2 (ratcheted SL after TP1) and Branch 3 (TP exit) must never
+  // be labeled slTooTight regardless of what the LLM returns. The original entry SL was
+  // never hit in these cases; the label is not applicable.
+  if (exitBranch === "ratcheted_sl" || exitBranch === "tp_hit") {
+    d.slTooTight = false;
+  }
+
   const outcome    = input.pnl >= 0 ? "WIN" : "LOSS";
   const reflection = [
     `${input.direction.toUpperCase()} ${outcome} ${sign}${input.pnlPct.toFixed(2)}%`,
@@ -1733,7 +1775,8 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
       setupType:      trade.setupType,
       score:          trade.score,
       whyNow:         trade.whyNow,
-      sl:             trade.effectiveSl ?? trade.sl,
+      sl:             trade.sl,
+      effectiveSl:    trade.effectiveSl ?? undefined,
       tp1:            trade.tp1,
       tp2:            trade.tp2,
       sourceTradeId:  trade.id,
