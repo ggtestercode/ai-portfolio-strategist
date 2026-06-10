@@ -202,6 +202,38 @@ No action required. Learning loop is healthy.
 
 ---
 
+## Reference — tp2_verdict Semantics (June 2026)
+
+`tp2_verdict` can hold the same string value for structurally different situations. The distinction matters whenever analysing or grading TP2 placement.
+
+### The three cases
+
+**`tp2_verdict = 'na'`**
+TP2 was never tested. TP1 never fired, so price never entered the profit zone where TP2 placement would matter. The trade exited before TP2 was in play (e.g. a Path-C breakeven SL ratchet without a prior TP1 partial, or a bot review close). These rows carry no information about TP2 distance.
+
+**`tp2_verdict = 'too_ambitious'` where TP1 fired (B2 / ratcheted_sl trades)**
+TP2 was genuinely tested. Price moved into profit enough to trigger TP1, could have continued to TP2, but reversed before reaching it. The verdict reflects a real relationship between TP2 placement and what price did.
+
+**`tp2_verdict = 'too_ambitious'` where TP1 never fired (straight-to-SL losses)**
+The trade hit its original SL and never approached TP2. The verdict was assigned by older reflection logic that did not distinguish this from the case above. The relationship between TP2 placement and outcome is weak-to-absent — TP2 was never in play.
+
+### The structural rule
+
+**A `tp2_verdict` only carries information about TP2 placement if TP1 actually fired.** That is what determines whether price entered the zone where TP2 distance could affect the outcome.
+
+A trade that went straight to SL without firing TP1 is not uninformative — but its signal lives upstream of TP2:
+- **direction** — was the trade on the right side of the move at all?
+- **entryTimingVerdict** — right direction, wrong moment?
+- **slTooTight** — right direction, stop sitting in the noise?
+
+TP2 placement is downstream of all of these. It only becomes a factor once price has proved the direction correct by reaching TP1. On a straight-to-SL trade, ignore `tp2_verdict`; read `entryTimingVerdict` and `slTooTight` instead.
+
+### Data-reliability note on tp1_executed
+
+The `tp1Executed` flag derived from Bybit close-count (`bybitCloses.length > 1`) is **unreliable for trades with a bot review close**. Example: `b5a26af0` INJUSDT had 3 Bybit closes and was wrongly flagged as having reached TP2 (`bybitCloses.length > 2 = true`) when TP2 price 4.888 was never hit — the 3rd close was a bot market order. The raw `/v5/execution/list` fill records (sorted by `execTime`, not `createdTime`) are the ground truth for what actually fired and in what order.
+
+---
+
 ## Key Principles
 1. **Execution bugs → fix in code. Strategy → Claude learns naturally.**
 2. **Always use `./deploy.sh`** — commit and push first; deploy.sh runs `git pull` on server.
