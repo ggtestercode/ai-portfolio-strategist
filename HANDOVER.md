@@ -206,31 +206,51 @@ No action required. Learning loop is healthy.
 
 `tp2_verdict` can hold the same string value for structurally different situations. The distinction matters whenever analysing or grading TP2 placement.
 
-### The three cases
+### What 'na' means
 
-**`tp2_verdict = 'na'`**
-TP2 was never tested. TP1 never fired, so price never entered the profit zone where TP2 placement would matter. The trade exited before TP2 was in play (e.g. a Path-C breakeven SL ratchet without a prior TP1 partial, or a bot review close). These rows carry no information about TP2 distance.
+`tp2_verdict = 'na'` means **TP2 was not fairly tested — exclude this trade from any TP2-too-far analysis.** It arises from three distinct situations, all handled automatically in the live path:
 
-**`tp2_verdict = 'too_ambitious'` where TP1 fired (B2 / ratcheted_sl trades)**
-TP2 was genuinely tested. Price moved into profit enough to trigger TP1, could have continued to TP2, but reversed before reaching it. The verdict reflects a real relationship between TP2 placement and what price did.
+1. **TP1 never fired** — price never entered the profit zone where TP2 placement matters (e.g. straight to original SL, or Path-C breakeven exit before any partial).
+2. **Path-C breakeven exit before TP1** — same logic; TP2 was never in play.
+3. **TP1 fired, then a discretionary posMonitor PARTIAL_CLOSE, then remainder exited before TP2.**
 
-**`tp2_verdict = 'too_ambitious'` where TP1 never fired (straight-to-SL losses)**
-The trade hit its original SL and never approached TP2. The verdict was assigned by older reflection logic that did not distinguish this from the case above. The relationship between TP2 placement and outcome is weak-to-absent — TP2 was never in play.
+**Why case 3 must be 'na':** on such a trade two explanations are inseparable from the data:
+- (a) TP2 was genuinely too far — price was never going to reach it regardless; or
+- (b) TP2 was reachable, but Claude's discretionary early close changed how the trade played out, and that is why it did not ride to TP2.
+
+The review close confounds the test. Recording `too_ambitious` would assert (a) as fact and teach rule generation "set TP2 closer" when the real cause may have been Claude's own early exit. The honest label is `na` — not "TP2 was fine," not "TP2 was too far," but "this trade cannot tell us; exclude it."
+
+### The clean too_ambitious signal
+
+`tp2_verdict = 'too_ambitious'` is a valid data point **only** when: TP1 fired, **no** discretionary review_partial occurred, and the remainder reversed on its own before reaching TP2. In that case the only thing shaping the outcome was price vs TP2 distance — so too_ambitious is a fair verdict. These clean B2 trades are the only valid TP2-too-far data points.
+
+### Other tp2_verdict values in context
+
+**`tp2_verdict = 'too_ambitious'` where TP1 never fired (straight-to-SL losses):**
+The trade hit its original SL without approaching TP2. TP2 placement had no bearing on the outcome. This was an artefact of older reflection logic; it still appears on pre-June-2026 rows. Ignore tp2_verdict on these — the signal lives in `entryTimingVerdict` and `slTooTight`.
+
+**`tp2_verdict = 'too_ambitious'` where TP1 fired, no review partial (clean B2):**
+Genuinely informative — see "clean too_ambitious signal" above.
 
 ### The structural rule
 
-**A `tp2_verdict` only carries information about TP2 placement if TP1 actually fired.** That is what determines whether price entered the zone where TP2 distance could affect the outcome.
+**A `tp2_verdict` only carries information about TP2 placement if TP1 actually fired AND no discretionary partial close intervened.** TP2 placement is downstream of both entry direction and TP1 placement; it only becomes a factor once price has proved the direction correct by reaching TP1, and only when there was no mid-trade intervention that could have truncated the run.
 
-A trade that went straight to SL without firing TP1 is not uninformative — but its signal lives upstream of TP2:
-- **direction** — was the trade on the right side of the move at all?
-- **entryTimingVerdict** — right direction, wrong moment?
-- **slTooTight** — right direction, stop sitting in the noise?
+### Mechanism note
 
-TP2 placement is downstream of all of these. It only becomes a factor once price has proved the direction correct by reaching TP1. On a straight-to-SL trade, ignore `tp2_verdict`; read `entryTimingVerdict` and `slTooTight` instead.
+Discretionary posMonitor partial closes now write a `trade_memory PARTIAL` row with `partialType = "review_partial"` (they previously left no record, making case 3 indistinguishable from a clean B2 trade at reflection time). The reflection detects this via `hadReviewPartial` and forces `tp2_verdict = 'na'` through a post-parse code override — not left to LLM judgment.
+
+`review_partial` records are a first-class fact: they capture that Claude made a discretionary mid-trade close at a specific price and P/L. No verdict currently judges whether those discretionary closes were correct decisions; that is deliberately unbuilt and available as future analysis.
+
+### Open future idea (documented, not built)
+
+For case-3 trades, the TP2 question could be de-confounded by a hindsight counterfactual: replay actual post-close price data against the TP2 level to see whether price subsequently reached it. Yes → TP2 was reachable, the early close ended it; No → TP2 genuinely too far. This would recover the signal that `na` currently discards.
+
+**Implementation constraint:** must use `fetchKlines` with an explicit `start:` anchor, **not** `getKlines` (which returns recent candles and produces wrong or empty results for historical trades — a known footgun). Result stored as a counterfactual learning field, never used as a predictive filter.
 
 ### Data-reliability note on tp1_executed
 
-The `tp1Executed` flag derived from Bybit close-count (`bybitCloses.length > 1`) is **unreliable for trades with a bot review close**. Example: `b5a26af0` INJUSDT had 3 Bybit closes and was wrongly flagged as having reached TP2 (`bybitCloses.length > 2 = true`) when TP2 price 4.888 was never hit — the 3rd close was a bot market order. The raw `/v5/execution/list` fill records (sorted by `execTime`, not `createdTime`) are the ground truth for what actually fired and in what order.
+The `tp1Executed` flag derived from Bybit close-count (`bybitCloses.length > 1`) is **unreliable for trades with a bot review close**. Example: `b5a26af0` INJUSDT had 3 Bybit closes and was wrongly flagged as having reached TP2 (`bybitCloses.length > 2 = true`) when TP2 price 4.888 was never hit — the 3rd close was a bot market order. The raw `/v5/execution/list` fill records (sorted by `execTime`, not `createdTime`) are the ground truth for what actually fired and in what order. The `bybitCloses.length > 2` fallback was subsequently removed from the `tp2Executed` check; `tp2Executed` now relies solely on the `memPartials` 'tp2' record.
 
 ---
 
