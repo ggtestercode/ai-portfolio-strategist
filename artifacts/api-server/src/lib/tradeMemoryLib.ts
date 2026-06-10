@@ -414,7 +414,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const tp2Price   = input.tp2   ? parseFloat(input.tp2)  : 0;
   const plannedSL  = input.sl    ? parseFloat(input.sl)   : 0;   // always original entry SL
   const effectiveSL     = input.effectiveSl ? parseFloat(input.effectiveSl) : 0;
-  const slWasRatcheted  = effectiveSL > 0 && effectiveSL !== plannedSL;
+  const slWasRatcheted  = effectiveSL > 0 && Math.abs(effectiveSL - plannedSL) > 0.0001;
 
   const tp1Reached = checkCandlesReachedPrice(tradePeriodCandles, tp1Price, input.direction as "long" | "short");
   const tp2Reached = checkCandlesReachedPrice(tradePeriodCandles, tp2Price, input.direction as "long" | "short");
@@ -460,12 +460,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
         ? (input.pnlPct < -5 ? "sl_hit" : "review")
         : "unknown";
 
-  // Exit branch — keyed on tp1Executed (authoritative TP1-fill signal), not on effectiveSl
+  // Exit branch — ratcheted_sl covers post-TP1 ratchet (paths A/B/D) AND breakeven-before-TP1 (path C)
   const exitBranch: "original_sl" | "ratcheted_sl" | "tp_hit" | "other" =
-    tp2Executed                                    ? "tp_hit"
-    : exitMethod === "tp_hit"                      ? "tp_hit"
-    : (tp1Executed && exitMethod === "sl_hit")     ? "ratcheted_sl"
-    : exitMethod === "sl_hit"                      ? "original_sl"
+    tp2Executed                                                     ? "tp_hit"
+    : exitMethod === "tp_hit"                                       ? "tp_hit"
+    : ((tp1Executed || slWasRatcheted) && exitMethod === "sl_hit")  ? "ratcheted_sl"
+    : exitMethod === "sl_hit"                                       ? "original_sl"
     : "other";
 
   // Effective SL display distance (for prompt context only — not used for slTooTight assessment)
@@ -672,13 +672,13 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `═══ SL ASSESSMENT ═══`,
     `Exit branch: ${
       exitBranch === "original_sl"  ? "BRANCH 1 — original entry SL hit (no TP1 fired, no ratchet)" :
-      exitBranch === "ratcheted_sl" ? "BRANCH 2 — ratcheted SL hit after TP1 (TP1 captured profit, remainder exited at lock level)" :
+      exitBranch === "ratcheted_sl" ? `BRANCH 2 — ratcheted SL hit (profit-protection ratchet moved SL from original entry level${tp1Executed ? "; TP1 captured partial profit" : "; path-C breakeven lock, no TP1 fired"})` :
       exitBranch === "tp_hit"       ? "BRANCH 3 — TP exit (target reached, clean win)" :
                                       "BRANCH OTHER — manual/review close"
     }`,
     `Original entry SL: $${plannedSL > 0 ? plannedSL.toFixed(4) : "not set"} (${slDistancePct.toFixed(2)}% from entry)`,
     slWasRatcheted
-      ? `Ratcheted SL at exit: $${effectiveSL.toFixed(4)} (${effectiveSlDistancePct.toFixed(2)}% from entry) — applied after TP1 hit`
+      ? `Ratcheted SL at exit: $${effectiveSL.toFixed(4)} (${effectiveSlDistancePct.toFixed(2)}% from entry) — applied by profit-protection ratchet${tp1Executed ? " after TP1" : " before TP1 (path-C breakeven lock)"}`
       : `No SL ratchet — original SL was the active level throughout`,
     `Max adverse move DURING hold: ${maxAdverseMoveHoldPct.toFixed(2)}% from entry`,
     `Was SL hit this trade: ${exitMethod === "sl_hit" ? "YES" : "NO"}`,
@@ -686,7 +686,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     exitBranch === "original_sl"
       ? `→ slTooTight verdict: was the ORIGINAL entry SL ($${plannedSL.toFixed(4)}, ${slDistancePct.toFixed(2)}% away) placed inside the noise zone? too_tight = SL hit but price then moved in trade direction (original SL was premature). good = appropriate distance. too_wide = absorbed excessive loss before stopping out.`
       : exitBranch === "ratcheted_sl"
-      ? `→ slTooTight MUST BE false. The ORIGINAL entry SL was never hit — it is NOT too tight. The exit was a profit-protecting ratcheted SL after TP1 was captured. Set slTooTight=false unconditionally. Instead assess tp2Verdict: was TP2 placed too far to be realistically reached after TP1?`
+      ? (tp1Executed
+        ? `→ slTooTight MUST BE false. The ORIGINAL entry SL was never hit — it was replaced by a profit-protection ratchet after TP1. Set slTooTight=false unconditionally. Instead assess tp2Verdict: was TP2 placed too far to be realistically reached after TP1?`
+        : `→ slTooTight MUST BE false. The ORIGINAL entry SL was never hit — price moved 2%+ into profit triggering a breakeven lock (path-C), then reversed to entry. Set slTooTight=false unconditionally. The original SL distance is irrelevant here. Focus entryTimingVerdict on whether entry timing was early/wrong, and TP1 placement on whether a closer TP1 would have locked profit before the reversal.`)
       : `→ slTooTight = false (not applicable for TP exits and manual/review closes)`,
     ["manual_full","manual_partial"].includes(exitMethod)
       ? `Verdict needed: na — human closed position, SL was not the exit mechanism`
@@ -699,7 +701,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Additional gain available after exit: ${additionalGainPct.toFixed(2)}%`,
     `TP1 verdict: too_tight (price ran far past TP1 quickly — target too conservative), good, too_ambitious (price never reached TP1)`,
     exitBranch === "ratcheted_sl"
-      ? (isStrongTrend
+      ? (!tp1Executed
+        ? `TP2 verdict: na — TP1 never fired (path-C breakeven lock exited at entry price). Set tp2Verdict="na". The relevant TP1 question is in the TP ASSESSMENT above.`
+        : isStrongTrend
         ? `TP2 verdict (BRANCH 2, STRONG_TREND): TP1 was captured; remainder exited at ratcheted SL. Was TP2 set too far? STRONG_TREND data shows a 3–8% dead zone where price rarely continues to TP2 after TP1. TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was beyond the realistic run given this regime (should be ≤6% for STRONG_TREND shorts); good = TP2 was reasonable, price simply reversed before reaching it.`
         : `TP2 verdict (BRANCH 2, regime=${entryRegime}): TP1 was captured; remainder exited at ratcheted SL before TP2. Was TP2 too ambitious? TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was unrealistically far given available move; good = TP2 was reasonable, price simply reversed.`)
       : `TP2 verdict: too_tight (hit quickly, price ran far further), good (reasonable), too_ambitious (never reached despite available profit)`,
@@ -754,7 +758,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Review ALL candle data above with hindsight. Return ONLY valid JSON (no markdown):`,
     `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
     `"entryTimingVerdict":"early|good|late|wrong","slTooTight":false,"slTooWide":false,`,
-    `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious",`,
+    `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious|na",`,
     `"partialTiming":"correct|too_early|too_late|na","manualCloseVerdict":"correct|wrong|neutral|na",`,
     `"profitMissedPct":null,"optimalEntryPrice":null,"optimalSlPrice":null,`,
     `"optimalTp1Price":null,"optimalPnlPct":null,"opportunityCostPct":null,`,
