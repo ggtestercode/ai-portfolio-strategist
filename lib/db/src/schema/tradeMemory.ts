@@ -72,6 +72,9 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   optimalTp1Price:        decimal("optimal_tp1_price",    { precision: 20, scale: 8 }),
   optimalPnlPct:          decimal("optimal_pnl_pct",      { precision: 10, scale: 4 }),
   opportunityCostPct:     decimal("opportunity_cost_pct", { precision: 10, scale: 4 }),
+  // Fraction of TP1→TP2 corridor price reached before trade ended (0=never past TP1, 1=reached TP2).
+  // NULL when TP1 never fired, or TP1/TP2 not set. Pure measurement — not used in any verdict.
+  tp2ProgressPct:         decimal("tp2_progress_pct",     { precision: 10, scale: 4 }),
   // Source tracking — batch 6
   source:                 text("source"),  // 'mode_3' | 'version_b'
   // Phase 3 reconstruction — batch 7

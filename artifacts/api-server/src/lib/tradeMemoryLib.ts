@@ -428,6 +428,18 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
 
   const maxProfitPct = getMaxProfitDuringHold(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
 
+  // Fraction of TP1→TP2 corridor price reached. Uses Math.abs so distances are
+  // direction-agnostic (both tp1Price and tp2Price are on the profitable side of entry).
+  // maxProfitPct covers the full hold (entry→final exit) and is not truncated at TP1.
+  const tp1DistancePct = tp1Price > 0 && input.entryPrice > 0
+    ? Math.abs(tp1Price - input.entryPrice) / input.entryPrice * 100 : 0;
+  const tp2DistancePct = tp2Price > 0 && input.entryPrice > 0
+    ? Math.abs(tp2Price - input.entryPrice) / input.entryPrice * 100 : 0;
+  const tp2Corridor = tp2DistancePct - tp1DistancePct;
+  const tp2ProgressPct: number | null = (tp1Executed && tp2Corridor > 0)
+    ? Math.min(1, Math.max(0, (maxProfitPct - tp1DistancePct) / tp2Corridor))
+    : null;
+
   const actualExitPrice = bybitCloses.length > 0
     ? bybitCloses[bybitCloses.length - 1]!.avgExitPrice
     : input.exitPrice;
@@ -970,6 +982,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     optimalTp1Price:        d.optimalTp1Price   != null ? String((d.optimalTp1Price   as number).toFixed(8)) : null,
     optimalPnlPct:          d.optimalPnlPct     != null ? String((d.optimalPnlPct     as number).toFixed(4)) : null,
     opportunityCostPct:     d.opportunityCostPct != null ? String((d.opportunityCostPct as number).toFixed(4)) : null,
+    tp2ProgressPct:         tp2ProgressPct !== null ? String(tp2ProgressPct.toFixed(4)) : null,
     source:                 input.source ?? null,
     // Phase 3 reconstruction
     pnlSource:            reconstruction
