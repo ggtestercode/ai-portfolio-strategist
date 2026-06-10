@@ -451,25 +451,21 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const executionIssues: string[] = [];
   if (tp1Price > 0 && tp1Reached && !tp1Executed) executionIssues.push("TP1 reached but not triggered");
   if (tp2Price > 0 && tp2Reached && !tp2Executed) executionIssues.push("TP2 reached but not triggered");
-  if (maxProfitPct >= 5  && !memPartials.some(p => p.partialType === "profit_5pct"))  executionIssues.push("5% profit protection missed");
-  if (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct")) executionIssues.push("10% profit protection missed");
-  if (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct")) executionIssues.push("20% profit protection missed");
   if (slippage > 1.5)     executionIssues.push(`Significant slippage: ${slippage.toFixed(2)}%`);
   if (plannedSL > 0) {
     const slDirectionOk = input.direction === "long" ? plannedSL < input.entryPrice : plannedSL > input.entryPrice;
     if (!slDirectionOk) executionIssues.push("SL direction wrong");
   }
   const unplannedPartials = memPartials.filter(p =>
-    !["tp1","tp2","profit_5pct","profit_10pct","profit_20pct","large_profit","review_partial"].includes(p.partialType ?? "")
+    !["tp1","tp2","large_profit","review_partial"].includes(p.partialType ?? "")
   );
   if (unplannedPartials.length > 0) executionIssues.push(`Unplanned partials: ${unplannedPartials.map(p => p.partialType).join(", ")}`);
   if (memPartials.length > 3) executionIssues.push(`Excessive partials: ${memPartials.length} closes`);
 
   // Determine exit method — explicit override wins; otherwise derive from partials/bybit data
-  const profitProtectionTypes = ["profit_5pct","profit_10pct","profit_20pct","large_profit"];
   const exitMethod = input.exitReasonOverride
     ? input.exitReasonOverride
-    : memPartials.some(p => profitProtectionTypes.includes(p.partialType ?? ""))
+    : memPartials.some(p => p.partialType === "large_profit")
       ? "profit_protection"
       : bybitCloses.length > 0 && bybitCloses[bybitCloses.length-1]!.closedPnl !== undefined
         ? (input.pnlPct < -5 ? "sl_hit" : "review")
@@ -498,9 +494,6 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     : executionIssues.length > 0 ? "mixed"
     : "strategy";
 
-  const profitProtectionMissed = (maxProfitPct >= 5 && !memPartials.some(p => p.partialType === "profit_5pct"))
-    || (maxProfitPct >= 10 && !memPartials.some(p => p.partialType === "profit_10pct"))
-    || (maxProfitPct >= 20 && !memPartials.some(p => p.partialType === "profit_20pct"));
 
   // Phase 3: walk-forward reconstruction — manual_partial and manual_full
   let reconstruction: ReconstructionResult | null = null;
@@ -947,7 +940,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     tp1Reached,
     tp2Reached,
     maxProfitPct:           String(maxProfitPct.toFixed(4)),
-    profitProtectionMissed,
+    profitProtectionMissed: false,
     slippagePct:            String(slippage.toFixed(4)),
     excessivePartials:      memPartials.length > 3,
     exitMethod,
