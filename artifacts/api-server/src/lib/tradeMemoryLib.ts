@@ -421,7 +421,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   // Also treat as executed if Bybit shows multiple partial closes — exchange-level
   // PartialTakeProfit fires without writing a trade_memory PARTIAL record.
   const tp1Executed = memPartials.some(p => p.partialType === "tp1") || bybitCloses.length > 1;
-  const tp2Executed = memPartials.some(p => p.partialType === "tp2") || bybitCloses.length > 2;
+  const tp2Executed = memPartials.some(p => p.partialType === "tp2");
 
   const maxProfitPct = getMaxProfitDuringHold(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
 
