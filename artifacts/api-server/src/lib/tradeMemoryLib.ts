@@ -1239,11 +1239,11 @@ export async function generateTradingRules(force = false): Promise<void> {
   let profitMissedSum = 0, profitMissedCount = 0;
   let opCostSum = 0,       opCostCount = 0;
   for (const r of reflections) {
-    if (r.tp1Verdict)         tp1VerdictCounts[r.tp1Verdict]         = (tp1VerdictCounts[r.tp1Verdict]         ?? 0) + 1;
-    if (r.tp2Verdict)         tp2VerdictCounts[r.tp2Verdict]         = (tp2VerdictCounts[r.tp2Verdict]         ?? 0) + 1;
-    if (r.entryTimingVerdict) entryTimingCounts[r.entryTimingVerdict] = (entryTimingCounts[r.entryTimingVerdict] ?? 0) + 1;
-    if (r.partialTiming)      partialTimingCounts[r.partialTiming]    = (partialTimingCounts[r.partialTiming]    ?? 0) + 1;
-    if (r.failureType)        failureTypeCounts[r.failureType]        = (failureTypeCounts[r.failureType]        ?? 0) + 1;
+    if (r.tp1Verdict)                                    tp1VerdictCounts[r.tp1Verdict]         = (tp1VerdictCounts[r.tp1Verdict]         ?? 0) + 1;
+    if (r.tp2Verdict      && r.tp2Verdict      !== "na") tp2VerdictCounts[r.tp2Verdict]         = (tp2VerdictCounts[r.tp2Verdict]         ?? 0) + 1;
+    if (r.entryTimingVerdict)                            entryTimingCounts[r.entryTimingVerdict] = (entryTimingCounts[r.entryTimingVerdict] ?? 0) + 1;
+    if (r.partialTiming   && r.partialTiming   !== "na") partialTimingCounts[r.partialTiming]    = (partialTimingCounts[r.partialTiming]    ?? 0) + 1;
+    if (r.failureType)                                   failureTypeCounts[r.failureType]        = (failureTypeCounts[r.failureType]        ?? 0) + 1;
     if (r.profitMissedPct   != null) { profitMissedSum += parseFloat(String(r.profitMissedPct));   profitMissedCount++; }
     if (r.opportunityCostPct != null) { opCostSum       += parseFloat(String(r.opportunityCostPct)); opCostCount++;       }
   }
