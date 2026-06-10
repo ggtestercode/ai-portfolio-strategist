@@ -2578,6 +2578,7 @@ async function runPositionReview(
     } else {
       await closePercentPosition(pos.symbol, pct)
         .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
+      logPartialClose({ symbol: pos.symbol, partialType: "review_partial", closePct: pct, priceAtClose: currentPrice, pnlPct, remainingPct: 100 - pct }).catch(() => {});
       await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ executed\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
     }
   }

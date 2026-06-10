@@ -422,6 +422,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   // PartialTakeProfit fires without writing a trade_memory PARTIAL record.
   const tp1Executed = memPartials.some(p => p.partialType === "tp1") || bybitCloses.length > 1;
   const tp2Executed = memPartials.some(p => p.partialType === "tp2");
+  // True when posMonitor issued a discretionary PARTIAL_CLOSE during this trade.
+  // Used to route tp2Verdict='na' — the bot's judgment ended the trade, not TP2 distance.
+  const hadReviewPartial = memPartials.some(p => p.partialType === "review_partial");
 
   const maxProfitPct = getMaxProfitDuringHold(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
 
@@ -445,7 +448,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     if (!slDirectionOk) executionIssues.push("SL direction wrong");
   }
   const unplannedPartials = memPartials.filter(p =>
-    !["tp1","tp2","profit_5pct","profit_10pct","profit_20pct","large_profit"].includes(p.partialType ?? "")
+    !["tp1","tp2","profit_5pct","profit_10pct","profit_20pct","large_profit","review_partial"].includes(p.partialType ?? "")
   );
   if (unplannedPartials.length > 0) executionIssues.push(`Unplanned partials: ${unplannedPartials.map(p => p.partialType).join(", ")}`);
   if (memPartials.length > 3) executionIssues.push(`Excessive partials: ${memPartials.length} closes`);
@@ -703,6 +706,8 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     exitBranch === "ratcheted_sl"
       ? (!tp1Executed
         ? `TP2 verdict: na — TP1 never fired (path-C breakeven lock exited at entry price). Set tp2Verdict="na". The relevant TP1 question is in the TP ASSESSMENT above.`
+        : hadReviewPartial
+        ? `TP2 verdict: na — a discretionary posMonitor PARTIAL_CLOSE intervened between TP1 and the final exit. TP2 was not fairly tested; the bot's judgment ended the trade, not TP2 being unreachable. Set tp2Verdict="na".`
         : isStrongTrend
         ? `TP2 verdict (BRANCH 2, STRONG_TREND): TP1 was captured; remainder exited at ratcheted SL. Was TP2 set too far? STRONG_TREND data shows a 3–8% dead zone where price rarely continues to TP2 after TP1. TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was beyond the realistic run given this regime (should be ≤6% for STRONG_TREND shorts); good = TP2 was reasonable, price simply reversed before reaching it.`
         : `TP2 verdict (BRANCH 2, regime=${entryRegime}): TP1 was captured; remainder exited at ratcheted SL before TP2. Was TP2 too ambitious? TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was unrealistically far given available move; good = TP2 was reasonable, price simply reversed.`)
@@ -884,6 +889,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     d.slTooTight = false;
   }
 
+  // Hard override — a discretionary posMonitor PARTIAL_CLOSE between TP1 and final exit means
+  // TP2 was not fairly tested. The bot's judgment ended the trade; TP2 distance is not the signal.
+  if (exitBranch === "ratcheted_sl" && tp1Executed && hadReviewPartial) {
+    d.tp2Verdict = "na";
+  }
+
   const outcome    = input.pnl >= 0 ? "WIN" : "LOSS";
   const reflection = [
     `${input.direction.toUpperCase()} ${outcome} ${sign}${input.pnlPct.toFixed(2)}%`,
@@ -1012,7 +1023,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
 
 export async function logPartialClose(params: {
   symbol:       string;
-  partialType:  "tp1" | "tp2" | "large_profit" | "review";
+  partialType:  "tp1" | "tp2" | "large_profit" | "review" | "review_partial";
   closePct:     number;
   priceAtClose: number;
   pnlPct:       number;
