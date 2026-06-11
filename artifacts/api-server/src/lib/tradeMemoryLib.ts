@@ -330,7 +330,10 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       signalsThatWorked: tradeMemoryTable.signalsThatWorked,
       signalsThatFailed: tradeMemoryTable.signalsThatFailed,
     }).from(tradeMemoryTable)
-      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+      .where(and(
+        eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
+        gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+      ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(50);
     for (const row of sigRows) {
@@ -1449,7 +1452,10 @@ export async function getRecentMemory(limit = 15): Promise<string> {
     entryQuality:         tradeMemoryTable.entryQuality,
     pnlPct:               tradeMemoryTable.pnlPct,
   }).from(tradeMemoryTable)
-    .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+    .where(and(
+      eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
+      gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+    ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .limit(50)
     .catch(() => [] as Array<Record<string, string | null>>);
@@ -1555,7 +1561,10 @@ export async function getRecentMemory(limit = 15): Promise<string> {
       signalsThatWorked: tradeMemoryTable.signalsThatWorked,
       signalsThatFailed: tradeMemoryTable.signalsThatFailed,
     }).from(tradeMemoryTable)
-      .where(eq(tradeMemoryTable.action, "TRADE_CLOSE"))
+      .where(and(
+        eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
+        gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+      ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(50);
 
@@ -1599,6 +1608,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
       .where(and(
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
         isNotNull(tradeMemoryTable.candlePatternLesson),
+        gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(10)
