@@ -254,6 +254,49 @@ The `tp1Executed` flag derived from Bybit close-count (`bybitCloses.length > 1`)
 
 ---
 
+## B2 Ratchet Counterfactual Analysis (June 2026, 7 trades)
+
+### Context
+
+"B2" trades: TP1 fired (partial profit banked), then the remainder's SL was ratcheted to breakeven/entry and swept the remainder for a small net win (+0.75–2.0%). These record as `exit_method='sl_hit'` but are **wins by P&L sign**. This means the raw exit-method count understates the win rate: the true live-era win rate (entry_at >= Jun 4) is **52% (11/21 trades net-positive)**, not the ~19% that counting only `tp_hit` would imply — 7 B2 sl_hit wins are hidden by the label.
+
+### Counterfactual method
+
+For each of the 7 B2 trades, anchored 15m candles were fetched using `fetchKlines` with `start=exit_at` (the ratcheted-SL exit timestamp). Candles were walked forward until the original TP2 or original SL was hit, or 50h elapsed. **Not `getKlines`** — that returns recent candles and is wrong for historical analysis.
+
+### Results (all 7 were short direction)
+
+| Trade | Verdict | Max favorable after exit | Max adverse after exit | Time to verdict |
+|---|---|---|---|---|
+| INJUSDT +1.98% | **RATCHET SAVED** — SL hit in 1 candle (0.3h) | 0.000% | +2.04% | immediate |
+| LINKUSDT +1.15% | **RATCHET SAVED** — SL hit in 1 candle (0.3h) | 0.000% | +2.11% | immediate |
+| ETCUSDT +1.00% | **RATCHET COST** — TP2 reached after 9.0h | -7.04% | 0.000% | 9h |
+| LINKUSDT +0.83% | **RATCHET SAVED** — SL hit after 18.0h (got 40% toward TP2 first) | -2.53% | +3.00% | 18h |
+| XRPUSDT +0.82% | **RATCHET SAVED** — SL hit after 19.3h (got 40% toward TP2 first) | -2.44% | +1.93% | 19h |
+| LINKUSDT +0.80% | **RATCHET SAVED** — SL hit after 7.3h (got 30% toward TP2 first) | -1.06% | +1.83% | 7h |
+| LTCUSDT +0.75% | **RATCHET COST** — TP2 reached after 7.8h | -6.30% | +1.13% | 8h |
+
+**Running tally: 5 saved / 2 cost.**
+
+### Conclusions — do not re-derive these
+
+**Conclusion 1 — The ratchet is net-helpful. Do NOT change ratchet behavior.**
+5/7 the ratchet correctly banked TP1 profit before a full reversal to the original SL. The 2 misses are its cost, not evidence it is wrong. The ratchet is a profitable insurance policy on this sample.
+
+**Conclusion 2 — TP2 is NOT too far.**
+The 2 trades that reached TP2 had the longest TP2 distances (7.1% and 6.0% from entry), not the shortest. What separated reached-vs-not was post-TP1 market behavior (clean directional continuation vs. reversal), not TP2 placement. Do not tighten TP2 targets based on B2 trades failing to reach them.
+
+**Conclusion 3 — The hard lever (not actionable yet).**
+If the bot could distinguish "price is pausing in a continuation" from "price is reversing" at ratchet time, it could hold the 2 continuation cases to TP2 while ratcheting out the 5 reversals. Not actionable on 7 trades; revisit at 20–30 B2 trades.
+
+### Sample caveat and next steps
+
+7 trades only — directional (all shorts), NOT conclusive. The bot-adjustable Path A ratchet remains parked: its trigger condition is "data shows fixed ratchets underperform," and fixed ratchets WIN 5/7, so the trigger has NOT fired.
+
+**Next:** keep scoring B2 ratchet outcomes (saved vs cost) as more B2 trades accumulate. Re-evaluate at ~20–30 B2 trades. Current running tally: **5 saved / 2 cost**.
+
+---
+
 ## Key Principles
 1. **Execution bugs → fix in code. Strategy → Claude learns naturally.**
 2. **Always use `./deploy.sh`** — commit and push first; deploy.sh runs `git pull` on server.
