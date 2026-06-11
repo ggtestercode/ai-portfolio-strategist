@@ -1234,11 +1234,15 @@ export async function generateTradingRules(force = false): Promise<void> {
     return;
   }
 
+  // Live-era only: all testnet trades closed before 2026-06-04 (confirmed switchover date).
+  // Paper trades (integer source_trade_id) are currently all pre-cutoff; if a future paper trade
+  // gets sl_hit/tp_hit after this date, add a NOT SIMILAR TO '[0-9]+' guard here.
   const reflections = await db.select()
     .from(tradeMemoryTable)
     .where(and(
       eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
       inArray(tradeMemoryTable.exitMethod, ["sl_hit", "tp_hit"]),
+      gte(tradeMemoryTable.createdAt,  new Date('2026-06-04T00:00:00Z')),
     ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
