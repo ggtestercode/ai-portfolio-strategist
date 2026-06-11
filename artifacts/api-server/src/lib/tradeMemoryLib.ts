@@ -421,7 +421,18 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   // Also treat as executed if Bybit shows multiple partial closes — exchange-level
   // PartialTakeProfit fires without writing a trade_memory PARTIAL record.
   const tp1Executed = memPartials.some(p => p.partialType === "tp1") || bybitCloses.length > 1;
-  const tp2Executed = memPartials.some(p => p.partialType === "tp2");
+  // Exchange-side TP2 fallback: query stopOrderType on the final close order's orderId.
+  // This is a point query on a specific orderId — no cross-symbol contamination risk
+  // (unlike tp1's count heuristic which relies only on the 6% entry-price filter).
+  let tp2ExecutedBybit = false;
+  if (bybitCloses.length > 0) {
+    const lastOrderId = bybitCloses[bybitCloses.length - 1]!.orderId;
+    try {
+      const stopType = await getOrderStopType(input.symbol, lastOrderId);
+      tp2ExecutedBybit = stopType === "TakeProfit";
+    } catch { /* non-fatal — fall back to memPartials-only result */ }
+  }
+  const tp2Executed = memPartials.some(p => p.partialType === "tp2") || tp2ExecutedBybit;
   // True when posMonitor issued a discretionary PARTIAL_CLOSE during this trade.
   // Used to route tp2Verdict='na' — the bot's judgment ended the trade, not TP2 distance.
   const hadReviewPartial = memPartials.some(p => p.partialType === "review_partial");
@@ -782,8 +793,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `"signalAccuracyInsight":"one sentence about which signals to trust more/less",`,
     `"candlePatternLesson":"specific candle pattern lesson from this trade",`,
     `"versionBLesson":"string or null","whatWorked":"string","whatDidnt":"string",`,
-    `"lessonsLearned":"one concrete insight","nextTimeWouldDo":"one specific change",`,
-    `"failureType":"strategy|execution|mixed|success","executionIssues":["string"]}`,
+    `"lessonsLearned":"one concrete insight","nextTimeWouldDo":"one specific change"}`,
   ].filter(s => s !== null && s !== undefined && s !== "").join("\n");
 
   type R = {
@@ -799,7 +809,6 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     signalAccuracyInsight: string; candlePatternLesson: string;
     versionBLesson: string | null;
     whatWorked: string; whatDidnt: string; lessonsLearned: string; nextTimeWouldDo: string;
-    failureType: string; executionIssues: string[];
     entryTimingVerdict: string;
     slTooTight: boolean; slTooWide: boolean;
     tp1Verdict: string; tp2Verdict: string;
@@ -849,8 +858,6 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
         whatDidnt:                    { type: "string" },
         lessonsLearned:               { type: "string" },
         nextTimeWouldDo:              { type: "string" },
-        failureType:                  { type: "string" },
-        executionIssues:              { type: "array", items: { type: "string" } },
         entryTimingVerdict:           { type: "string" },
         slTooTight:                   { type: "boolean" },
         slTooWide:                    { type: "boolean" },
@@ -877,7 +884,6 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       mistakeType: null, signalsThatWorked: [], signalsThatFailed: [],
       signalAccuracyInsight: "", candlePatternLesson: "",
       versionBLesson: null, whatWorked: "", whatDidnt: "", lessonsLearned: "", nextTimeWouldDo: "",
-      failureType, executionIssues,
       entryTimingVerdict: "good", slTooTight: false, slTooWide: false,
       tp1Verdict: "good", tp2Verdict: "good", partialTiming: "na",
       manualCloseVerdict: "na", profitMissedPct: null, optimalEntryPrice: null,
@@ -934,9 +940,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     whatDidnt:            d.whatDidnt            || null,
     lessonsLearned:       d.lessonsLearned       || null,
     nextTimeWouldDo:      d.nextTimeWouldDo      || null,
-    // Execution quality tracking
-    failureType:            d.failureType || failureType,
-    executionIssues:        d.executionIssues?.length ? d.executionIssues : executionIssues,
+    // Execution quality tracking — code-computed only; LLM cannot overwrite these fields.
+    failureType:            failureType,
+    executionIssues:        executionIssues,
     tp1Reached,
     tp2Reached,
     maxProfitPct:           String(maxProfitPct.toFixed(4)),
