@@ -2,7 +2,7 @@ import {
   db, tradeLogTable, tradeMemoryTable, paperTradesTable, botStateTable,
   tradingRulesTable, ruleOverridesTable, type TradingRule,
 } from "@workspace/db";
-import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray, or, ne } from "drizzle-orm";
+import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray, or, ne, sql } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
 import { getClosedPnl as bybitGetClosedPnl, getOrderStopType, getKlines, fetchKlines, type BybitKline }  from "../brokers/bybit";
@@ -332,7 +332,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     }).from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
-        gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+        sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(50);
@@ -1245,7 +1245,7 @@ export async function generateTradingRules(force = false): Promise<void> {
     .where(and(
       eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
       inArray(tradeMemoryTable.exitMethod, ["sl_hit", "tp_hit"]),
-      gte(tradeMemoryTable.createdAt,  new Date('2026-06-04T00:00:00Z')),
+      sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
@@ -1454,7 +1454,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
   }).from(tradeMemoryTable)
     .where(and(
       eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
-      gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+      sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .limit(50)
@@ -1563,7 +1563,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
     }).from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
-        gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+        sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(50);
@@ -1608,7 +1608,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
       .where(and(
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
         isNotNull(tradeMemoryTable.candlePatternLesson),
-        gte(tradeMemoryTable.createdAt, new Date('2026-06-04T00:00:00Z')),
+        sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(10)
