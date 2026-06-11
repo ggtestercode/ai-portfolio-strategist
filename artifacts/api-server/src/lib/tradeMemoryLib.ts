@@ -2,7 +2,7 @@ import {
   db, tradeLogTable, tradeMemoryTable, paperTradesTable, botStateTable,
   tradingRulesTable, ruleOverridesTable, type TradingRule,
 } from "@workspace/db";
-import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray } from "drizzle-orm";
+import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray, or, ne } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
 import { getClosedPnl as bybitGetClosedPnl, getOrderStopType, getKlines, fetchKlines, type BybitKline }  from "../brokers/bybit";
@@ -1706,9 +1706,14 @@ export async function getRecentMemory(limit = 15): Promise<string> {
 // ─── Startup backfill ─────────────────────────────────────────────────────────
 
 export async function backfillStructuredReflections(max = 20): Promise<void> {
+  // Exclude voided phantoms — trades that placed an entry order but never filled on exchange.
+  // NULL-safe: or(isNull, ne) matches rows with no reflection text as well as real reflections.
   const closedTrades = await db.select()
     .from(tradeLogTable)
-    .where(isNotNull(tradeLogTable.exitAt))
+    .where(and(
+      isNotNull(tradeLogTable.exitAt),
+      or(isNull(tradeLogTable.reflection), ne(tradeLogTable.reflection, 'voided_phantom')),
+    ))
     .orderBy(asc(tradeLogTable.entryAt))
     .catch(() => [] as Array<typeof tradeLogTable.$inferSelect>);
 
