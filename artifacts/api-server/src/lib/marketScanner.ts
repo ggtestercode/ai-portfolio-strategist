@@ -596,6 +596,19 @@ async function runPhase2(
   // In all other cases (CHOPPY, RANGING, EXHAUSTION, VOLATILE) each symbol uses its own regime for TP caps.
   const btcIsDirectional = ["STRONG_TREND", "TRENDING_UP", "TRENDING_DOWN"].includes(regime.regime);
 
+  // Retry 4h kline fetch for any symbol whose initial fetch was silently rate-limited.
+  // Runs sequentially with stagger to stay within Bybit's per-key rate limit.
+  const missingRegime = selectedSymbols.filter(s => !symRegimeMap.has(s));
+  if (missingRegime.length > 0) {
+    for (const sym of missingRegime) {
+      try {
+        const k4h = await getKlines(sym, "240", 60);
+        if (k4h.length >= 29) symRegimeMap.set(sym, classifySymbolRegime(k4h));
+      } catch { /* rate limit still active — skip */ }
+      await new Promise(r => setTimeout(r, 200)); // 200ms stagger between retries
+    }
+  }
+
   for (const sym of selectedSymbols) {
     const r = symRegimeMap.get(sym);
     if (r) {
