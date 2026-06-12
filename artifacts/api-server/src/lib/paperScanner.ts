@@ -186,7 +186,7 @@ export async function runPaperScan(): Promise<void> {
       "Score is informational only — no threshold. Rank 5 opportunities freely.",
       "Include at least 1-2 short signals if bearish setups exist.",
       "For LONGS: stopLoss below entry, tp1/tp2 above. For SHORTS: stopLoss above entry, tp1/tp2 below.",
-      "rewardRiskRatio must be ≥1.0. ATR-based: TP1=entry±(ATR×1.0), TP2=entry±(ATR×2.0), SL=entry±(ATR×1.5).",
+      "rewardRiskRatio must be ≥1.1 (blended: tp1Frac×|tp1-entry| + tp2Frac×|tp2-entry|, divided by |sl-entry|). INITIAL SL: place at thesis-invalidation level from candle structure (15m/1h/4h) — swing low/high, Fibonacci, prior S/R, range boundary. ATR is volatility context only, not the placement rule. SL must sit beyond a genuine structural level; if blended R:R cannot reach 1.1, return direction=neutral. Record basis in stopLossMethod (e.g. 'swing_1h', 'fib_0618', 'range_low').",
       "whyNow: name the specific signals you chose to use and why you preferred them over others. If no edge — set direction=neutral.",
       "JSON RULES: NEVER use double-quote characters inside any string value. NEVER use backslash characters. No newlines inside strings.",
     ].join("\n");
