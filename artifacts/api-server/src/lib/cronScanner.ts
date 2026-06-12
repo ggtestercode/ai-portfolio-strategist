@@ -674,7 +674,7 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
         try {
           // Set flag BEFORE close — prevents double-close if exchange partial order already executed
           await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
-          const tp1ClosePct   = Math.max(10, pm.tp1ClosePercent ?? 30);
+          const tp1ClosePct   = Math.max(20, pm.tp1ClosePercent ?? 30);
           await closePercentPosition(pos.symbol, tp1ClosePct);
           // Move SL to +1% beyond entry (longs: entry×1.01, shorts: entry×0.99)
           const tp1Sl = pos.side === "Buy" ? pm.entryPrice * 1.01 : pm.entryPrice * 0.99;
