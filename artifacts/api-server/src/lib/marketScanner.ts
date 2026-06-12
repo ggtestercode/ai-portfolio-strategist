@@ -226,18 +226,21 @@ export async function detectMarketRegime(): Promise<MarketRegime> {
   }
 }
 
-async function fetchMTFData(symbol: string): Promise<{ summary: string; klines1h: BybitKline[]; klines15m: BybitKline[] }> {
+async function fetchMTFData(symbol: string): Promise<{ summary: string; klines1h: BybitKline[]; klines15m: BybitKline[]; klines4h: BybitKline[] }> {
   const intervals: Array<[string, string, boolean]> = [
     ["1","1m",false], ["15","15m",false], ["60","1h",true], ["240","4h",true], ["D","1D",false],
   ];
   const parts: string[] = [];
   let klines1h:  BybitKline[] = [];
   let klines15m: BybitKline[] = [];
+  let klines4h:  BybitKline[] = [];
   for (const [iv, label, withEma] of intervals) {
     try {
-      const klines = await getKlines(symbol, iv, 50);
+      // 4h uses 60 candles (matches BTC regime fetch) — sufficient for ADX-14 warm-up
+      const klines = await getKlines(symbol, iv, iv === "240" ? 60 : 50);
       if (iv === "60")  klines1h  = klines;
       if (iv === "15")  klines15m = klines;
+      if (iv === "240") klines4h  = klines;
       const closes = klines.map(k => k.close);
       const rsi    = Math.round(calcRSI(closes, 14));
       const last   = closes[closes.length - 1]?.toFixed(2) ?? "N/A";
@@ -250,7 +253,7 @@ async function fetchMTFData(symbol: string): Promise<{ summary: string; klines1h
       }
     } catch { parts.push(`${label}:N/A`); }
   }
-  return { summary: parts.join("|"), klines1h, klines15m };
+  return { summary: parts.join("|"), klines1h, klines15m, klines4h };
 }
 
 // ── Relative strength helpers ─────────────────────────────────────────────────
@@ -384,6 +387,33 @@ export function getRegimeThreshold(regimeType: string | undefined): number {
   }
 }
 
+// Classify a symbol's own 4h regime from its klines — same ADX thresholds as detectMarketRegime.
+function classifySymbolRegime(klines: BybitKline[]): { regime: RegimeType; adx: number; diPlus: number; diMinus: number } {
+  if (klines.length < 29) return { regime: "CHOPPY", adx: 0, diPlus: 0, diMinus: 0 };
+  const { adx, diPlus, diMinus } = calcADX(klines, 14);
+  let regime: RegimeType;
+  if      (adx > 35 && diPlus >= diMinus) regime = "STRONG_TREND";
+  else if (adx > 35)                      regime = "TRENDING_DOWN";
+  else if (adx > 25 && diPlus > diMinus)  regime = "TRENDING_UP";
+  else if (adx > 25)                      regime = "TRENDING_DOWN";
+  else if (adx >= 20)                     regime = "RANGING";
+  else                                    regime = "CHOPPY";
+  return { regime, adx, diPlus, diMinus };
+}
+
+// Short TP cap text for a given regime (used in per-symbol regime prompt lines).
+function tpCapShort(r: RegimeType): string {
+  switch (r) {
+    case "STRONG_TREND":
+    case "TRENDING_UP":   return "TP1 2–3%, TP2 4–8%";
+    case "TRENDING_DOWN": return "longs hard-blocked; shorts TP1 2–3%, TP2 4–6%";
+    case "RANGING":       return "TP1 max 1.5%, TP2 max 2.5%";
+    case "EXHAUSTION":    return "TP1 max 2.0%, TP2 max 3.5%";
+    case "CHOPPY":        return "TP1 max 2.5%, TP2 max 4.0%";
+    default:              return "TP1 within 1–3× ATR";
+  }
+}
+
 export async function runFreshScan(): Promise<ScanResult> {
   cache.invalidate(CacheKey.marketScan());
   return runScan();
@@ -453,6 +483,7 @@ async function runPhase2(
   const pendingLines:    string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
+  const symRegimeMap = new Map<string, { regime: RegimeType; adx: number; diPlus: number; diMinus: number }>();
 
   // ── Recent exits (last 24h) per selected symbol ───────────────────────────
   try {
@@ -514,7 +545,8 @@ async function runPhase2(
         getOrderbook(sym, 50).catch(() => ({ bids: [] as Array<[number,number]>, asks: [] as Array<[number,number]> })),
         getFundingHistory(sym, 24).catch(() => [] as number[]),
       ]);
-      const { summary: mtf, klines1h, klines15m } = mtfResult;
+      const { summary: mtf, klines1h, klines15m, klines4h: symK4h } = mtfResult;
+      if (symK4h.length >= 29) symRegimeMap.set(sym, classifySymbolRegime(symK4h));
       const rSign = fr.rate >= 0 ? "+" : "";
       const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
       mtfLines.push(`${sym} MTF: ${mtf}`);
@@ -559,6 +591,18 @@ async function runPhase2(
       }
     } catch { /* skip */ }
   }));
+
+  // BTC is "directional" when it has a clear trend: STRONG_TREND / TRENDING_UP / TRENDING_DOWN.
+  // In all other cases (CHOPPY, RANGING, EXHAUSTION, VOLATILE) each symbol uses its own regime for TP caps.
+  const btcIsDirectional = ["STRONG_TREND", "TRENDING_UP", "TRENDING_DOWN"].includes(regime.regime);
+
+  for (const sym of selectedSymbols) {
+    const r = symRegimeMap.get(sym);
+    if (r) {
+      const src = btcIsDirectional ? `BTC (${regime.regime})` : `own (${r.regime})`;
+      console.log(`[regime] ${sym}: own=${r.regime} ADX=${r.adx.toFixed(1)} DI+=${r.diPlus.toFixed(1)} DI-=${r.diMinus.toFixed(1)} → caps from ${src}`);
+    }
+  }
 
   const rsMap = await fetchRelativeStrength(selectedSymbols).catch(() => new Map<string, RSData>());
 
@@ -645,6 +689,35 @@ INITIAL SL (entry only — does NOT govern post-entry SL management): Place the 
     `EXISTING POSITIONS: Do not suggest opening a position on any symbol that already has an open position (shown in "Bybit live positions" above). This applies regardless of direction — no adding a short on a symbol where a long is already open, and vice versa.`,
   ].join("\n");
 
+  // Per-symbol regime section: shows each symbol's own 4h ADX/DI alongside BTC proxy.
+  // When BTC is non-directional the cap column tells Claude which band governs each symbol.
+  const perSymbolRegimeSection = (() => {
+    if (symRegimeMap.size === 0) return "";
+    const lines = selectedSymbols.flatMap(sym => {
+      const r = symRegimeMap.get(sym);
+      if (!r) return [];
+      return btcIsDirectional
+        ? [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)}`]
+        : [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)} → ${tpCapShort(r.regime)}`];
+    });
+    if (lines.length === 0) return "";
+    return btcIsDirectional
+      ? `Per-symbol 4h regimes (informational — BTC ${regime.regime} caps apply to all):\n${lines.join("\n")}`
+      : `Per-symbol 4h regimes (BTC non-directional — each symbol uses own caps):\n${lines.join("\n")}`;
+  })();
+
+  // TP calibration line: single BTC-based line when BTC is directional;
+  // defers to per-symbol caps above when BTC is non-directional.
+  const tpCalibLine = btcIsDirectional
+    ? `TP calibration (BTC ${regime.regime}): ${
+        regime.regime === "STRONG_TREND" || regime.regime === "TRENDING_UP"
+          ? "TP1 2–3% from entry, TP2 4–8% from entry. WARNING: 6–8% TP1 sits in the empirical dead zone — no STRONG_TREND long peaked between 3% and 8%. That setting misses the early partial and pushes TP2 to unreachable 16%+."
+          : regime.regime === "TRENDING_DOWN"
+          ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 2–3%, TP2 4–6%."
+          : "TP1 within 1–3× ATR from structural level."
+      }`
+    : `TP calibration: BTC is ${regime.regime} (non-directional) — use each symbol's own caps from the per-symbol regime block above.`;
+
   // Dynamic per-scan context — regime metrics and risk sizing move to prompt so systemContext stays stable
   const prompt = [
     riskDirective,
@@ -659,19 +732,8 @@ INITIAL SL (entry only — does NOT govern post-entry SL management): Place the 
     `4h EMA20: $${regime.ema20_4h.toFixed(0)} | EMA50: $${regime.ema50_4h.toFixed(0)} | EMA200: $${regime.ema200_4h.toFixed(0)}`,
     `ATR: $${regime.atr.toFixed(0)} vs 30d avg: $${regime.atrAvg30d.toFixed(0)} (${regime.atr > 0 && regime.atrAvg30d > 0 ? (regime.atr / regime.atrAvg30d).toFixed(1) : "?"}×)`,
     `Regime note: ${regime.summary}`,
-    `TP calibration for ${regime.regime}: ${
-      regime.regime === "STRONG_TREND" || regime.regime === "TRENDING_UP"
-        ? "TP1 2–3% from entry, TP2 4–8% from entry. WARNING: 6–8% TP1 sits in the empirical dead zone — no STRONG_TREND long peaked between 3% and 8%. That setting misses the early partial and pushes TP2 to unreachable 16%+."
-        : regime.regime === "RANGING"
-        ? "TP1 max 1.5%, TP2 max 2.5% (Rule 14)."
-        : regime.regime === "EXHAUSTION"
-        ? "TP1 max 2.0%, TP2 max 3.5% (Rule 14)."
-        : regime.regime === "CHOPPY"
-        ? "TP1 max 2.5%, TP2 max 4.0%."
-        : regime.regime === "TRENDING_DOWN"
-        ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 2–3%, TP2 4–6%."
-        : "TP1 within 1–3× ATR from structural level."
-    }`,
+    perSymbolRegimeSection,
+    tpCalibLine,
     ``,
     mtfLines.length      ? `Multi-timeframe data:\n${mtfLines.join("\n")}\n`                                          : "",
     candle1hLines.length   ? `1h OHLCV (last 50, oldest→newest):\n${candle1hLines.join("\n")}\n`                       : "",
