@@ -674,7 +674,8 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
         try {
           // Set flag BEFORE close — prevents double-close if exchange partial order already executed
           await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
-          await closePercentPosition(pos.symbol, 30);
+          const tp1ClosePct   = Math.max(10, pm.tp1ClosePercent ?? 30);
+          await closePercentPosition(pos.symbol, tp1ClosePct);
           // Move SL to +1% beyond entry (longs: entry×1.01, shorts: entry×0.99)
           const tp1Sl = pos.side === "Buy" ? pm.entryPrice * 1.01 : pm.entryPrice * 0.99;
           await bybitSetStopLoss(pos.symbol, tp1Sl, pos.positionIdx)
@@ -682,21 +683,21 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
           await patchPositionMeta(pos.symbol, { sl: tp1Sl }).catch(() => {});
           db.update(tradeLogTable).set({ effectiveSl: String(tp1Sl) })
             .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt))).catch(() => {});
-          const banked        = pos.pnl * 0.30;
+          const banked        = pos.pnl * (tp1ClosePct / 100);
           const base          = pos.symbol.replace(/USDT$/, "");
-          const remainQty     = +(pos.size * 0.70).toFixed(4);
-          const remainMargin  = pos.margin * 0.70;
+          const remainQty     = +(pos.size * (1 - tp1ClosePct / 100)).toFixed(4);
+          const remainMargin  = pos.margin * (1 - tp1ClosePct / 100);
           const dustLine      = remainMargin < 1 ? `⚠️ Remaining margin < $1 — consider closing` : null;
           await alertFn?.([
             `💰 TP1 profit banked — ${pos.symbol}`,
-            `Closed: 30% at ~$${currentPrice.toFixed(4)}`,
+            `Closed: ${tp1ClosePct}% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
             `SL locked to +1%: $${tp1Sl.toFixed(4)}`,
             `Remaining: ${remainQty} ${base} ($${remainMargin.toFixed(2)} margin)`,
             dustLine,
           ].filter(Boolean).join("\n")).catch(() => {});
           const pnlPctTp1 = pm.entryPrice > 0 ? ((currentPrice - pm.entryPrice) / pm.entryPrice) * 100 * (pos.side === "Buy" ? 1 : -1) : 0;
-          logPartialClose({ symbol: pos.symbol, partialType: "tp1", closePct: 30, priceAtClose: currentPrice, pnlPct: pnlPctTp1, remainingPct: 70 }).catch(() => {});
+          logPartialClose({ symbol: pos.symbol, partialType: "tp1", closePct: tp1ClosePct, priceAtClose: currentPrice, pnlPct: pnlPctTp1, remainingPct: 100 - tp1ClosePct }).catch(() => {});
         } catch (e) {
           console.error(`[cronScanner] TP1 exit ${pos.symbol} failed:`, (e as Error).message);
         }
