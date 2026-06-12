@@ -388,9 +388,12 @@ export function getRegimeThreshold(regimeType: string | undefined): number {
 }
 
 // Classify a symbol's own 4h regime from its klines — same ADX thresholds as detectMarketRegime.
-function classifySymbolRegime(klines: BybitKline[]): { regime: RegimeType; adx: number; diPlus: number; diMinus: number } {
-  if (klines.length < 29) return { regime: "CHOPPY", adx: 0, diPlus: 0, diMinus: 0 };
+// Also computes the symbol's own 4h ATR so trade records store the correct per-symbol value,
+// not the BTC regime ATR that is prominently displayed in the scan prompt.
+function classifySymbolRegime(klines: BybitKline[]): { regime: RegimeType; adx: number; diPlus: number; diMinus: number; atr: number } {
+  if (klines.length < 29) return { regime: "CHOPPY", adx: 0, diPlus: 0, diMinus: 0, atr: 0 };
   const { adx, diPlus, diMinus } = calcADX(klines, 14);
+  const atr = calcATR(klines, 14);
   let regime: RegimeType;
   if      (adx > 35 && diPlus >= diMinus) regime = "STRONG_TREND";
   else if (adx > 35)                      regime = "TRENDING_DOWN";
@@ -398,7 +401,7 @@ function classifySymbolRegime(klines: BybitKline[]): { regime: RegimeType; adx: 
   else if (adx > 25)                      regime = "TRENDING_DOWN";
   else if (adx >= 20)                     regime = "RANGING";
   else                                    regime = "CHOPPY";
-  return { regime, adx, diPlus, diMinus };
+  return { regime, adx, diPlus, diMinus, atr };
 }
 
 // Short TP cap text for a given regime (used in per-symbol regime prompt lines).
@@ -483,7 +486,7 @@ async function runPhase2(
   const pendingLines:    string[] = [];
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
-  const symRegimeMap = new Map<string, { regime: RegimeType; adx: number; diPlus: number; diMinus: number }>();
+  const symRegimeMap = new Map<string, { regime: RegimeType; adx: number; diPlus: number; diMinus: number; atr: number }>();
 
   // ── Recent exits (last 24h) per selected symbol ───────────────────────────
   try {
@@ -613,7 +616,7 @@ async function runPhase2(
     const r = symRegimeMap.get(sym);
     if (r) {
       const src = btcIsDirectional ? `BTC (${regime.regime})` : `own (${r.regime})`;
-      console.log(`[regime] ${sym}: own=${r.regime} ADX=${r.adx.toFixed(1)} DI+=${r.diPlus.toFixed(1)} DI-=${r.diMinus.toFixed(1)} → caps from ${src}`);
+      console.log(`[regime] ${sym}: own=${r.regime} ADX=${r.adx.toFixed(1)} DI+=${r.diPlus.toFixed(1)} DI-=${r.diMinus.toFixed(1)} ATR=${r.atr.toFixed(2)} → caps from ${src}`);
     }
   }
 
@@ -795,7 +798,14 @@ INITIAL SL (entry only — does NOT govern post-entry SL management): Place the 
   });
 
   if (!res.parseSuccess) return [];
-  return res.data.opportunities ?? [];
+  const opportunities = res.data.opportunities ?? [];
+  // Override atr with each symbol's own 4h ATR computed from its klines.
+  // Prevents Claude from copying the BTC regime ATR (prominently shown in the prompt) into alt trade records.
+  for (const opp of opportunities) {
+    const symR = symRegimeMap.get(opp.symbol);
+    if (symR && symR.atr > 0) opp.atr = symR.atr;
+  }
+  return opportunities;
 }
 
 export async function runScan(): Promise<ScanResult> {
