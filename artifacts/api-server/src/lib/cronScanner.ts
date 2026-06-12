@@ -1412,11 +1412,14 @@ async function runWatchScan(): Promise<void> {
         }
       }
 
-      // R:R gate — compute from raw values (more reliable than Claude's reported field)
+      // R:R gate — blended reward across both exits (more reliable than Claude's reported field)
       {
         const rrEntry  = signal.entry ?? signal.price;
         const riskDist = Math.abs(rrEntry - (signal.stopLoss ?? 0));
-        const rewardDist = Math.abs((signal.tp1 ?? 0) - rrEntry);
+        const tp1Frac  = (signal.tp1ClosePercent ?? 30) / 100;
+        const tp2Frac  = (1 - tp1Frac) * (signal.tp2ClosePercent ?? 100) / 100;
+        const rewardDist = tp1Frac * Math.abs((signal.tp1 ?? 0) - rrEntry)
+                         + tp2Frac * Math.abs((signal.tp2 ?? 0) - rrEntry);
         const rrRatio  = riskDist > 0 ? rewardDist / riskDist : 0;
         if (rrRatio < 1.1) {
           console.log(`[gate] REJECTED ${sym} (watchScan) — R:R ${rrRatio.toFixed(2)} < 1.1`);
@@ -1712,11 +1715,14 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         }
       }
 
-      // R:R gate — compute from raw values (more reliable than Claude's reported field)
+      // R:R gate — blended reward across both exits (more reliable than Claude's reported field)
       {
         const rrEntry  = opp.entry ?? opp.price;
         const riskDist = Math.abs(rrEntry - (opp.stopLoss ?? 0));
-        const rewardDist = Math.abs((opp.tp1 ?? 0) - rrEntry);
+        const tp1Frac  = (opp.tp1ClosePercent ?? 30) / 100;
+        const tp2Frac  = (1 - tp1Frac) * (opp.tp2ClosePercent ?? 100) / 100;
+        const rewardDist = tp1Frac * Math.abs((opp.tp1 ?? 0) - rrEntry)
+                         + tp2Frac * Math.abs((opp.tp2 ?? 0) - rrEntry);
         const rrRatio  = riskDist > 0 ? rewardDist / riskDist : 0;
         if (rrRatio < 1.1) {
           console.log(`[gate] REJECTED ${sym} — R:R ${rrRatio.toFixed(2)} < 1.1`);
