@@ -2,7 +2,7 @@ import {
   db, tradeLogTable, tradeMemoryTable, paperTradesTable, botStateTable,
   tradingRulesTable, ruleOverridesTable, type TradingRule,
 } from "@workspace/db";
-import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray, or, ne, sql } from "drizzle-orm";
+import { desc, isNotNull, and, eq, isNull, asc, gte, lte, gt, inArray, notInArray, or, ne, sql } from "drizzle-orm";
 import { llm }                                from "./llmRouter";
 import { recordTradeOutcome }                 from "./leverageManager";
 import { getClosedPnl as bybitGetClosedPnl, getOrderStopType, getKlines, fetchKlines, type BybitKline }  from "../brokers/bybit";
@@ -1282,11 +1282,14 @@ export async function generateTradingRules(force = false): Promise<void> {
   // Live-era only: all testnet trades closed before 2026-06-04 (confirmed switchover date).
   // Paper trades (integer source_trade_id) are currently all pre-cutoff; if a future paper trade
   // gets sl_hit/tp_hit after this date, add a NOT SIMILAR TO '[0-9]+' guard here.
+  // Filter is transitional: sl_hit kept as legacy label for 11 existing genuine original-SL exits
+  // that predate Step 1's label fix. New reflections write original_sl/ratcheted_sl going forward.
+  // Drop sl_hit from this filter only after those 11 records are backfilled to original_sl.
   const reflections = await db.select()
     .from(tradeMemoryTable)
     .where(and(
       eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
-      inArray(tradeMemoryTable.exitMethod, ["sl_hit", "tp_hit"]),
+      inArray(tradeMemoryTable.exitMethod, ["sl_hit", "original_sl", "ratcheted_sl", "tp_hit"]),
       sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
     .orderBy(desc(tradeMemoryTable.createdAt))
@@ -1438,9 +1441,28 @@ export async function generateTradingRules(force = false): Promise<void> {
     return true;
   });
 
-  // Delete all existing rules then insert fresh — no ghost entries from prior generations
-  await db.delete(tradingRulesTable).catch(e => console.error("[rules] Delete existing rules:", e));
+  // Guard: empty output → preserve existing rules unchanged (prevents trim-delete wiping all rules
+  // if the LLM returns nothing valid, which would make DELETE WHERE NOT IN ([]) delete everything).
+  if (validRules.length === 0) {
+    console.log("[rules] No valid rules produced — skipping mutation to preserve existing rules");
+    return;
+  }
 
+  // Snapshot existing rules before any mutation — recovery point if regen output is bad.
+  // Covers both auto-regen (checkAndGenerateRules) and manual /forceRules (both call this function).
+  const existingRuleCount = await db.select({ id: tradingRulesTable.id }).from(tradingRulesTable)
+    .catch(() => [] as Array<{ id: number }>);
+  if (existingRuleCount.length > 0) {
+    const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14); // YYYYMMDDHHmmss
+    await db.execute(sql.raw(`CREATE TABLE IF NOT EXISTS trading_rules_backup_${ts} AS SELECT * FROM trading_rules`))
+      .catch(e => console.error("[rules] Snapshot failed (non-fatal):", e));
+    console.log(`[rules] Snapshotted ${existingRuleCount.length} rules → trading_rules_backup_${ts}`);
+  }
+
+  // UPSERT: existing rules (matched on rule_number unique index) get their text/evidence/confidence
+  // updated in-place — PKs never change, so applied_rule_ids in trade_log stay valid (Bug 3).
+  // winsFollowing/lossesFollowing intentionally absent from DO UPDATE set → stats persist (Bug 4).
+  // New rule_numbers go through INSERT path and start at 0W/0L.
   let generated = 0;
   for (const rule of validRules) {
     await db.insert(tradingRulesTable)
@@ -1457,12 +1479,32 @@ export async function generateTradingRules(force = false): Promise<void> {
         createdAt:       new Date(),
         updatedAt:       new Date(),
       })
-      .catch(e => console.error(`[rules] Insert rule ${rule.ruleNumber}:`, e));
+      .onConflictDoUpdate({
+        target: tradingRulesTable.ruleNumber,
+        set: {
+          ruleText:    sql`excluded.rule_text`,
+          evidence:    sql`excluded.evidence`,
+          causalLogic: sql`excluded.causal_logic`,
+          confidence:  sql`excluded.confidence`,
+          occurrences: sql`excluded.occurrences`,
+          active:      sql`excluded.active`,
+          updatedAt:   sql`excluded.updated_at`,
+          // winsFollowing and lossesFollowing NOT here — preserved across regens
+        },
+      })
+      .catch(e => console.error(`[rules] Upsert rule ${rule.ruleNumber}:`, e));
     generated++;
     console.log(`[rules] Rule ${rule.ruleNumber} [${rule.confidence}]: ${rule.ruleText.slice(0, 80)}`);
   }
 
-  console.log(`[rules] Generated/updated ${generated} rules from ${reflections.length} reflections`);
+  // Trim: remove rules whose numbers are no longer in the generated set.
+  // Scoped delete (not delete-all) — only obsolete rule_numbers are removed.
+  const newNumbers = validRules.map(r => r.ruleNumber);
+  await db.delete(tradingRulesTable)
+    .where(notInArray(tradingRulesTable.ruleNumber, newNumbers))
+    .catch(e => console.error("[rules] Trim obsolete rules:", e));
+
+  console.log(`[rules] Upserted ${generated} rules, trimmed to set [${newNumbers.join(",")}] from ${reflections.length} reflections`);
   await _ruleAlertFn?.(
     `🧠 <b>Trading rules updated (${generated} rules)</b>\nBased on ${reflections.length} trade reflections\nUse /rules to see current rules`
   ).catch(() => {});
