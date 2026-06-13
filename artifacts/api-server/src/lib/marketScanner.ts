@@ -432,6 +432,7 @@ export interface ScanResult {
   scanTimestamp:  string;
   summary:        string;
   regime?:        MarketRegime;
+  scanFailed?:    boolean;  // true when LLM output was truncated/unparseable — NOT a genuine no-signal scan
 }
 
 const FALLBACK_RESULT: ScanResult = {
@@ -535,7 +536,7 @@ async function runPhase2(
   perfSummary:     string,
   activeRules:     Awaited<ReturnType<typeof getActiveRules>>,
   leverage:        number,
-): Promise<ScanOpportunity[]> {
+): Promise<{ opportunities: ScanOpportunity[]; scanFailed: boolean }> {
   // ── Phase 2: Detailed data fetch for selected symbols (parallel) ──────────
   const mtfLines:        string[] = [];
   const fundingLines:    string[] = [];
@@ -764,13 +765,14 @@ async function runPhase2(
 
   // Static prefix — no live data embedded; cached by llmRouter (cache: true in TASK_CONFIG)
   const systemContext = [
-    "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose.",
+    "You are an elite quant trader. Respond with ONLY valid JSON — no markdown, no prose, no preamble. Start your response with { immediately.",
     signalTruthTable,
-    `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"1-sentence edge","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","rewardRiskRatio":2.0,"tp1ClosePercent":30,"tp2ClosePercent":100,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"specific named edge","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
+    `Schema: {"opportunities":[{"symbol":"ETHUSDT","assetClass":"Crypto","score":75,"recommendation":"BUY","reasoning":"RSI 68 rejection at $3.2k resistance, funding +0.08%","price":0,"dataTimestamp":"","direction":"long","conviction":"high","entry":0,"stopLoss":0,"takeProfit":0,"atr":0,"tp1":0,"tp2":0,"leverage":5,"positionSizeUsd":0,"timeframeAlignment":"1h+4h","orderType":"limit","limitPrice":0,"timeInForce":"GTC","rewardRiskRatio":2.0,"tp1ClosePercent":30,"tp2ClosePercent":100,"stopLossMethod":"swing_low","setupType":"MOMENTUM","setupQuality":"HIGH","timing":"EARLY","whyNow":"funding +0.08% longs crowded at resistance","edgeType":"TREND_CONTINUATION","conflicts":[],"conflictResolution":"NO_CONFLICT","sweepDetected":false,"squeezeDetected":false,"relativeStrengthVsBtc":3.5}],"scanTimestamp":"ISO","summary":""}`,
+    `BREVITY RULE: reasoning must be ≤ 100 characters (one phrase, not a sentence). whyNow must be ≤ 120 characters (one specific edge). Do not elaborate — short and specific beats long and generic. Verbose fields cause output truncation and lose all signals.`,
     `rewardRiskRatio: reward divided by risk. Reward = weighted blend: (tp1 close fraction × distance to TP1) + (remaining fraction × distance to TP2), divided by distance from entry to SL. This must match how the gate evaluates R:R. Example: entry $10, SL $9, TP1 $11 (30% close), TP2 $12 (100% of remaining = 70%): reward = 0.30×$1 + 0.70×$2 = $1.70, risk = $1.00, R:R = 1.70. Higher is better. Required — must be computed and set for every signal.`,
     `tp1 and stopLoss are REQUIRED fields — set them to specific prices > 0 matching the trade direction (long: tp1 > entry > stopLoss; short: tp1 < entry < stopLoss). Never output 0 or omit them. A signal with tp1=0 or missing tp1 will be rejected by the hard gate and no trade will be placed.`,
     `tp1ClosePercent: percentage of position to close at TP1 (default 30 if omitted). tp2ClosePercent: percentage of remaining position to close at TP2 (default 100 if omitted, closes all remaining). Both are optional — omit to use defaults. Use tp2ClosePercent < 100 only when you want to trail a portion beyond TP2.`,
-    `Rank exactly 5. Score reflects your own conviction (0-100). Set recommendation and conviction fields based on your judgment.`,
+    `Rank exactly 5. Score reflects your own conviction (0-100). Set recommendation and conviction fields based on your judgment. Keep reasoning ≤ 100 chars and whyNow ≤ 120 chars per entry — output truncation loses all 5 signals.`,
     `Funding: |rate|<0.03% neutral; 0.03-0.07% directional signal; >0.07% crowded/squeeze risk. OI up+price up=bullish; OI down+price up=weak; OI up+price down=bearish; OI down+price down=weak.`,
     `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must fall within the regime-calibrated band shown in the TP calibration line below — this overrides raw ATR multiples. ATR (1-3×) is a secondary sanity check only; do not override the regime band for ATR compliance. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed within regime band. TP2=2× TP1 distance. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.
 INITIAL SL (entry only — does NOT govern post-entry SL management): Place the SL at the price where this trade's thesis is invalidated. Determine that level yourself from the candle data across 15m / 1h / 4h — use whatever structural method best fits this setup (swing structure, Fibonacci, prior support/resistance, range boundary, etc.) and whichever timeframe fits: tighter for fast/breakout entries, wider for slower swings. 4h ATR is volatility context only, never the placement rule. Constraints: SL must sit just beyond a GENUINE structural level. Never place it at an arbitrary price chosen only to hit a target R:R — a stop inside candle noise gets wicked out. Blended R:R must be ≥ 1.1. If your invalidation level doesn't clear it, anchor to a genuinely tighter structural level on a faster timeframe only if a real one exists; if none does, return direction=neutral rather than forcing a wide stop. Record the level and basis in stopLossMethod (e.g. 'swing_1h', 'fib_0618', 'range_low'). This sets the INITIAL stop only — it does NOT alter TP1/TP2 bands or the post-entry SL ladder (breakeven, ratchets).
@@ -880,11 +882,14 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
     fallback: FALLBACK_RESULT,
   });
 
-  if (!res.parseSuccess) return [];
+  if (!res.parseSuccess) {
+    console.error(`[scanner] Phase 2 FAILED — LLM output truncated or malformed (${res.text?.length ?? 0} chars). This is NOT a genuine no-signal scan.`);
+    return { opportunities: [], scanFailed: true };
+  }
   const opportunities = res.data.opportunities ?? [];
   // Override atr with each symbol's own 4h ATR computed from its klines.
   // Prevents Claude from copying the BTC regime ATR (prominently shown in the prompt) into alt trade records.
-  // Also propagate blowoffSuspected — pre-computed, not set by Claude.
+  // Also propagate blowoffSuspected and symRegime — pre-computed, not set by Claude.
   for (const opp of opportunities) {
     const symR = symRegimeMap.get(opp.symbol);
     if (symR && symR.atr > 0) opp.atr = symR.atr;
@@ -892,7 +897,7 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
     const bf = blowoffMap.get(opp.symbol);
     if (bf?.suspected) opp.blowoffSuspected = true;
   }
-  return opportunities;
+  return { opportunities, scanFailed: false };
 }
 
 export async function runScan(): Promise<ScanResult> {
@@ -950,9 +955,9 @@ export async function runScan(): Promise<ScanResult> {
       : cryptoData.slice(0, 10).map(d => d.symbol);
     console.log(`[scanner] Phase 1 → ${selectedSymbols.join(", ")}`);
 
-    const opportunities = await runPhase2(selectedSymbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules, leverage);
+    const phase2 = await runPhase2(selectedSymbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules, leverage);
 
-    const result: ScanResult = { opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "" };
+    const result: ScanResult = { opportunities: phase2.opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "", scanFailed: phase2.scanFailed };
     return result;
   });
 }
@@ -985,9 +990,9 @@ export async function runFocusedScan(symbols: string[]): Promise<ScanResult> {
     ? bybitPositions.map(p => `${p.symbol} ${p.side} size=${p.size} pnl=${p.pnlPct.toFixed(1)}%`).join(", ")
     : "none";
 
-  const opportunities = await runPhase2(symbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules, leverage);
+  const phase2 = await runPhase2(symbols, classMap, assetData, regime, bybitPosSummary, profile, tradeMemory, perfSummary, activeRules, leverage);
 
-  return { opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "" };
+  return { opportunities: phase2.opportunities, regime, scanTimestamp: new Date().toISOString(), summary: "", scanFailed: phase2.scanFailed };
 }
 
 export function scheduleScan(): void {

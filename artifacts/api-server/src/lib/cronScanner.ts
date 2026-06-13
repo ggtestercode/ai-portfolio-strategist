@@ -1314,6 +1314,10 @@ async function runWatchScan(): Promise<void> {
     return null;
   });
   if (!result) return;
+  if (result.scanFailed) {
+    console.error(`[watchScan] ⚠️ Focused scan FAILED — LLM truncated/parse error for ${symbols.join(", ")}`);
+    return;
+  }
 
   const regime    = result.regime;
   const threshold = getRegimeThreshold(regime?.regime);
@@ -1618,6 +1622,19 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     await cancelStaleOrders().catch(e => console.warn("[cronScanner] stale order check:", e.message));
 
     const result         = await runScan();
+
+    // Fix 6: distinguish scan failure (truncation/parse) from genuine no-signal scan.
+    if (result.scanFailed) {
+      console.error("[cronScanner] ⚠️ SCAN FAILED — LLM output truncated or malformed. 0 signals is NOT genuine.");
+      await alertFn?.([
+        `⚠️ <b>SCAN FAILED</b> — ${new Date().toUTCString()}`,
+        `LLM output was truncated or returned unparseable JSON (hit token cap or prose preamble).`,
+        `This is <b>NOT a genuine no-signal scan</b> — signals may have been missed.`,
+        `Next scan in ~4h. Monitor manually if needed.`,
+      ].join("\n")).catch(() => {});
+      return;  // skip normal scan flow — do NOT log "Complete — 0 signals"
+    }
+
     const regime         = result.regime;
     const livePositions  = await bybitGetPositions().catch(() => [] as BybitPosition[]);
 
