@@ -13,4 +13,7 @@ export default defineConfig({
   dbCredentials: {
     url: process.env.DATABASE_URL,
   },
+  // Exclude ad-hoc backup tables so drizzle-kit push runs non-interactively.
+  // Tables matching these patterns are left untouched — drizzle never sees them.
+  tablesFilter: ["!trade_memory_backup*"],
 });
