@@ -1383,6 +1383,7 @@ async function runWatchScan(): Promise<void> {
         const gateRequired: Record<string, unknown> = {
           stopLoss:  signal.stopLoss,
           tp1:       signal.tp1,
+          tp2:       signal.tp2,
           setupType: signal.setupType,
           score:     signal.score,
         };
@@ -1700,6 +1701,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         const gateRequired: Record<string, unknown> = {
           stopLoss:  opp.stopLoss,
           tp1:       opp.tp1,
+          tp2:       opp.tp2,
           setupType: opp.setupType,
           score:     opp.score,
         };
@@ -1793,6 +1795,67 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             }
           }
         }, 5000);
+
+        // Rule 7: verify SL/TP orders are actually live on exchange 15s after fill.
+        // Alert-only v1 — measure false-positive rate before adding auto-retry.
+        // SL + TP2: checked via bybitGetPositions() (position-level, not in getOrders).
+        // TP1 partial limit: checked via bybitGetOrders() (regular limit order).
+        const tp1Target  = opp.tp1;
+        const tp2Target  = opp.tp2 ?? opp.takeProfit;
+        const slTarget   = opp.stopLoss;
+        setTimeout(async () => {
+          // Position check — SL and TP2 (position-level conditional orders)
+          let positions: BybitPosition[] = [];
+          let posCheckFailed = false;
+          try {
+            positions = await bybitGetPositions();
+          } catch (e) {
+            posCheckFailed = true;
+            console.warn(`[rule7] ${sym} — bybitGetPositions failed at 15s check:`, (e as Error).message);
+            await alertFn?.(`⚠️ Rule 7: could not verify SL/TP orders for ${sym} — exchange check failed. Verify manually.`).catch(() => {});
+          }
+
+          if (!posCheckFailed) {
+            const liveP = positions.find(p => p.symbol === sym);
+            if (!liveP) {
+              // Position already gone (filled and closed?) — no-op
+              console.log(`[rule7] ${sym} — position not found at 15s check (may have closed already)`);
+            } else {
+              const slLive  = (liveP.stopLoss  ?? 0) > 0;
+              const tp2Live = (liveP.takeProfit ?? 0) > 0;
+              console.log(`[rule7] ${sym} — 15s check: SL=${slLive ? `live($${liveP.stopLoss})` : "MISSING"} TP2=${tp2Live ? `live($${liveP.takeProfit})` : tp2Target ? "MISSING" : "not set"}`);
+              if (!slLive && slTarget) {
+                console.warn(`[rule7] ${sym} — SL not live on exchange 15s after fill (expected $${slTarget})`);
+                await alertFn?.(`⚠️ Rule 7: SL not live on exchange 15s after fill — ${sym}\nExpected SL: $${slTarget?.toFixed(4) ?? "?"}\nVerify manually on Bybit.`).catch(() => {});
+              }
+              if (!tp2Live && tp2Target) {
+                console.warn(`[rule7] ${sym} — TP2 not live on exchange 15s after fill (expected $${tp2Target})`);
+                await alertFn?.(`⚠️ Rule 7: TP2 not live on exchange 15s after fill — ${sym}\nExpected TP2: $${tp2Target?.toFixed(4) ?? "?"}\nVerify manually on Bybit.`).catch(() => {});
+              }
+            }
+          }
+
+          // TP1 partial limit order check via getOrders (only when TP1 is a partial, not position-level)
+          if (tp1Target && (opp.tp1ClosePercent ?? 100) < 100) {
+            let orders: Awaited<ReturnType<typeof bybitGetOrders>> = [];
+            let ordCheckFailed = false;
+            try {
+              orders = await bybitGetOrders();
+            } catch (e) {
+              ordCheckFailed = true;
+              console.warn(`[rule7] ${sym} — bybitGetOrders failed at 15s TP1 check:`, (e as Error).message);
+              await alertFn?.(`⚠️ Rule 7: could not verify TP1 order for ${sym} — exchange check failed. Verify manually.`).catch(() => {});
+            }
+            if (!ordCheckFailed) {
+              const tp1Order = orders.find(o => o.symbol === sym && Math.abs(o.price - tp1Target) / tp1Target < 0.001);
+              console.log(`[rule7] ${sym} — 15s TP1 limit check: ${tp1Order ? `live(orderId=${tp1Order.orderId})` : "MISSING"}`);
+              if (!tp1Order) {
+                console.warn(`[rule7] ${sym} — TP1 limit order not live on exchange 15s after fill (expected ~$${tp1Target})`);
+                await alertFn?.(`⚠️ Rule 7: TP1 limit order not live on exchange 15s after fill — ${sym}\nExpected TP1: $${tp1Target?.toFixed(4) ?? "?"}\nVerify manually on Bybit.`).catch(() => {});
+              }
+            }
+          }
+        }, 15000);
 
         // Verify actual direction from live Bybit position — signal direction can differ from what Bybit opened
         const signalDirection = opp.direction === "short" ? "short" : "long";
@@ -2606,6 +2669,24 @@ async function runPositionReview(
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
     const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
     const pct = Math.min(99, Math.max(1, parseInt(m?.[1] ?? "50", 10)));
+
+    // Rule 8: never take a partial at a loss — partials only at/above entry price.
+    if (pnlPct < 0) {
+      console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} blocked — pnlPct=${pnlPct.toFixed(2)}% < 0 (Rule 8: no partials below entry)`);
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct.toFixed(2)}%\n\n⚠️ Partial blocked — position is at a loss. Not closing partial below entry.\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      return;
+    }
+
+    // Rule 8: 30-minute hold before any partial on MOMENTUM setups with score >= 70.
+    const entryAgeMs   = meta?.openedAt ? Date.now() - meta.openedAt : Infinity;
+    const isMomentum   = ((meta as any)?.setupType as string | undefined)?.toUpperCase().includes("MOMENTUM") ?? false;
+    const scoreAbove70 = (meta?.score ?? 0) >= 70;
+    if (isMomentum && scoreAbove70 && entryAgeMs < 30 * 60_000) {
+      const minsHeld = Math.floor(entryAgeMs / 60_000);
+      console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} blocked — MOMENTUM score=${meta?.score} held only ${minsHeld}m < 30m (Rule 8)`);
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial blocked — MOMENTUM setup held only ${minsHeld}m (30-min minimum not reached).\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      return;
+    }
 
     const currentSizeUsd  = pos.size * (pos.markPrice ?? pos.entryPrice);
     const afterPartialUsd = currentSizeUsd * (1 - pct / 100);
