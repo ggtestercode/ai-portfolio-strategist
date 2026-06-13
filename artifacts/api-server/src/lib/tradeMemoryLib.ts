@@ -485,21 +485,63 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
         ? (input.pnlPct < -5 ? "sl_hit" : "review")
         : "unknown";
 
-  // Exit branch — ratcheted_sl covers post-TP1 ratchet (paths A/B/D) AND breakeven-before-TP1 (path C)
-  const exitBranch: "original_sl" | "ratcheted_sl" | "tp_hit" | "other" =
-    tp2Executed                                                     ? "tp_hit"
-    : exitMethod === "tp_hit"                                       ? "tp_hit"
-    : ((tp1Executed || slWasRatcheted) && exitMethod === "sl_hit")  ? "ratcheted_sl"
-    : exitMethod === "sl_hit"                                       ? "original_sl"
+  // Exit branch — ratcheted_sl covers post-TP1 ratchet (paths A/B/D) AND breakeven-before-TP1 (path C).
+  // tp2Executed only → "tp_hit" when the FINAL close was not a SL; if a partial TP2 fired but the
+  // remainder was closed by ratcheted SL (exitMethod="sl_hit"), that is still ratcheted_sl.
+  // review and profit_protection are preserved explicitly so Telegram stats queries keep working.
+  const exitBranch: "original_sl" | "ratcheted_sl" | "tp_hit" | "review" | "profit_protection" | "other" =
+    (tp2Executed && exitMethod !== "sl_hit")                                      ? "tp_hit"
+    : exitMethod === "tp_hit"                                                     ? "tp_hit"
+    : (tp1Executed || slWasRatcheted || tp2Executed) && exitMethod === "sl_hit"   ? "ratcheted_sl"
+    : exitMethod === "sl_hit"                                                     ? "original_sl"
+    : exitMethod === "review"                                                     ? "review"
+    : exitMethod === "profit_protection"                                          ? "profit_protection"
     : "other";
 
   // Effective SL display distance (for prompt context only — not used for slTooTight assessment)
   const effectiveSlDistancePct = effectiveSL > 0 && input.entryPrice > 0
     ? Math.abs(effectiveSL - input.entryPrice) / input.entryPrice * 100 : 0;
 
+  // slTooTight — code-owned, never delegated to LLM. Wick-vs-close test:
+  // find the first trade-period candle that touches the original SL level; if its close
+  // recovered to the non-stopped side, the SL was hit by noise (too tight = true).
+  // If the close was through the SL, it was a genuine structural breach (false).
+  // Branch 2 (ratcheted_sl) and Branch 3 (tp_hit) always false — original SL was never hit.
+  const computedSlTooTight: boolean = (() => {
+    if (exitBranch !== "original_sl") return false;
+    if (plannedSL <= 0 || tradePeriodCandles.length === 0) {
+      console.log(`[reflection] slTooTight: candles unavailable for ${input.symbol}, defaulting false`);
+      return false;
+    }
+    const slHitCandle = tradePeriodCandles.find(c =>
+      isLong ? c.low <= plannedSL : c.high >= plannedSL
+    );
+    if (!slHitCandle) {
+      console.log(`[reflection] slTooTight: no SL-touch candle found for ${input.symbol} (SL=$${plannedSL}), defaulting false`);
+      return false;
+    }
+    // Wick stop: SL tagged but close recovered to the safe side
+    return isLong
+      ? slHitCandle.close > plannedSL   // long: wick below SL, close above = noise stop
+      : slHitCandle.close < plannedSL;  // short: wick above SL, close below = noise stop
+  })();
+
   // Entry regime — parse from trade's stored reasoning (bot_state.currentRegime is today's regime)
   const entryRegime = (input.reasoning?.match(/regime=([A-Z_]+)/)?.[1]) ?? "UNKNOWN";
-  const isStrongTrend = entryRegime === "STRONG_TREND";
+
+  // Direction-aware TP2 cap by regime — from Rule 3. Used in Branch 2 TP2 verdict guidance.
+  const tp2CapByRegime = (() => {
+    const d = input.direction as "long" | "short";
+    switch (entryRegime) {
+      case "STRONG_TREND":  return d === "short" ? "4–6% from entry (Rule 3 STRONG_TREND short)" : "4–8% from entry (Rule 3 STRONG_TREND long)";
+      case "TRENDING_UP":   return d === "short" ? "4–6% from entry (Rule 3)" : "4–8% from entry (Rule 3)";
+      case "TRENDING_DOWN": return d === "short" ? "4–6% from entry (Rule 3)" : "max 1.5% from entry (Rule 3 — TRENDING_DOWN longs are high-risk)";
+      case "CHOPPY":        return "max 3.5% from entry (Rule 3 CHOPPY cap)";
+      case "RANGING":       return "max 2.5% from entry (Rule 3 RANGING cap)";
+      case "EXHAUSTION":    return "max 3.5% from entry (Rule 3 EXHAUSTION cap)";
+      default:              return "assess based on available move — regime unknown";
+    }
+  })();
 
   const tradeLost = input.pnlPct < 0;
   const failureType: "strategy" | "execution" | "mixed" | "success" =
@@ -598,7 +640,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       ? `Gross P/L (Bybit verified): ${bybitTotalPnl >= 0 ? "+" : ""}$${bybitTotalPnl.toFixed(2)} | Est. fees: ~$${estimatedFees.toFixed(2)}`
       : `Gross P/L: ${sign}$${input.pnl.toFixed(2)} | Est. fees: ~$${estimatedFees.toFixed(2)}`,
     `Net P/L: ${sign}${input.pnlPct.toFixed(2)}%`,
-    `Exit method: ${exitMethod}`,
+    `Exit method: ${exitBranch}`,
     ``,
     `═══ PRE-TRADE CONTEXT (12h before entry) ═══`,
     ``,
@@ -727,9 +769,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
         ? `TP2 verdict: na — TP1 never fired (path-C breakeven lock exited at entry price). Set tp2Verdict="na". The relevant TP1 question is in the TP ASSESSMENT above.`
         : hadReviewPartial
         ? `TP2 verdict: na — a discretionary posMonitor PARTIAL_CLOSE intervened between TP1 and the final exit. TP2 was not fairly tested; the bot's judgment ended the trade, not TP2 being unreachable. Set tp2Verdict="na".`
-        : isStrongTrend
-        ? `TP2 verdict (BRANCH 2, STRONG_TREND): TP1 was captured; remainder exited at ratcheted SL. Was TP2 set too far? STRONG_TREND data shows a 3–8% dead zone where price rarely continues to TP2 after TP1. TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was beyond the realistic run given this regime (should be ≤6% for STRONG_TREND shorts); good = TP2 was reasonable, price simply reversed before reaching it.`
-        : `TP2 verdict (BRANCH 2, regime=${entryRegime}): TP1 was captured; remainder exited at ratcheted SL before TP2. Was TP2 too ambitious? TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was unrealistically far given available move; good = TP2 was reasonable, price simply reversed.`)
+        : `TP2 verdict (BRANCH 2, regime=${entryRegime}): TP1 was captured; remainder exited at ratcheted SL before TP2. Was TP2 set too far? Rule 3 cap for ${entryRegime}: ${tp2CapByRegime}. TP2 was ${tp2Price > 0 ? ((isLong ? tp2Price - input.entryPrice : input.entryPrice - tp2Price) / input.entryPrice * 100).toFixed(2) : "?"}% from entry; max profit was ${maxProfitPct.toFixed(2)}%. too_ambitious = TP2 was beyond the regime cap; good = TP2 was within cap, price simply reversed before reaching it.`)
       : `TP2 verdict: too_tight (hit quickly, price ran far further), good (reasonable), too_ambitious (never reached despite available profit)`,
     ``,
     `═══ PARTIAL CLOSE ASSESSMENT ═══`,
@@ -781,7 +821,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     ``,
     `Review ALL candle data above with hindsight. Return ONLY valid JSON (no markdown):`,
     `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
-    `"entryTimingVerdict":"early|good|late|wrong","slTooTight":false,"slTooWide":false,`,
+    `"entryTimingVerdict":"early|good|late|wrong","slTooWide":false,`,
     `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious|na",`,
     `"partialTiming":"correct|too_early|too_late|na","manualCloseVerdict":"correct|wrong|neutral|na",`,
     `"profitMissedPct":null,"optimalEntryPrice":null,"optimalSlPrice":null,`,
@@ -832,7 +872,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
                  "entryCandleQuality", "preTradeWarningsMissed", "preTradeConfirmationsPresent",
                  "signalsThatWorked", "signalsThatFailed", "candlePatternLesson",
                  "signalAccuracyInsight", "whatWorked", "whatDidnt", "lessonsLearned", "nextTimeWouldDo",
-                 "entryTimingVerdict", "slTooTight", "slTooWide", "tp1Verdict", "tp2Verdict",
+                 "entryTimingVerdict", "slTooWide", "tp1Verdict", "tp2Verdict",
                  "partialTiming", "manualCloseVerdict"],
       properties: {
         entryQuality:                 { type: "string" },
@@ -862,7 +902,6 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
         lessonsLearned:               { type: "string" },
         nextTimeWouldDo:              { type: "string" },
         entryTimingVerdict:           { type: "string" },
-        slTooTight:                   { type: "boolean" },
         slTooWide:                    { type: "boolean" },
         tp1Verdict:                   { type: "string" },
         tp2Verdict:                   { type: "string" },
@@ -896,9 +935,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
 
   const d = res.data;
 
-  // Hard override — Branch 2 (ratcheted SL after TP1) and Branch 3 (TP exit) must never
-  // be labeled slTooTight regardless of what the LLM returns. The original entry SL was
-  // never hit in these cases; the label is not applicable.
+  // slTooTight is code-owned — assign the pre-computed wick-vs-close result unconditionally.
+  // LLM does not return this field (removed from template/required/fallback).
+  // Hard override below is kept as a redundant safety net for any future schema drift.
+  d.slTooTight = computedSlTooTight;
+
+  // Hard override (redundant safety net) — Branch 2 and Branch 3 can never be slTooTight.
   if (exitBranch === "ratcheted_sl" || exitBranch === "tp_hit") {
     d.slTooTight = false;
   }
@@ -952,7 +994,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     profitProtectionMissed: false,
     slippagePct:            String(slippage.toFixed(4)),
     excessivePartials:      memPartials.length > 3,
-    exitMethod,
+    exitMethod: exitBranch,   // store interpreted branch label, not raw Bybit trigger
     metadataWasStale:       false,
     // Candle & signal analysis
     entryCandleQuality:     d.entryCandleQuality     || null,
