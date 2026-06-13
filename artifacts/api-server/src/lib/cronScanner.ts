@@ -924,8 +924,8 @@ async function makePositionReview(
     "SIGNAL TRUTH TABLE — direction-aware interpretation (MUST apply before any decision):",
     "  Price at support       → LONG: HOLD (thesis intact) | SHORT: WARNING (bounce risk)",
     "  Price at resistance    → LONG: WARNING (rejection risk) | SHORT: HOLD (thesis intact)",
-    "  RSI > 70               → LONG: caution (overbought) | SHORT: HOLD (still bearish pressure)",
-    "  RSI < 30               → LONG: HOLD (still bullish pressure) | SHORT: caution (oversold bounce risk)",
+    "  RSI > 70               → LONG: caution (overbought) | SHORT: HOLD — overbought at resistance = rejection setup completing. Only a concern if price broke significantly above the SL.",
+    "  RSI < 30               → LONG: HOLD — oversold at support = bounce setup completing. Only a concern if price broke significantly below the SL. | SHORT: caution (oversold bounce risk)",
     "  Funding rate positive  → LONG: WARNING (squeeze risk) | SHORT: GOOD (being paid to hold)",
     "  Funding rate negative  → LONG: GOOD (being paid to hold) | SHORT: WARNING (squeeze risk)",
     "  OI rising + price up   → LONG: bullish (real demand) | SHORT: PAIN (conviction needed to hold)",
@@ -2402,8 +2402,14 @@ async function checkPositionMonitor(): Promise<void> {
       const closes  = klines.map(k => k.close);
       const rsi     = calcRSI(closes, 14);
       if (state.lastRSI1h > 0) {
-        if (state.lastRSI1h < 75 && rsi >= 75) trigger = `1h RSI crossed above 75 (${rsi.toFixed(1)}) — overbought`;
-        if (state.lastRSI1h > 25 && rsi <= 25) trigger = `1h RSI crossed below 25 (${rsi.toFixed(1)}) — oversold`;
+        // RSI>75 on a SHORT with intact thesis (pnlPct ≥ -3%) = overbought-at-resistance,
+      // rejection setup completing — not a danger signal. Only trigger when the short is
+      // actually losing (price rose against thesis, SL being consumed).
+      if (state.lastRSI1h < 75 && rsi >= 75 && (pos.side !== "Sell" || pnlPct < -3))
+        trigger = `1h RSI crossed above 75 (${rsi.toFixed(1)})${pos.side === "Sell" ? " — overbought (price rising against short thesis — review)" : " — overbought"}`;
+      // Symmetric: RSI<25 on a LONG with intact thesis = oversold-at-support, bounce completing.
+      if (state.lastRSI1h > 25 && rsi <= 25 && (pos.side !== "Buy" || pnlPct < -3))
+        trigger = `1h RSI crossed below 25 (${rsi.toFixed(1)})${pos.side === "Buy" ? " — oversold (price falling against long thesis — review)" : " — oversold"}`;
       }
       // Use second-to-last candle (last COMPLETE 1h bar) — avoids re-firing every 5 min
       // on the same in-progress candle
@@ -2602,8 +2608,8 @@ async function runPositionReview(
     `SIGNAL TRUTH TABLE — direction-aware interpretation (apply before any decision):`,
     `  Price at support       → LONG: HOLD (thesis intact) | SHORT: WARNING (bounce risk)`,
     `  Price at resistance    → LONG: WARNING (rejection risk) | SHORT: HOLD (thesis intact)`,
-    `  RSI > 70               → LONG: caution (overbought) | SHORT: HOLD (still bearish pressure)`,
-    `  RSI < 30               → LONG: HOLD (still bullish pressure) | SHORT: caution (oversold bounce risk)`,
+    `  RSI > 70               → LONG: caution (overbought) | SHORT: HOLD — overbought means price is at/near resistance where the short is based; the rejection setup is completing. Only a concern if price has broken significantly above the SL.`,
+    `  RSI < 30               → LONG: HOLD — oversold means price is at/near support where the long is based; the bounce setup is completing. Only a concern if price has broken significantly below the SL. | SHORT: caution (oversold bounce risk)`,
     `  Funding rate positive  → LONG: WARNING (squeeze risk) | SHORT: GOOD (being paid to hold)`,
     `  Funding rate negative  → LONG: GOOD (being paid to hold) | SHORT: WARNING (squeeze risk)`,
     `  OI rising + price up   → LONG: bullish (real demand) | SHORT: PAIN (conviction needed)`,
