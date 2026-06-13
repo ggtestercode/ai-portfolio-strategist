@@ -1,4 +1,5 @@
 import TelegramBot from "node-telegram-bot-api";
+import { escapeHtml } from "../lib/htmlUtils";
 import { approvalGate, type PendingApproval } from "../lib/approvalGate";
 import {
   generateAssistantReply,
@@ -81,10 +82,6 @@ function getBot(): TelegramBot {
   return _bot;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 function utcNow(): string {
   return new Date().toUTCString();
 }
@@ -139,16 +136,18 @@ async function send(text: string, opts?: TelegramBot.SendMessageOptions): Promis
   await getBot().sendMessage(chatId, text, opts);
 }
 
-// Only alarm when polling has failed consecutively — transient network blips are normal.
-let consecutivePollingErrors = 0;
-const ERROR_ALARM_THRESHOLD  = 5; // ~25 min of sustained failure at 5-min watchdog interval
+// Alarm only when polling errors are ongoing — auto-resolves once 429s / outages clear.
+// Counter-based approach got stuck because success only fired on incoming messages.
+// Timestamp approach self-heals: if last error was > 3 min ago, polling is considered healthy.
+let lastPollingErrorAt = 0;
+const POLLING_ERROR_WINDOW_MS = 3 * 60 * 1000; // 3 min without errors = healthy
 
-export function recordPollingSuccess(): void { consecutivePollingErrors = 0; }
-export function recordPollingError():   void { consecutivePollingErrors++;   }
+export function recordPollingSuccess(): void { lastPollingErrorAt = 0; }
+export function recordPollingError():   void { lastPollingErrorAt = Date.now(); }
 
 export async function checkBotHealth(): Promise<void> {
-  if (consecutivePollingErrors >= ERROR_ALARM_THRESHOLD)
-    throw new Error(`Telegram polling failing: ${consecutivePollingErrors} consecutive errors`);
+  if (lastPollingErrorAt > 0 && Date.now() - lastPollingErrorAt < POLLING_ERROR_WINDOW_MS)
+    throw new Error(`Telegram polling failing: last error ${Math.round((Date.now() - lastPollingErrorAt) / 1000)}s ago`);
 }
 
 export async function sendAlert(text: string): Promise<void> {
@@ -1853,13 +1852,13 @@ export function startPolling(): void {
     const is502 = msg.includes("502");
     if (is409) {
       recordPollingError();
-      console.warn(`[telegram] 409 Conflict (consecutive=${consecutivePollingErrors}): another bot instance is polling — check for remote deployments`);
+      console.warn(`[telegram] 409 Conflict: another bot instance is polling — check for remote deployments`);
     } else if (is502) {
       // 502 Bad Gateway = Telegram server-side outage, self-resolving — don't alarm
       console.warn(`[telegram] 502 Bad Gateway (Telegram server-side, will retry):`, msg);
     } else {
       recordPollingError();
-      console.warn(`[telegram] Polling error (will retry, consecutive=${consecutivePollingErrors}):`, msg || cause || err.code);
+      console.warn(`[telegram] Polling error (will retry):`, msg || cause || err.code);
     }
   });
 

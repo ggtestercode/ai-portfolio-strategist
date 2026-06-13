@@ -1,4 +1,5 @@
 import cron, { type ScheduledTask }   from "node-cron";
+import { escapeHtml }                 from "./htmlUtils";
 import { runScan, runFocusedScan, type ScanResult, type ScanOpportunity, calcATR, getRegimeThreshold } from "./marketScanner";
 import { runPaperScan, runMode3PaperScan, updatePaperTradesPnl, startWeeklyAbReportCron, startPaperMonitorCron } from "./paperScanner";
 import { cache, CacheKey }             from "./contextCache";
@@ -541,7 +542,7 @@ async function checkHoldTimers(
         await alertFn?.([
           `⏱️ 48h review — ${pos.symbol}`,
           `Decision: CLOSE`,
-          `Reason: ${reason}`,
+          `Reason: ${escapeHtml(reason)}`,
           `P/L: ${pnlSign}$${pos.pnl.toFixed(2)} (${pnlSign}${pos.pnlPct.toFixed(2)}%)`,
         ].join("\n")).catch(() => {});
       } catch (e) {
@@ -557,8 +558,8 @@ async function checkHoldTimers(
       }
       await alertFn?.([
         `⏱️ 48h review — ${pos.symbol}`,
-        `Decision: ${decision}`,
-        `Reason: ${reason}`,
+        `Decision: ${escapeHtml(decision)}`,
+        `Reason: ${escapeHtml(reason)}`,
         `Next review: 24h`,
       ].join("\n")).catch(() => {});
     }
@@ -765,7 +766,7 @@ async function checkRegimeFlattener(
     await alertFn?.([
       `⚠️ Regime shifted to ${regime.regime}`,
       `Reducing exposure — closing 50% of all positions`,
-      regime.summary,
+      escapeHtml(regime.summary ?? ""),
     ].join("\n")).catch(() => {});
 
     for (const pos of livePositions) {
@@ -1056,7 +1057,7 @@ async function handlePositionDecision(
       await logScalingDecision(sym, "CUT", decision.reason, pos.pnlPct);
       outcomes.push({ symbol: sym, action: "CUT", reason: decision.reason, pnlPct: pos.pnlPct });
       const sign = pos.pnl >= 0 ? "+" : "";
-      await alertFn?.(`✂️ Position CUT: ${sym}\nP/L: ${sign}$${pos.pnl.toFixed(2)} (${sign}${pos.pnlPct.toFixed(2)}%)\nReason: ${decision.reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      await alertFn?.(`✂️ Position CUT: ${sym}\nP/L: ${sign}$${pos.pnl.toFixed(2)} (${sign}${pos.pnlPct.toFixed(2)}%)\nReason: ${escapeHtml(decision.reason ?? "")}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[cronScanner] CUT ${sym} failed:`, msg);
@@ -1210,11 +1211,11 @@ function formatScanSummary(
   if (positionOutcomes.length) {
     lines.push(`📊 <b>Position review (${positionOutcomes.length}):</b>`);
     for (const o of holds) {
-      lines.push(`  • ${o.symbol} — HOLD${o.reason ? ` (${o.reason})` : ""}`);
+      lines.push(`  • ${o.symbol} — HOLD${o.reason ? ` (${escapeHtml(o.reason)})` : ""}`);
     }
     for (const o of cuts) {
       const pnlTag = o.pnlPct != null ? ` ${o.pnlPct >= 0 ? "+" : ""}${o.pnlPct.toFixed(1)}%` : "";
-      lines.push(`  • ${o.symbol} — CUT${pnlTag}${o.reason ? ` (${o.reason})` : ""}`);
+      lines.push(`  • ${o.symbol} — CUT${pnlTag}${o.reason ? ` (${escapeHtml(o.reason)})` : ""}`);
     }
     lines.push(``);
   }
@@ -1360,7 +1361,7 @@ async function runWatchScan(): Promise<void> {
           ``,
           `Existing: <b>${existingDir.toUpperCase()}</b>  P/L: ${existingPnlPct.toFixed(1)}%  Score: ${existingScore}`,
           `New signal: <b>${signalDir.toUpperCase()}</b>  Score: ${signal.score}`,
-          `Why: ${signal.whyNow ?? (signal.reasoning ?? "").slice(0, 120)}`,
+          `Why: ${escapeHtml(signal.whyNow ?? (signal.reasoning ?? "").slice(0, 120))}`,
           ``,
           `Recommendation: ${rec}`,
         ].join("\n")).catch(() => {});
@@ -1542,7 +1543,7 @@ async function runWatchScan(): Promise<void> {
             `⚡ <b>Watch list entry — ${sym} ${(signal.direction ?? "?").toUpperCase()}</b>`,
             `Score: ${watchCoin.score} → <b>${signal.score}</b> ✅`,
             `Threshold met: ${signal.score} ≥ ${threshold}`,
-            `Edge: ${signal.whyNow ?? signal.reasoning?.slice(0, 100) ?? "?"}`,
+            `Edge: ${escapeHtml(signal.whyNow ?? signal.reasoning?.slice(0, 100) ?? "?")}`,
             `Entry: $${signal.entry ?? signal.price} | SL: $${signal.stopLoss?.toFixed(4) ?? "?"} | TP1: $${signal.tp1?.toFixed(4) ?? "?"}`,
           ].join("\n")).catch(() => {});
         }
@@ -1888,13 +1889,13 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           ``,
           `📊 Setup: ${opp.setupType ?? "?"} (${opp.setupQuality ?? "?"} quality)`,
           `⏰ Timing: ${opp.timing ?? "?"}`,
-          `🎯 Edge: ${opp.whyNow ?? opp.reasoning?.slice(0, 120) ?? "?"}`,
+          `🎯 Edge: ${escapeHtml(opp.whyNow ?? opp.reasoning?.slice(0, 120) ?? "?")}`,
           opp.relativeStrengthVsBtc != null && opp.relativeStrengthVsBtc !== 0
             ? `📉 vs BTC: ${opp.relativeStrengthVsBtc > 0 ? "+" : ""}${(opp.relativeStrengthVsBtc as number).toFixed(1)}%`
             : null,
           opp.squeezeDetected ? `💰 Squeeze setup detected` : null,
           (opp.conflicts as string[] | undefined)?.length
-            ? `⚔️ Conflicts: ${(opp.conflicts as string[]).join("; ")}`
+            ? `⚔️ Conflicts: ${escapeHtml((opp.conflicts as string[]).join("; "))}`
             : `⚔️ Conflicts: none`,
           ``,
           `Entry: ${opp.orderType === "limit" ? `limit $${opp.limitPrice ?? opp.entry ?? "?"}` : "market"} | Score: ${opp.score} → ${rMult}R`,
@@ -2527,7 +2528,7 @@ async function runPositionReview(
         .catch(e => console.error(`[posMonitor] ADJUST_SL ${pos.symbol}:`, (e as Error).message));
       const lastNotify = lastAdjustSlNotifyAt[pos.symbol] ?? 0;
       if (Date.now() - lastNotify >= ADJUST_SL_NOTIFY_COOLDOWN_MS) {
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: ADJUST_SL → $${newSl.toFixed(4)}\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
         lastAdjustSlNotifyAt[pos.symbol] = Date.now();
       } else {
         console.log(`[posMonitor] ADJUST_SL ${pos.symbol} → $${newSl.toFixed(4)} (notify suppressed — cooldown)`);
@@ -2549,8 +2550,8 @@ async function runPositionReview(
     `${prefix}`,
     `P/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`,
     ``,
-    `Claude: ${reviewDecision}`,
-    `Reason: ${reason.slice(0, 200)}`,
+    `Claude: ${escapeHtml(reviewDecision)}`,
+    `Reason: ${escapeHtml(reason.slice(0, 200))}`,
   ].join("\n")).catch(() => {});
 
   if (upper.startsWith("CLOSE")) {
@@ -2559,7 +2560,7 @@ async function runPositionReview(
     const closeFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
     await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: closeFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
     await clearPositionMeta(pos.symbol).catch(() => {});
-    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ executed\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+    await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: CLOSE ✅ executed\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
 
   } else if (upper.startsWith("PARTIAL_CLOSE")) {
     const m   = text.match(/PARTIAL_CLOSE\s+(\d+)/i);
@@ -2576,17 +2577,17 @@ async function runPositionReview(
         const dustFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
         await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: dustFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       } else {
         // Partial would leave dust — skip and hold
         console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} skipped — would leave dust ($${afterPartialUsd.toFixed(2)})`);
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial close skipped — would leave dust ($${afterPartialUsd.toFixed(2)})\nHOLDING\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial close skipped — would leave dust ($${afterPartialUsd.toFixed(2)})\nHOLDING\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       }
     } else {
       await closePercentPosition(pos.symbol, pct)
         .catch(e => console.error(`[posMonitor] PARTIAL_CLOSE ${pos.symbol}:`, (e as Error).message));
       logPartialClose({ symbol: pos.symbol, partialType: "review_partial", closePct: pct, priceAtClose: currentPrice, pnlPct, remainingPct: 100 - pct }).catch(() => {});
-      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ executed\n${reason}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nClaude: PARTIAL_CLOSE ${pct}% ✅ executed\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
     }
   }
 
