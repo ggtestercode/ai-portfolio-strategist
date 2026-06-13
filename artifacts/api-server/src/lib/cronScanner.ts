@@ -1849,17 +1849,50 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           stopLossMethod:  opp.stopLossMethod,
         }).catch(e => { console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message); return null; });
 
-        // Determine which active rules apply to this trade
+        // Selective rule tagging — only tag a rule if it genuinely applied to this trade.
+        // Matching on ruleNumber (stable across regens) not on PK id.
+        // Per-symbol regime from opp.symRegime (NOT BTC proxy regime) for regime-gated rules.
+        const symReg  = opp.symRegime;
+        const setup   = (opp.setupType ?? "").toUpperCase();
+        const score   = opp.score ?? 0;
+        const isShort = actualDirection === "short";
+
         const activeRulesForTag = await getActiveRules().catch(() => [] as Awaited<ReturnType<typeof getActiveRules>>);
         const appliedRuleIds = activeRulesForTag
           .filter(r => {
-            // Rule 2: STRONG_TREND confluence — only applies to STRONG_TREND short entries
-            if (r.ruleNumber === 2) return regime?.regime === "STRONG_TREND" && actualDirection === "short";
-            // Rules 1, 3 and any future rules: always apply
-            return true;
+            switch (r.ruleNumber) {
+              // Rule 1: HARD VETO (code-enforced downtrend gate) — veto trades are invisible,
+              // tagging passing trades measures global win rate not the rule. Skip.
+              case 1:  return false;
+
+              // Universal rules — apply to every executed trade
+              case 2:  return true;   // pre-entry checklist: SL/TP1/TP2 required
+              case 3:  return true;   // TP1 calibration by regime
+              case 4:  return true;   // entry candle direction filter (condition not detectable at tag time)
+              case 6:  return true;   // SL width by regime
+              case 7:  return true;   // TP execution verification
+              case 8:  return true;   // no partial closes below entry
+              case 12: return true;   // move SL to breakeven after TP1
+              case 15: return true;   // adverse entry candle SL placement (condition not detectable at tag time)
+
+              // Directional: short trades only
+              case 5:  return isShort;   // RS leadership veto on shorts
+              case 10: return isShort;   // volume climax exhaustion filter for shorts
+
+              // Regime-gated: per-symbol regime (not BTC proxy)
+              case 9:  return symReg === "STRONG_TREND" && setup.includes("MOMENTUM") && score >= 78;
+              case 11: return symReg === "CHOPPY";
+              case 14: return symReg === "RANGING" || symReg === "EXHAUSTION";
+
+              // Rule 13: Version B premium limit — VB data unavailable at tag time. Skip.
+              case 13: return false;
+
+              // Unknown future rules: tag all by default (safe fallback)
+              default: return true;
+            }
           })
           .map(r => r.id);
-        console.log(`[rules] Tagged ${sym} with rule IDs: [${appliedRuleIds.join(", ")}]`);
+        console.log(`[rules] Tagged ${sym} dir=${actualDirection} regime=${symReg ?? "?"} setup=${setup} score=${score} → rule IDs: [${appliedRuleIds.join(", ")}]`);
 
         // Patch trade_log row with signal TP1/TP2/SL for durable partial-exit tracking
         // Also reconcile entryPrice and leverage from actual Bybit fill (livePos already fetched above)

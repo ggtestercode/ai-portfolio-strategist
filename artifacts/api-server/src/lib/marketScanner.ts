@@ -75,6 +75,7 @@ export interface ScanOpportunity {
   relativeStrengthVsBtc?: number;
   rMultiple?:           number;
   blowoffSuspected?:    boolean;  // 4h blowoff pattern detected at entry (informational only)
+  symRegime?:           RegimeType; // per-symbol 4h regime at entry (NOT BTC proxy) — used for rule selectivity
 }
 
 // ── Technical indicators ──────────────────────────────────────────────────────
@@ -887,6 +888,7 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
   for (const opp of opportunities) {
     const symR = symRegimeMap.get(opp.symbol);
     if (symR && symR.atr > 0) opp.atr = symR.atr;
+    if (symR) opp.symRegime = symR.regime;   // propagate per-symbol regime for rule selectivity
     const bf = blowoffMap.get(opp.symbol);
     if (bf?.suspected) opp.blowoffSuspected = true;
   }
