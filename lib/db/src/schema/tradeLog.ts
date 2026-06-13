@@ -24,6 +24,7 @@ export const tradeLogTable = pgTable("trade_log", {
   score:     numeric("score",     { precision: 8,  scale: 2 }),
   whyNow:         text("why_now"),
   appliedRuleIds: jsonb("applied_rule_ids").$type<number[]>(),
+  blowoffSuspected: text("blowoff_suspected"),  // "1" when 4h blowoff pattern was present at entry; null otherwise
 });
 
 export type TradeLog       = typeof tradeLogTable.$inferSelect;

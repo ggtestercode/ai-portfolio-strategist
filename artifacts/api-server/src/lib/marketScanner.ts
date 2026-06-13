@@ -74,6 +74,7 @@ export interface ScanOpportunity {
   squeezeDetected?:     boolean;
   relativeStrengthVsBtc?: number;
   rMultiple?:           number;
+  blowoffSuspected?:    boolean;  // 4h blowoff pattern detected at entry (informational only)
 }
 
 // ── Technical indicators ──────────────────────────────────────────────────────
@@ -111,6 +112,67 @@ export function calcATR(klines: BybitKline[], period = 14): number {
   let atr = trs.slice(0, period).reduce((s, v) => s + v, 0) / period;
   for (let i = period; i < trs.length; i++) atr = (atr * (period - 1) + trs[i]!) / period;
   return atr;
+}
+
+// ── 4h Blowoff / Exhaustion detection ────────────────────────────────────────
+// Scans the last ~5 COMPLETED 4h candles (skips [length-1] which is in-progress)
+// and finds the most blowoff-like one.  Returns its metrics plus a boolean flag
+// when all four thresholds are simultaneously met.
+//
+// Thresholds calibrated from XMR blowoff (flags) vs ATOM healthy trend (clean):
+//   range/ATR ≥ 2.5   XMR: 3.55×  ATOM worst: 1.32×
+//   close_pos ≤ 0.30  XMR: 0.097  ATOM: never <0.17 on a large candle
+//   vol/avg20 ≥ 3.0   XMR: 5.51×  ATOM worst: 2.69×
+//   run20     ≥ 15%   XMR: 27.4%  ATOM worst: 15.7% (fails other gates)
+//
+// flag is INFORMATIONAL — no suppression, no score change, no regime relabel.
+
+interface BlowoffMetrics {
+  rangeAtr:  number;  // (high − low) / ATR14
+  closePos:  number;  // (close − low) / (high − low)  [0 = closed at low]
+  volRatio:  number;  // candle vol / mean(prev 20 vols)
+  run20:     number;  // (close − min_low_prev_20) / min_low_prev_20  [%]
+  suspected: boolean; // true when all four thresholds are simultaneously met
+}
+
+function detectBlowoff(symK4h: BybitKline[], atr: number): BlowoffMetrics | null {
+  // Need ≥25 candles: 20 for vol/run lookback + a few completed before in-progress
+  if (symK4h.length < 25 || atr <= 0) return null;
+
+  const n         = symK4h.length;
+  const scanEnd   = n - 2;                    // [n-1] is in-progress — never measure it
+  const scanStart = Math.max(21, n - 6);      // up to 5 completed candles, each needs 20 prior
+
+  let flagged: BlowoffMetrics | null = null;  // first candle that passes all 4 gates
+  let biggest: BlowoffMetrics | null = null;  // candle with highest range/ATR
+
+  for (let i = scanEnd; i >= scanStart; i--) {
+    const c   = symK4h[i]!;
+    const rng = c.high - c.low;
+    if (rng <= 0) continue;
+
+    const rangeAtr = rng / atr;
+    const closePos = (c.close - c.low) / rng;
+
+    // Use the 20 candles immediately before this one for the vol average and run base.
+    // slice(i-20, i) is exactly the completed window without the spike candle itself.
+    const prior  = symK4h.slice(i - 20, i);
+    const avgVol = prior.reduce((s, k) => s + k.volume, 0) / prior.length;
+    const volRatio = avgVol > 0 ? c.volume / avgVol : 0;
+
+    const minLow = Math.min(...prior.map(k => k.low));
+    const run20  = minLow > 0 ? (c.close - minLow) / minLow * 100 : 0;
+
+    const suspected = rangeAtr >= 2.5 && closePos <= 0.30 && volRatio >= 3.0 && run20 >= 15;
+    const m: BlowoffMetrics = { rangeAtr, closePos, volRatio, run20, suspected };
+
+    if (suspected && !flagged) flagged = m;
+    if (!biggest || rangeAtr > biggest.rangeAtr) biggest = m;
+  }
+
+  // Show the flagged candle's metrics when a blowoff is detected; otherwise the
+  // most extreme recent candle (useful context even when thresholds aren't met).
+  return flagged ?? biggest;
 }
 
 // Full Wilder ADX with +DI / -DI
@@ -487,6 +549,7 @@ async function runPhase2(
   const sweepMap     = new Map<string, SweepResult>();
   const squeezeMap   = new Map<string, string>();
   const symRegimeMap = new Map<string, { regime: RegimeType; adx: number; diPlus: number; diMinus: number; atr: number }>();
+  const blowoffMap   = new Map<string, BlowoffMetrics>();
 
   // ── Recent exits (last 24h) per selected symbol ───────────────────────────
   try {
@@ -549,7 +612,14 @@ async function runPhase2(
         getFundingHistory(sym, 24).catch(() => [] as number[]),
       ]);
       const { summary: mtf, klines1h, klines15m, klines4h: symK4h } = mtfResult;
-      if (symK4h.length >= 29) symRegimeMap.set(sym, classifySymbolRegime(symK4h));
+      if (symK4h.length >= 29) {
+        const symR = classifySymbolRegime(symK4h);
+        symRegimeMap.set(sym, symR);
+        // Detect 4h blowoff — reads ATR already computed by classifySymbolRegime,
+        // scans last 5 completed candles (skips [length-1] which is still forming).
+        const bf = detectBlowoff(symK4h, symR.atr);
+        if (bf) blowoffMap.set(sym, bf);
+      }
       const rSign = fr.rate >= 0 ? "+" : "";
       const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
       mtfLines.push(`${sym} MTF: ${mtf}`);
@@ -613,10 +683,14 @@ async function runPhase2(
   }
 
   for (const sym of selectedSymbols) {
-    const r = symRegimeMap.get(sym);
+    const r  = symRegimeMap.get(sym);
+    const bf = blowoffMap.get(sym);
     if (r) {
-      const src = btcIsDirectional ? `BTC (${regime.regime})` : `own (${r.regime})`;
-      console.log(`[regime] ${sym}: own=${r.regime} ADX=${r.adx.toFixed(1)} DI+=${r.diPlus.toFixed(1)} DI-=${r.diMinus.toFixed(1)} ATR=${r.atr.toFixed(2)} → caps from ${src}`);
+      const src      = btcIsDirectional ? `BTC (${regime.regime})` : `own (${r.regime})`;
+      const bfSuffix = bf
+        ? ` 4h_spike:range=${bf.rangeAtr.toFixed(2)}xATR close=${bf.closePos.toFixed(2)} vol=${bf.volRatio.toFixed(2)}xavg run20=${bf.run20 >= 0 ? "+" : ""}${bf.run20.toFixed(0)}%${bf.suspected ? " ⚠️BLOWOFF_SUSPECTED" : ""}`
+        : "";
+      console.log(`[regime] ${sym}: own=${r.regime} ADX=${r.adx.toFixed(1)} DI+=${r.diPlus.toFixed(1)} DI-=${r.diMinus.toFixed(1)} ATR=${r.atr.toFixed(2)} → caps from ${src}${bfSuffix}`);
     }
   }
 
@@ -708,14 +782,21 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
 
   // Per-symbol regime section: shows each symbol's own 4h ADX/DI alongside BTC proxy.
   // When BTC is non-directional the cap column tells Claude which band governs each symbol.
+  // Also appends computed 4h candle metrics (range/ATR, close position, volume ratio, run-up)
+  // for the most extreme recent completed candle.  ⚠️BLOWOFF_SUSPECTED fires when all four
+  // thresholds are met simultaneously — informational only, no suppression, no score change.
   const perSymbolRegimeSection = (() => {
     if (symRegimeMap.size === 0) return "";
     const lines = selectedSymbols.flatMap(sym => {
-      const r = symRegimeMap.get(sym);
+      const r  = symRegimeMap.get(sym);
       if (!r) return [];
+      const bf = blowoffMap.get(sym);
+      const bfStr = bf
+        ? ` | 4h_spike: range=${bf.rangeAtr.toFixed(1)}×ATR close=${bf.closePos.toFixed(2)} vol=${bf.volRatio.toFixed(1)}×avg run20=${bf.run20 >= 0 ? "+" : ""}${bf.run20.toFixed(0)}%${bf.suspected ? " ⚠️BLOWOFF_SUSPECTED" : ""}`
+        : "";
       return btcIsDirectional
-        ? [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)}`]
-        : [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)} → ${tpCapShort(r.regime)}`];
+        ? [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)}${bfStr}`]
+        : [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)} → ${tpCapShort(r.regime)}${bfStr}`];
     });
     if (lines.length === 0) return "";
     return btcIsDirectional
@@ -802,9 +883,12 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
   const opportunities = res.data.opportunities ?? [];
   // Override atr with each symbol's own 4h ATR computed from its klines.
   // Prevents Claude from copying the BTC regime ATR (prominently shown in the prompt) into alt trade records.
+  // Also propagate blowoffSuspected — pre-computed, not set by Claude.
   for (const opp of opportunities) {
     const symR = symRegimeMap.get(opp.symbol);
     if (symR && symR.atr > 0) opp.atr = symR.atr;
+    const bf = blowoffMap.get(opp.symbol);
+    if (bf?.suspected) opp.blowoffSuspected = true;
   }
   return opportunities;
 }

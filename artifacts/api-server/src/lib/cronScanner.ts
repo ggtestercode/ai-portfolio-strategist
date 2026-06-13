@@ -1525,13 +1525,14 @@ async function runWatchScan(): Promise<void> {
             }
             await db.update(tradeLogTable)
               .set({
-                tp1:       signal.tp1      ? String(signal.tp1)      : null,
-                tp2:       signal.tp2      ? String(signal.tp2)      : null,
-                sl:        signal.stopLoss ? String(signal.stopLoss) : null,
-                atr:       signal.atr      ? String(signal.atr)      : null,
-                setupType: signal.setupType ?? null,
-                score:     signal.score    ? String(signal.score)    : null,
-                whyNow:    signal.whyNow   ?? null,
+                tp1:              signal.tp1      ? String(signal.tp1)      : null,
+                tp2:              signal.tp2      ? String(signal.tp2)      : null,
+                sl:               signal.stopLoss ? String(signal.stopLoss) : null,
+                atr:              signal.atr      ? String(signal.atr)      : null,
+                setupType:        signal.setupType ?? null,
+                score:            signal.score    ? String(signal.score)    : null,
+                whyNow:           signal.whyNow   ?? null,
+                blowoffSuspected: signal.blowoffSuspected ? "1" : null,
               })
               .where(newTradeId
                 ? eq(tradeLogTable.id, newTradeId)
@@ -1868,14 +1869,15 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         }
         await db.update(tradeLogTable)
           .set({
-            tp1:            opp.tp1      ? String(opp.tp1)      : null,
-            tp2:            opp.tp2      ? String(opp.tp2)      : null,
-            sl:             opp.stopLoss ? String(opp.stopLoss) : null,
-            atr:            opp.atr      ? String(opp.atr)      : null,
-            setupType:      opp.setupType ?? null,
-            score:          opp.score    ? String(opp.score)    : null,
-            whyNow:         opp.whyNow   ?? null,
-            appliedRuleIds: appliedRuleIds.length ? appliedRuleIds : null,
+            tp1:              opp.tp1      ? String(opp.tp1)      : null,
+            tp2:              opp.tp2      ? String(opp.tp2)      : null,
+            sl:               opp.stopLoss ? String(opp.stopLoss) : null,
+            atr:              opp.atr      ? String(opp.atr)      : null,
+            setupType:        opp.setupType ?? null,
+            score:            opp.score    ? String(opp.score)    : null,
+            whyNow:           opp.whyNow   ?? null,
+            appliedRuleIds:   appliedRuleIds.length ? appliedRuleIds : null,
+            blowoffSuspected: opp.blowoffSuspected ? "1" : null,
             ...(livePos ? { entryPrice: String(livePos.entryPrice), leverage: livePos.leverage } : {}),
           })
           .where(newTradeId
@@ -1894,6 +1896,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             ? `📉 vs BTC: ${opp.relativeStrengthVsBtc > 0 ? "+" : ""}${(opp.relativeStrengthVsBtc as number).toFixed(1)}%`
             : null,
           opp.squeezeDetected ? `💰 Squeeze setup detected` : null,
+          opp.blowoffSuspected ? `⚠️ BLOWOFF_SUSPECTED at entry — 4h exhaustion pattern present` : null,
           (opp.conflicts as string[] | undefined)?.length
             ? `⚔️ Conflicts: ${escapeHtml((opp.conflicts as string[]).join("; "))}`
             : `⚔️ Conflicts: none`,
