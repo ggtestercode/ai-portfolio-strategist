@@ -1852,6 +1852,11 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         // Selective rule tagging — only tag a rule if it genuinely applied to this trade.
         // Matching on ruleNumber (stable across regens) not on PK id.
         // Per-symbol regime from opp.symRegime (NOT BTC proxy regime) for regime-gated rules.
+        //
+        // getActiveRules() returns only WHERE active=true — inactive rules are never in this
+        // list and therefore can never be tagged regardless of their ruleNumber.
+        // If a rule is later reactivated it accumulates attribution only from that point
+        // forward; trades entered while it was inactive carry no retroactive tag for it.
         const symReg  = opp.symRegime;
         const setup   = (opp.setupType ?? "").toUpperCase();
         const score   = opp.score ?? 0;
