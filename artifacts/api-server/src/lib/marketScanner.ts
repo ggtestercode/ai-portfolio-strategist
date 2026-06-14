@@ -474,9 +474,14 @@ function tpCapShort(r: RegimeType): string {
     case "STRONG_TREND":
     case "TRENDING_UP":   return "TP1 2–3%, TP2 4–8%";
     case "TRENDING_DOWN": return "longs hard-blocked; shorts TP1 2–3%, TP2 4–6%";
-    case "RANGING":       return "TP1 max 1.5%, TP2 max 2.5%";
+    case "RANGING":       return "TP1 max 1.5%, TP2 max 2.5% — NOTE: no clean RANGING SL data yet; same R:R math as CHOPPY applies — verify first RANGING trade clears R:R 1.1 at realistic structural SL.";
     case "EXHAUSTION":    return "TP1 max 2.0%, TP2 max 3.5%";
-    case "CHOPPY":        return "TP1 max 1.5%, TP2 max 2.5% — CHOPPY regime compresses achievable moves to ~1–2% before reversal; place TP1 at nearest structural level within this cap, not a mechanical %.";
+    // CHOPPY: TP1 capped at 1.5% (evidenced — SOL moved 1.22%, 2.5% TP1 was unreachable; first partial must be reachable).
+    // TP2 at 3.5%: blended reward = 0.30×1.5 + 0.70×3.5 = 2.9%; max SL for R:R≥1.1 = 2.64% — clears realistic CHOPPY SLs (2.3–3%).
+    // TP2 was briefly 2.5% (made CHOPPY un-enterable: max SL only 2.0%, 8/9 historical trades failed gate).
+    // Protection from riding reversals comes from the 0.8% early-breakeven trigger (Option B, cronScanner),
+    // NOT from a tight TP2. TP2 only needs to clear R:R at realistic SLs.
+    case "CHOPPY":        return "TP1 max 1.5%, TP2 max 3.5% — CHOPPY compresses moves to ~1–2% before reversal; TP1 at nearest structural level within cap. TP2 at 3.5% keeps R:R viable (blended 2.9% vs typical 2.3–3% SL). Reversal protection comes from the 0.8% early-breakeven trigger, not a tight TP2.";
     default:              return "TP1 within 1–3× ATR";
   }
 }
@@ -816,7 +821,7 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
           : regime.regime === "TRENDING_DOWN"
           ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 2–3%, TP2 4–6%."
           : regime.regime === "CHOPPY"
-          ? "TP1 max 1.5%, TP2 max 2.5% — CHOPPY; moves ~1–2% before reversal. Structural level within cap."
+          ? "TP1 max 1.5%, TP2 max 3.5% — CHOPPY; moves ~1–2% before reversal. TP1 at nearest structural level within cap. TP2 at 3.5% keeps R:R viable at realistic SLs; reversal protection from 0.8% early-breakeven trigger."
           : "TP1 within 1–3× ATR from structural level."
       }`
     : `TP calibration: BTC is ${regime.regime} (non-directional) — use each symbol's own caps from the per-symbol regime block above.`;
