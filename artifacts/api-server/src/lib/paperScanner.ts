@@ -935,9 +935,14 @@ export async function sendWeeklyAbReport(alertFn: (msg: string) => Promise<void>
 export function startPaperMonitorCron(alertFn?: (msg: string) => Promise<void>): void {
   if (alertFn) _paperAlertFn = alertFn;  // store for DB write failure alerts
   // every 5 minutes — monitors both version B and mode3 paper trades
-  cron.schedule("*/5 * * * *", () => {
-    void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));
-  });
+  // Gated: skipped when PAPER_TRADING_ENABLED=false (nothing to monitor, DB query errors every tick)
+  if (process.env["PAPER_TRADING_ENABLED"] !== "false") {
+    cron.schedule("*/5 * * * *", () => {
+      void updatePaperTradesPnl().catch(e => console.error("[paperMonitor] cron error:", e));
+    });
+  } else {
+    console.log("[paperMonitor] 5-min P/L cron skipped — PAPER_TRADING_ENABLED=false");
+  }
 
   // Daily midnight SGT (= 16:00 UTC) — learning loop health check
   cron.schedule("0 16 * * *", async () => {
