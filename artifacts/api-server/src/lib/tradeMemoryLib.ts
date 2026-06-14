@@ -1487,7 +1487,9 @@ export async function generateTradingRules(force = false): Promise<void> {
           causalLogic: sql`excluded.causal_logic`,
           confidence:  sql`excluded.confidence`,
           occurrences: sql`excluded.occurrences`,
-          active:      sql`excluded.active`,
+          // active intentionally NOT updated — regen never reactivates an inactive rule.
+          // Reactivation must be done explicitly. Slug-based identity (deferred) will
+          // replace rule_number as the UPSERT target before the next real regen.
           updatedAt:   sql`excluded.updated_at`,
           // winsFollowing and lossesFollowing NOT here — preserved across regens
         },
@@ -1497,11 +1499,16 @@ export async function generateTradingRules(force = false): Promise<void> {
     console.log(`[rules] Rule ${rule.ruleNumber} [${rule.confidence}]: ${rule.ruleText.slice(0, 80)}`);
   }
 
-  // Trim: remove rules whose numbers are no longer in the generated set.
-  // Scoped delete (not delete-all) — only obsolete rule_numbers are removed.
+  // Trim: remove ACTIVE rules whose numbers are no longer in the generated set.
+  // Inactive rules (4,6,9,12,13) are excluded from deletion — they are preserved
+  // until explicitly reactivated or removed. Slug-based identity (deferred) will
+  // make this fully robust; for now the active=true guard prevents silent wipe.
   const newNumbers = validRules.map(r => r.ruleNumber);
   await db.delete(tradingRulesTable)
-    .where(notInArray(tradingRulesTable.ruleNumber, newNumbers))
+    .where(and(
+      notInArray(tradingRulesTable.ruleNumber, newNumbers),
+      eq(tradingRulesTable.active, true),
+    ))
     .catch(e => console.error("[rules] Trim obsolete rules:", e));
 
   console.log(`[rules] Upserted ${generated} rules, trimmed to set [${newNumbers.join(",")}] from ${reflections.length} reflections`);
