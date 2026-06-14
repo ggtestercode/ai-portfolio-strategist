@@ -476,7 +476,7 @@ function tpCapShort(r: RegimeType): string {
     case "TRENDING_DOWN": return "longs hard-blocked; shorts TP1 2–3%, TP2 4–6%";
     case "RANGING":       return "TP1 max 1.5%, TP2 max 2.5%";
     case "EXHAUSTION":    return "TP1 max 2.0%, TP2 max 3.5%";
-    case "CHOPPY":        return "TP1 max 2.5%, TP2 max 4.0%";
+    case "CHOPPY":        return "TP1 max 1.5%, TP2 max 2.5% — CHOPPY regime compresses achievable moves to ~1–2% before reversal; place TP1 at nearest structural level within this cap, not a mechanical %.";
     default:              return "TP1 within 1–3× ATR";
   }
 }
@@ -815,6 +815,8 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
           ? "TP1 2–3% from entry, TP2 4–8% from entry. WARNING: 6–8% TP1 sits in the empirical dead zone — no STRONG_TREND long peaked between 3% and 8%. That setting misses the early partial and pushes TP2 to unreachable 16%+."
           : regime.regime === "TRENDING_DOWN"
           ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 2–3%, TP2 4–6%."
+          : regime.regime === "CHOPPY"
+          ? "TP1 max 1.5%, TP2 max 2.5% — CHOPPY; moves ~1–2% before reversal. Structural level within cap."
           : "TP1 within 1–3× ATR from structural level."
       }`
     : `TP calibration: BTC is ${regime.regime} (non-directional) — use each symbol's own caps from the per-symbol regime block above.`;

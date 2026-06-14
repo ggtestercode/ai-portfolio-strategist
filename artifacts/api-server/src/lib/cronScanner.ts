@@ -2167,6 +2167,19 @@ async function checkPositionMonitor(): Promise<void> {
   const currentSymbols = new Set(positions.map(p => p.symbol));
   for (const sym of prevPositionSymbols) {
     if (!currentSymbols.has(sym)) {
+      // Observation log for CHOPPY-calibrated trades before meta is cleared.
+      // Grep [choppy_be] to audit whether 0.8% breakeven trigger is stopping out on noise.
+      const closingMeta = posMeta[sym];
+      if (closingMeta) {
+        const closingTp1  = typeof closingMeta.tp1 === "number" ? closingMeta.tp1 : parseFloat(String(closingMeta.tp1 ?? "0"));
+        const closingEntry = closingMeta.entryPrice ?? 0;
+        const closingTp1Dist = closingTp1 > 0 && closingEntry > 0
+          ? Math.abs((closingTp1 - closingEntry) / closingEntry * 100) : 0;
+        if (closingTp1Dist > 0 && closingTp1Dist <= 1.5) {
+          const peak = closingMeta.peakPnlPct ?? 0;
+          console.log(`[choppy_be] ${sym} CHOPPY position closed — peakPnlPct=+${peak.toFixed(2)}% tp1Dist=${closingTp1Dist.toFixed(2)}% | if peak>1.2% and closed near breakeven, 0.8% threshold may be too tight`);
+        }
+      }
       await clearPositionMeta(sym).catch(() => {});
       await removePendingLimitFill(sym).catch(() => {});
       selfHealAttempted.delete(sym);
@@ -2338,20 +2351,34 @@ async function checkPositionMonitor(): Promise<void> {
       continue;
     }
 
-    // Mechanical breakeven: when P/L ≥ +2% and SL is still below entry (longs) or above entry (shorts),
-    // move SL to entry. Self-gating — fires once, then the condition is never true again.
-    if (pnlPct >= 2 && pos.entryPrice > 0) {
+    // Mechanical breakeven: regime-aware threshold via TP1 distance.
+    // If TP1 was set within 1.5% of entry (CHOPPY-calibrated scan target), fire at +0.8% —
+    // protecting directionally-correct CHOPPY trades before the typical ~1.2% reversal.
+    // All other trades (TP1 > 1.5% = trending calibration) keep the standard +2% threshold.
+    // THINLY EVIDENCED: based on 2 clean CHOPPY directional trades (SOL, ATOM Jun 12).
+    // Tune the 0.8% threshold from [choppy_be] observation logs over the next 10-15 CHOPPY trades.
+    const tp1Meta    = posMeta[pos.symbol]?.tp1;
+    const tp1Price   = typeof tp1Meta === "number" ? tp1Meta : parseFloat(String(tp1Meta ?? "0"));
+    const tp1DistPct = tp1Price > 0 && pos.entryPrice > 0
+      ? Math.abs((tp1Price - pos.entryPrice) / pos.entryPrice * 100) : 0;
+    const isChoppyCalibrated = tp1DistPct > 0 && tp1DistPct <= 1.5;
+    const beTriggerPct = isChoppyCalibrated ? 0.8 : 2;
+    if (pnlPct >= beTriggerPct && pos.entryPrice > 0) {
       const beSlRaw = posMeta[pos.symbol]?.sl ?? pos.stopLoss ?? 0;
       const beSl    = typeof beSlRaw === "number" ? beSlRaw : parseFloat(String(beSlRaw) || "0");
       const isLong  = pos.side === "Buy";
       const needsBe = beSl > 0 && (isLong ? beSl < pos.entryPrice : beSl > pos.entryPrice);
       if (needsBe) {
+        if (isChoppyCalibrated) {
+          const peak = posMeta[pos.symbol]?.peakPnlPct ?? pnlPct;
+          console.log(`[choppy_be] ${pos.symbol} CHOPPY early breakeven triggered — pnl=+${pnlPct.toFixed(2)}% threshold=${beTriggerPct}% tp1Dist=${tp1DistPct.toFixed(2)}% peakSoFar=+${peak.toFixed(2)}%`);
+        }
         await bybitSetStopLoss(pos.symbol, pos.entryPrice, pos.positionIdx)
           .catch(e => console.warn(`[posMonitor] Breakeven SL failed ${pos.symbol}:`, (e as Error).message));
         await patchPositionMeta(pos.symbol, { sl: pos.entryPrice }).catch(() => {});
         db.update(tradeLogTable).set({ effectiveSl: String(pos.entryPrice) })
           .where(and(eq(tradeLogTable.symbol, pos.symbol), isNull(tradeLogTable.exitAt))).catch(() => {});
-        console.log(`[posMonitor] ${pos.symbol} SL → breakeven $${pos.entryPrice.toFixed(4)} (P/L ${pnlPct.toFixed(1)}% ≥ +2%)`);
+        console.log(`[posMonitor] ${pos.symbol} SL → breakeven $${pos.entryPrice.toFixed(4)} (P/L ${pnlPct.toFixed(1)}% ≥ +${beTriggerPct}%)`);
         await alertFn?.(`🛡️ <b>Breakeven SL — ${pos.symbol}</b>\nP/L +${pnlPct.toFixed(1)}% → SL moved to entry $${pos.entryPrice.toFixed(4)}`).catch(() => {});
       }
     }
