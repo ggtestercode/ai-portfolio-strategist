@@ -2208,8 +2208,10 @@ async function checkPositionMonitor(): Promise<void> {
         }
       }
       const closed   = await bybitGetClosedPnl(50, startMs, sym).catch(() => []);
+      const entryAnchorMs = entryAtDate ? entryAtDate.getTime() : (startMs ?? 0);
       const matching = closed
         .filter(c => entryPx <= 0 || Math.abs(c.avgEntryPrice / entryPx - 1) < 0.06)
+        .filter(c => c.closedAt >= entryAnchorMs - 10_000)
         .sort((a, b) => a.closedAt - b.closedAt);
       const totalPnl = matching.reduce((s, c) => s + c.closedPnl, 0);
       const trade    = matching[matching.length - 1]; // final close = exit price

@@ -386,8 +386,10 @@ async function reconcileClosedPositions(): Promise<void> {
     const entryPx = parseFloat(trade.entryPrice ?? "0");
     const startMs = trade.entryAt ? Math.max(0, trade.entryAt.getTime() - 4 * 60 * 60 * 1000) : undefined;
     const closed   = await bybitGetClosedPnl(50, startMs, trade.symbol).catch(() => []);
+    const entryAnchorMs = trade.entryAt ? trade.entryAt.getTime() : 0;
     const matching = closed
       .filter(c => entryPx <= 0 || Math.abs(c.avgEntryPrice / entryPx - 1) < 0.06)
+      .filter(c => c.closedAt >= entryAnchorMs - 10_000)
       .sort((a, b) => a.closedAt - b.closedAt);
     const totalPnl = matching.reduce((s, c) => s + c.closedPnl, 0);
     const record   = matching[matching.length - 1]; // final close = exit price
