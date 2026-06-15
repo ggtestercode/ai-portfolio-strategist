@@ -2760,19 +2760,30 @@ async function runPositionReview(
     const currentSizeUsd  = pos.size * (pos.markPrice ?? pos.entryPrice);
     const afterPartialUsd = currentSizeUsd * (1 - pct / 100);
 
-    if (afterPartialUsd < 5) {
+    if (afterPartialUsd < 10) {
       if (currentSizeUsd < 5) {
-        // Position already dust — close fully
+        // Branch A (unchanged): position already dust — close fully
         await bybitClose(pos.symbol)
           .catch(e => console.error(`[posMonitor] CLOSE (dust) ${pos.symbol}:`, (e as Error).message));
         const dustFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
         await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: dustFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
         await clearPositionMeta(pos.symbol).catch(() => {});
         await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial → CLOSE (position is dust $${currentSizeUsd.toFixed(2)})\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+      } else if (pct > 50) {
+        // Branch B exit-intent: Claude wants to close more than keep (pct>50) →
+        // honor with full close rather than leaving a sub-$10 remnant.
+        console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} ${pct}% → CLOSE 100% (exit intent: remainder $${afterPartialUsd.toFixed(2)} < $10)`);
+        await bybitClose(pos.symbol)
+          .catch(e => console.error(`[posMonitor] CLOSE (exit-intent) ${pos.symbol}:`, (e as Error).message));
+        const exitFill = await fetchActualFillPrice(pos.symbol, pos.entryPrice, pos.markPrice ?? pos.entryPrice);
+        await closeOpenTrade({ symbol: pos.symbol, broker: "bybit", exitPrice: exitFill, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
+        await clearPositionMeta(pos.symbol).catch(() => {});
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\nPartial ${pct}% → CLOSE 100% (exit intent, remainder $${afterPartialUsd.toFixed(2)} too small to run)\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       } else {
-        // Partial would leave dust — skip and hold
-        console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} skipped — would leave dust ($${afterPartialUsd.toFixed(2)})`);
-        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial close skipped — would leave dust ($${afterPartialUsd.toFixed(2)})\nHOLDING\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+        // Branch B trim-intent: Claude wants to keep majority (pct ≤ 50) →
+        // don't partial-trim to a sub-$10 runner; hold the full position for TP2/SL outcome.
+        console.log(`[posMonitor] PARTIAL_CLOSE ${pos.symbol} ${pct}% skipped — remainder too small ($${afterPartialUsd.toFixed(2)}), holding full position for TP2/SL outcome`);
+        await alertFn?.(`${prefix}\nP/L: ${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%\n\n⚠️ Partial ${pct}% skipped — remainder too small ($${afterPartialUsd.toFixed(2)}), holding full position for TP2/SL outcome\n${escapeHtml(reason)}`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       }
     } else {
       await closePercentPosition(pos.symbol, pct)
