@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 3, 2026 (commit ec5df72)
+**Last updated:** June 15, 2026 (commit 2d2ef43)
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -71,21 +71,21 @@
 ## Recent Commits (last 15)
 | Commit | Description |
 |--------|-------------|
+| `2d2ef43` | fix(reflection): same 10s anchor guard in generateReflection bybitCloses fetch |
+| `95d8382` | fix(reconciler): exclude prior-trade closes from PnL matching |
+| `91e029b` | fix(posMonitor): intent-aware dust-guard for PARTIAL_CLOSE |
+| `6f8197c` | fix(posMonitor): volume-spike trigger direction-aware (hybrid Option B) |
+| `7191053` | fix(choppy): raise TP2 cap 2.5%→3.5% — restores CHOPPY R:R viability |
+| `7573073` | fix(choppy): regime-aware TP1 ceiling + early breakeven trigger |
+| `3ece093` | fix(rules): reset W/L stats + protect inactive rules from regen trim |
+| `f913a81` | fix(posMonitor): RSI>75 trigger direction+context aware — suppress on winning shorts |
+| `180871b` | fix(scan): silent scan-failure bug — Fix 6 (alert) + Fix 4 (verbosity + cap) |
+| `89e4532` | fix(gates): Rules 2/7/8 code enforcement |
 | `8b11f89` | docs: HANDOVER — SL ladder + accurate liq price (June 3) |
 | `9ef7c64` | feat: SL ladder + accurate liquidation price |
 | `5291d3f` | fix: SL integrity — priority chain + trailingActive inheritance |
 | `eda8458` | docs: HANDOVER.md — reconciler overwrite bug + DB corrections (June 2) |
-| `a999186` | fix: log Telegram send failures in cronScanner; confirm scan summary send |
-| `47afff4` | feat: /orders shows Bybit order age, SL/TP, stale cancel countdown |
-| `de99305` | fix: retry getOrders up to 3× with 2s delay in cancelStaleOrders |
-| `cb11b2f` | fix: getOrders logs+rethrows; recoverPendingLimitFills checks open orders |
-| `70b2d2c` | fix: lower R:R hard gate from 1.5 to 1.1 — both scan paths |
-| `ba3361d` | fix: raise R:R hard gate from 1.0 to 1.5 — both scan paths |
-| `449b0fc` | docs: HANDOVER.md — tp1 enforcement fix details |
-| `d3bfcf2` | fix: enforce tp1 > 0 — prompt + hard gate |
-| `6843be7` | feat: pending limit orders in Phase 2 scan prompt |
-| `68400c7` | feat: tp1ClosePercent/tp2ClosePercent — Claude controls exit sizing |
-| `1ef2339` | fix: pendingLimitFills persists to DB — survives restarts |
+| `ec5df72` | fix: SL on restart takes more-protective of trade_log.sl vs positionMetadata.sl |
 
 ---
 
@@ -97,6 +97,10 @@
 - **SL-to-liquidation buffer** — scan prompt now instructs Claude to keep SL ≥2% above (longs) / ≤2% below (shorts) liquidation price; liq price is now computed accurately from portfolioLeverage (capped 10×) not hardcoded. Informational — not a hard gate.
 - **Per-rule attribution (Option 2 — code-evaluated)** — Replace current `appliedRuleIds` approach (all active rules credited to every trade, making per-rule stats meaningless) with: code records which active rules were RELEVANT to each trade (e.g. Rule 1 only relevant if regime=TRENDING_DOWN) and whether the trade COMPLIED or VIOLATED each. Goal: "trades following Rule X win Y% vs violating Z%" — real signal on rule helpfulness. Only works for mechanically-checkable rules (regime, direction, TP/SL distance). Build AFTER DB reconciler fix — needs accurate P&L first.
 - **Portfolio-level total margin cap** — No guard against sum of all open position margins exceeding X% of balance. Each position is individually capped at 30%, but three simultaneous positions each at 30% = 90% margin deployed. Fine at current scale (2-3 positions, $20-50 balance). Add cap when balance grows beyond ~$100 and position count increases.
+- **backfillStructuredReflections does NOT call resolveExitReason** — infers `exit_method` from context only; mislabeled 6bdeb8b3's ratcheted-SL exit as "review" during June 15 backfill. Fix: query Bybit `/v5/order/history` for exit `createType` (`CreateByStopLoss` / `CreateByTakeProfit` / `CreateByUser`) in the backfill path. Minor — backfill-only; live path already correct; P&L and tp1_reached are accurate, only `exit_method` on backfilled rows is affected.
+- **Reconciler uses time-based fill attribution (not orderId)** — DB stores no Bybit `orderId` per trade. The 10s anchor guard eliminates the confirmed class of cross-attribution (prior same-symbol close). Only add orderId matching (schema change to `trade_log`) if a future overlap defeats the time filter (e.g., two same-symbol trades opened within 10s of each other).
+- **Do NOT regenerate rules until post-fix trades accumulate** — current 15 rules were partly built on corrupted P&L corpus (pre-June 15). Metrics are trustworthy for the first time after the reconciler fix; regenerate after 10+ clean trades close on corrected data.
+- **NEXT-SESSION TEST** — does R:R rise above 0.70 on post-fix trades vs the clean baseline? Baseline: win rate 41.3%, net −$41.15, avg win $0.889, avg loss −$1.268, R:R 0.70 (109 trades, last 30 days, Jun 15 corrected). The winner-cutting fixes (RSI gate f913a81, volume direction-gate 6f8197c, CHOPPY exit 7191053) target R:R directly. Track via `/history`.
 
 ## Fix — SL Integrity (June 3)
 
@@ -294,6 +298,69 @@ If the bot could distinguish "price is pausing in a continuation" from "price is
 7 trades only — directional (all shorts), NOT conclusive. The bot-adjustable Path A ratchet remains parked: its trigger condition is "data shows fixed ratchets underperform," and fixed ratchets WIN 5/7, so the trigger has NOT fired.
 
 **Next:** keep scoring B2 ratchet outcomes (saved vs cost) as more B2 trades accumulate. Re-evaluate at ~20–30 B2 trades. Current running tally: **5 saved / 2 cost**.
+
+---
+
+## Investigation Finding — P&L Reconciler Cross-Attribution (June 15, 2026)
+
+**Root cause: reconciler matched Bybit `closedPnl` to open trades by `symbol + entryAt−4h window + 6% price tolerance` — no guard that "a close before this position opened cannot belong to it."**
+
+When two same-symbol trades are spaced <4h apart AND entry prices are within 6%, the `startMs = entryAt − 4h` window is wide enough to capture the prior trade's close records. Both pass the price filter; all records are summed as if they belong to the current trade.
+
+**Confirmed instance — ATOM Jun 14–15:**
+- `c51ca8ad` entry $1.956 (20:57:15 UTC Jun 14): partials at 18:56 (+$0.287) and 19:56 (+$0.326) on Jun 14
+- `6bdeb8b3` entry $1.97 (20:00:59 UTC Jun 14): true Bybit PnL = SL close at 07:32 Jun 15 = −$0.174
+- Reconciler pulled c51ca8ad's 18:56 and 19:56 closes into 6bdeb8b3's window (|1.956/1.97 − 1| = 0.7% < 6%) → attributed +$0.287 + $0.326 − $0.174 = +$0.439 to 6bdeb8b3 (a LOSS recorded as a WIN)
+
+**Three locations fixed (`95d8382` + `2d2ef43`):**
+1. `startup.ts:389` — `reconcileClosedPositions()`
+2. `cronScanner.ts:2211` — `checkPositionMonitor()` close handler
+3. `tradeMemoryLib.ts:208` — `generateReflection()` bybitCloses fetch (prevents AI re-hallucinating TP1 from prior-trade context)
+
+**Fix (same filter in all three locations):**
+```typescript
+const entryAnchorMs = trade.entryAt.getTime(); // order-placement time
+const matching = closed
+  .filter(c => Math.abs(c.avgEntryPrice / entryPx - 1) < 0.06)
+  .filter(c => c.closedAt >= entryAnchorMs - 10_000)  // load-bearing guard
+  .sort((a, b) => a.closedAt - b.closedAt);
+```
+`startMs` (= entryAt − 4h) kept wide as an API performance hint. The `.filter(c => c.closedAt >= entryAnchorMs - 10_000)` is the authoritative correctness guard. 10s buffer covers WatchScan's 5s defer; far below the 4m39s minimum inter-trade gap in the dataset.
+
+**Design note — ba70c039 accidentally clean:** A bot restart between 00:00–07:15 Jun 6 reset `meta.openedAt = Date.now()` (`startup.ts:291`), pushing `startMs` past 5019fefc's close → excluded by luck. The fix makes it correct on purpose via `entryAt` anchor.
+
+**Backfill — 4 corrupted rows corrected (Jun 15):**
+
+| Trade | Before pnl | After pnl | Before pnl_pct | After pnl_pct |
+|---|---|---|---|---|
+| `c51ca8ad` ATOM | +$0.353 | +$0.614 | 1.007% | 1.230% |
+| `6bdeb8b3` ATOM | +$0.440 | **−$0.174** | 0.441% | **−0.349%** |
+| `43d0dfc0` LINK | +$2.500 | +$2.538 | 2.519% | 5.236% |
+| `0954f4fc` LINK | +$0.558 | +$0.586 | 0.797% | 0.571% |
+
+Snapshots taken before correction: `backfill_pnl_fix_20260615_trade_log` + `backfill_pnl_fix_20260615_trade_memory` (reversible).
+6bdeb8b3 reflection regenerated: `tp1_reached = false` confirmed, no re-hallucination of TP1. `exit_method = "review"` is a backfill-path mislabel (see latent items); P&L and tp1_reached are correct.
+
+---
+
+## Clean Performance Baseline (June 15, 2026 — CORRECTED DATA)
+
+**This is the first trustworthy baseline. Prior P&L assessments were on corrupted data.**
+
+| Metric | Value |
+|---|---|
+| Sample | 109 Bybit trades, last 30 days |
+| Win rate | **41.3%** (45 wins / 64 losses) |
+| Net P&L | **−$41.15** |
+| Avg win | **+$0.889** |
+| Avg loss | **−$1.268** |
+| R:R ratio | **0.70** |
+
+**Core problem is R:R (0.70), not win rate.** At 41.3% win rate, breakeven R:R is 1.42 (= 0.587 / 0.413). The bot runs at 0.70 — wins are too small relative to losses. Pattern confirmed across reflections: "exits winners too early, losses run to full SL."
+
+**The earlier apparent turnaround** (sessions showing +$0.23 net, avg win catching up to avg loss) was partly the cross-attribution bug inflating win sizes. These numbers are clean.
+
+**R:R target for next-session review:** did the winner-cutting fixes (RSI gate `f913a81`, volume direction-gate `6f8197c`, CHOPPY exit profile `7191053`) push R:R above 0.70 on post-fix trades? Compare post-fix trade subset vs this baseline.
 
 ---
 
