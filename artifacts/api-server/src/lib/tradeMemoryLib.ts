@@ -204,8 +204,10 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     try {
       const startMs = Math.max(0, input.entryAt.getTime() - 4 * 60 * 60 * 1000);
       const raw = await bybitGetClosedPnl(50, startMs, input.symbol);
+      const entryAnchorMs = input.entryAt.getTime();
       bybitCloses = raw
         .filter(c => Math.abs(c.avgEntryPrice / input.entryPrice - 1) < 0.06)
+        .filter(c => c.closedAt >= entryAnchorMs - 10_000)
         .sort((a, b) => a.closedAt - b.closedAt);
     } catch { /* non-fatal — Bybit data enriches but isn't required */ }
   }
