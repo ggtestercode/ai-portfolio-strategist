@@ -2442,10 +2442,29 @@ async function checkPositionMonitor(): Promise<void> {
       // on the same in-progress candle
       if (!trigger && klines.length >= 22) {
         const completedCandles = klines.slice(0, -1); // drop the forming candle
-        const volAvg = completedCandles.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
-        const lastVol = completedCandles[completedCandles.length - 1]!.volume;
-        if (volAvg > 0 && lastVol > volAvg * 5)
-          trigger = `Volume spike ${(lastVol/volAvg).toFixed(1)}× on last completed 1h candle`;
+        const volAvg     = completedCandles.slice(-21, -1).reduce((s, k) => s + k.volume, 0) / 20;
+        const lastCandle = completedCandles[completedCandles.length - 1]!;
+        const lastVol    = lastCandle.volume;
+        if (volAvg > 0 && lastVol > volAvg * 5) {
+          const isUpCandle     = lastCandle.close > lastCandle.open;
+          const isLong         = pos.side === "Buy";
+          // Counter-direction spike (down-candle for LONG, up-candle for SHORT) = distribution or squeeze
+          // against thesis — legitimate review signal. With-direction spike = momentum continuation,
+          // same structural flaw as old RSI trigger: firing unconditionally caused ATOM Jun 14 to be
+          // closed at +1.01% when the 5.1× spike was buyers accelerating, not distribution.
+          const isCounterTrade = (isLong && !isUpCandle) || (!isLong && isUpCandle);
+          const mult           = (lastVol / volAvg).toFixed(1);
+          if (isCounterTrade) {
+            trigger = `Volume spike ${mult}× on counter-direction candle `
+                    + `(${isUpCandle ? "bullish" : "bearish"} candle for a ${isLong ? "LONG" : "SHORT"}) `
+                    + `— distribution/squeeze against thesis`;
+          } else {
+            // With-trade spike = momentum, not distribution — suppress review, log for observability.
+            console.log(`[posMonitor] ${pos.symbol} volume spike ${mult}× suppressed — `
+                      + `${isUpCandle ? "up" : "down"}-candle ${isLong ? "long" : "short"} `
+                      + `= momentum, not distribution`);
+          }
+        }
       }
       monitorState[pos.symbol] = { ...(monitorState[pos.symbol] ?? state), lastRSI1h: rsi };
     }
