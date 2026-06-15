@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 15, 2026 (commit 2d2ef43)
+**Last updated:** June 16, 2026 (commit 39997e8)
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -71,6 +71,8 @@
 ## Recent Commits (last 15)
 | Commit | Description |
 |--------|-------------|
+| `39997e8` | fix(deploy): exclude backfill_* snapshot tables from drizzle-kit push |
+| `128c1c1` | fix(backfill): use Bybit stopOrderType for exit_method instead of pnlPct inference |
 | `2d2ef43` | fix(reflection): same 10s anchor guard in generateReflection bybitCloses fetch |
 | `95d8382` | fix(reconciler): exclude prior-trade closes from PnL matching |
 | `91e029b` | fix(posMonitor): intent-aware dust-guard for PARTIAL_CLOSE |
@@ -97,10 +99,10 @@
 - **SL-to-liquidation buffer** — scan prompt now instructs Claude to keep SL ≥2% above (longs) / ≤2% below (shorts) liquidation price; liq price is now computed accurately from portfolioLeverage (capped 10×) not hardcoded. Informational — not a hard gate.
 - **Per-rule attribution (Option 2 — code-evaluated)** — Replace current `appliedRuleIds` approach (all active rules credited to every trade, making per-rule stats meaningless) with: code records which active rules were RELEVANT to each trade (e.g. Rule 1 only relevant if regime=TRENDING_DOWN) and whether the trade COMPLIED or VIOLATED each. Goal: "trades following Rule X win Y% vs violating Z%" — real signal on rule helpfulness. Only works for mechanically-checkable rules (regime, direction, TP/SL distance). Build AFTER DB reconciler fix — needs accurate P&L first.
 - **Portfolio-level total margin cap** — No guard against sum of all open position margins exceeding X% of balance. Each position is individually capped at 30%, but three simultaneous positions each at 30% = 90% margin deployed. Fine at current scale (2-3 positions, $20-50 balance). Add cap when balance grows beyond ~$100 and position count increases.
-- **backfillStructuredReflections does NOT call resolveExitReason** — infers `exit_method` from context only; mislabeled 6bdeb8b3's ratcheted-SL exit as "review" during June 15 backfill. Fix: query Bybit `/v5/order/history` for exit `createType` (`CreateByStopLoss` / `CreateByTakeProfit` / `CreateByUser`) in the backfill path. Minor — backfill-only; live path already correct; P&L and tp1_reached are accurate, only `exit_method` on backfilled rows is affected.
 - **Reconciler uses time-based fill attribution (not orderId)** — DB stores no Bybit `orderId` per trade. The 10s anchor guard eliminates the confirmed class of cross-attribution (prior same-symbol close). Only add orderId matching (schema change to `trade_log`) if a future overlap defeats the time filter (e.g., two same-symbol trades opened within 10s of each other).
 - **Do NOT regenerate rules until post-fix trades accumulate** — current 15 rules were partly built on corrupted P&L corpus (pre-June 15). Metrics are trustworthy for the first time after the reconciler fix; regenerate after 10+ clean trades close on corrected data.
 - **NEXT-SESSION TEST** — does R:R rise above 0.70 on post-fix trades vs the clean baseline? Baseline: win rate 41.3%, net −$41.15, avg win $0.889, avg loss −$1.268, R:R 0.70 (109 trades, last 30 days, Jun 15 corrected). The winner-cutting fixes (RSI gate f913a81, volume direction-gate 6f8197c, CHOPPY exit 7191053) target R:R directly. Track via `/history`.
+- **effective_sl not captured for offline/backfilled closes** — when a position closes while the bot is down (reconciled on next startup), `effective_sl` is not written to `trade_log` even if the SL was ratcheted. Caused 6bdeb8b3's `effective_sl=NULL`, which defaulted to `original_sl` before manual correction. Pre-existing gap; fix would require startup reconciler to infer effective_sl from exit price vs original SL when stopOrderType=StopLoss. Low priority — the scan (`exit_vs_sl_gap > 0.3%` for longs, `< -0.3%` for shorts) confirmed only 1 mislabeled ratchet in 30 days of data.
 
 ## Fix — SL Integrity (June 3)
 
@@ -339,7 +341,36 @@ const matching = closed
 | `0954f4fc` LINK | +$0.558 | +$0.586 | 0.797% | 0.571% |
 
 Snapshots taken before correction: `backfill_pnl_fix_20260615_trade_log` + `backfill_pnl_fix_20260615_trade_memory` (reversible).
-6bdeb8b3 reflection regenerated: `tp1_reached = false` confirmed, no re-hallucination of TP1. `exit_method = "review"` is a backfill-path mislabel (see latent items); P&L and tp1_reached are correct.
+6bdeb8b3 reflection regenerated: `tp1_reached = false` confirmed, no re-hallucination of TP1.
+
+---
+
+## Investigation Finding — exit_method Inference Gap Fixed (June 16, 2026)
+
+**Root cause: `generateReflection` inferred `exit_method` from `pnlPct < -5 ? "sl_hit" : "review"` when no `exitReasonOverride` was passed — the backfill path never passes one. Result: every backfilled trade without a large_profit partial was labeled "review" regardless of actual Bybit trigger type.**
+
+The live path was unaffected (always calls `resolveExitReason` → passes `exitReasonOverride` before `closeOpenTrade`). The bug was backfill-only.
+
+**Fix (`128c1c1`):** In `generateReflection`, lifted `lastCloseStopType` out of the `tp2ExecutedBybit` block (it was already being fetched via `getOrderStopType(lastOrderId)` for tp2 detection but thrown away). Now used in the inference fallback:
+```
+StopLoss → "sl_hit" | TakeProfit/PartialTakeProfit → "tp_hit" | (empty market order) → "review"
+```
+Market order closes (posMonitor CLOSE commands) still map to "review" — same as before. Live path unaffected.
+
+**Bybit-verified correction for all 4 backfilled trades:**
+
+| Trade | Bybit stopOrderType | Old exit_method | Corrected |
+|---|---|---|---|
+| `43d0dfc0` LINK +5.24% | TakeProfit | review | **tp_hit** |
+| `0954f4fc` LINK +0.57% | StopLoss (after TP1 partial → tp1Executed=true) | review | **ratcheted_sl** |
+| `c51ca8ad` ATOM +1.23% | *(empty — market order)* | review | **review** (unchanged) |
+| `6bdeb8b3` ATOM −0.35% | StopLoss | review | **original_sl** → then **ratcheted_sl** (see below) |
+
+**6bdeb8b3 ratcheted_sl correction:** Initially resolved to `original_sl` because `effective_sl` was NULL. Bybit ground truth: exit fill at $1.9644 vs original SL $1.928 (+1.89% gap, well beyond slippage). `effective_sl` backfilled to `1.96440000`; `exit_method` corrected to `ratcheted_sl`. Scan of all 4 `original_sl` + NULL `effective_sl` trades confirmed 6bdeb8b3 was the only genuine ratchet — the other 3 exit within 0.03% of original SL (slippage only).
+
+**Snapshots:** `backfill_exit_fix_20260616_trade_memory` (4 rows, pre-correction) + `backfill_ratchet_fix_20260616_trade_log` + `backfill_ratchet_fix_20260616_trade_memory` (1 row each, pre-ratcheted_sl correction). All intact.
+
+**Deploy filter (`39997e8`):** `drizzle.config.ts` tablesFilter extended with `!backfill_*` — drizzle-kit push no longer prompts to drop snapshot tables.
 
 ---
 
