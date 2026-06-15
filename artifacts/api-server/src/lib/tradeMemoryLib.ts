@@ -430,11 +430,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   // This is a point query on a specific orderId — no cross-symbol contamination risk
   // (unlike tp1's count heuristic which relies only on the 6% entry-price filter).
   let tp2ExecutedBybit = false;
+  let lastCloseStopType = "";
   if (bybitCloses.length > 0) {
     const lastOrderId = bybitCloses[bybitCloses.length - 1]!.orderId;
     try {
-      const stopType = await getOrderStopType(input.symbol, lastOrderId);
-      tp2ExecutedBybit = stopType === "TakeProfit";
+      lastCloseStopType = await getOrderStopType(input.symbol, lastOrderId);
+      tp2ExecutedBybit = lastCloseStopType === "TakeProfit";
     } catch { /* non-fatal — fall back to memPartials-only result */ }
   }
   const tp2Executed = memPartials.some(p => p.partialType === "tp2") || tp2ExecutedBybit;
@@ -478,14 +479,21 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   if (unplannedPartials.length > 0) executionIssues.push(`Unplanned partials: ${unplannedPartials.map(p => p.partialType).join(", ")}`);
   if (memPartials.length > 3) executionIssues.push(`Excessive partials: ${memPartials.length} closes`);
 
-  // Determine exit method — explicit override wins; otherwise derive from partials/bybit data
+  // Determine exit method — explicit override (live path) wins; otherwise use Bybit stopOrderType
+  // (backfill path). Market orders have empty stopOrderType and fall through to "review".
+  const bybitStopMethod = lastCloseStopType === "StopLoss"          ? "sl_hit"
+                        : lastCloseStopType === "TakeProfit"         ? "tp_hit"
+                        : lastCloseStopType === "PartialTakeProfit"  ? "tp_hit"
+                        : null;
   const exitMethod = input.exitReasonOverride
     ? input.exitReasonOverride
     : memPartials.some(p => p.partialType === "large_profit")
       ? "profit_protection"
-      : bybitCloses.length > 0 && bybitCloses[bybitCloses.length-1]!.closedPnl !== undefined
-        ? (input.pnlPct < -5 ? "sl_hit" : "review")
-        : "unknown";
+    : bybitStopMethod !== null
+      ? bybitStopMethod
+    : bybitCloses.length > 0
+      ? "review"
+    : "unknown";
 
   // Exit branch — ratcheted_sl covers post-TP1 ratchet (paths A/B/D) AND breakeven-before-TP1 (path C).
   // tp2Executed only → "tp_hit" when the FINAL close was not a SL; if a partial TP2 fired but the
