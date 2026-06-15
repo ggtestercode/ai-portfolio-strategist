@@ -15,5 +15,5 @@ export default defineConfig({
   },
   // Exclude ad-hoc backup tables so drizzle-kit push runs non-interactively.
   // Tables matching these patterns are left untouched — drizzle never sees them.
-  tablesFilter: ["!trade_memory_backup*", "!trading_rules_backup*", "!trading_rules_inactive_backup*"],
+  tablesFilter: ["!trade_memory_backup*", "!trading_rules_backup*", "!trading_rules_inactive_backup*", "!backfill_*"],
 });
