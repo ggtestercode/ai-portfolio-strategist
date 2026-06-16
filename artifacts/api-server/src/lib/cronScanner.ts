@@ -403,10 +403,10 @@ async function cancelStaleOrders(): Promise<{
     return { cancelled, active };
   }
   try {
-    const fourHAgo = Date.now() - 4 * 60 * 60 * 1000;
+    const staleThresholdMs = Date.now() - (3 * 60 + 50) * 60 * 1000; // 3h50m — 10min buffer vs 4h cron interval
     for (const order of orders) {
       const placedAt = new Date(order.placedAt).getTime();
-      if (placedAt < fourHAgo) {
+      if (placedAt < staleThresholdMs) {
         await bybitCancelOrder(order.symbol, order.orderId).catch(e =>
           console.warn(`[cronScanner] Cancel order ${order.orderId} failed:`, e.message)
         );
@@ -1704,6 +1704,16 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
     }
     let openedThisScan = 0;
 
+    // Pre-fetch open limit orders once before the placement loop for dedup checks.
+    // Keyed by symbol so each signal lookup is O(1) without repeated API calls.
+    const pendingBySymbol = new Map<string, Array<{ orderId: string; side: string; price: number; placedAt: string }>>();
+    try {
+      for (const o of await bybitGetOrders()) {
+        if (!pendingBySymbol.has(o.symbol)) pendingBySymbol.set(o.symbol, []);
+        pendingBySymbol.get(o.symbol)!.push({ orderId: o.orderId, side: o.side, price: o.price, placedAt: o.placedAt });
+      }
+    } catch { /* non-fatal — dedup check skips silently when unavailable */ }
+
     for (const opp of rankedSignals) {
       // Position limit guard — recheck each iteration in case we opened one this scan
       if (openCountNow + openedThisScan >= MAX_OPEN_POSITIONS) {
@@ -1752,6 +1762,96 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             `Reward:Risk ${rrRatio.toFixed(2)} below minimum 1.1`,
           ].join("\n")).catch(() => {});
           continue;
+        }
+      }
+
+      // ── Pre-placement dedup: one unfilled limit per symbol ───────────────────
+      // Declared per-iteration; set to an orderId when diff-price replace requires
+      // cancelling the old order AFTER the new one is confirmed on Bybit.
+      let postPlaceCancelOrderId: string | null = null;
+      {
+        const existingOrders = pendingBySymbol.get(sym) ?? [];
+        if (existingOrders.length > 0) {
+          const old = existingOrders.sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime())[0]!;
+          const oldDir: "long" | "short" = old.side === "Buy" ? "long" : "short";
+          const newDir: "long" | "short" = opp.direction === "short" ? "short" : "long";
+          const newLimitPrice = opp.limitPrice ?? opp.entry ?? opp.price;
+          const newSl  = opp.stopLoss ?? 0;
+          const newTp1 = opp.tp1 ?? 0;
+
+          if (oldDir !== newDir) {
+            // Direction flipped — cancel old unconditionally, place new
+            console.log(`[dedup] ${sym} direction flipped (${oldDir}→${newDir}) — cancelling old ${old.orderId.slice(0, 8)}`);
+            const cancelOk = await bybitCancelOrder(sym, old.orderId).then(() => true)
+              .catch(e => { console.warn(`[dedup] cancel failed ${sym}:`, e.message); return false; });
+            if (cancelOk) {
+              await db.update(tradeLogTable)
+                .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
+                .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+                .catch(() => {});
+              await removePendingLimitFill(sym).catch(() => {});
+              await clearPositionMeta(sym).catch(() => {});
+              await alertFn?.(`🔄 Dedup ${sym}: direction flipped (${oldDir}→${newDir}), old limit $${old.price} cancelled — placing fresh ${newDir}`).catch(() => {});
+            } else {
+              await alertFn?.(`⚠️ Dedup ${sym}: direction flipped but old order cancel FAILED — skipping new signal to avoid dual exposure`).catch(() => {});
+              continue;
+            }
+          } else {
+            // Same direction — compare prices and SL/TP against thresholds
+            const [oldTrade] = await db.select({ sl: tradeLogTable.sl, tp1: tradeLogTable.tp1 })
+              .from(tradeLogTable)
+              .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+              .orderBy(desc(tradeLogTable.entryAt))
+              .limit(1)
+              .catch(() => [] as Array<{ sl: string | null; tp1: string | null }>);
+            const oldSl  = oldTrade?.sl  ? parseFloat(String(oldTrade.sl))  : 0;
+            const oldTp1 = oldTrade?.tp1 ? parseFloat(String(oldTrade.tp1)) : 0;
+
+            const priceDiffPct = Math.abs(newLimitPrice - old.price) / old.price * 100;
+            const slDiffPct    = (oldSl > 0 && newSl > 0)   ? Math.abs(newSl  - oldSl)  / Math.abs(oldSl)  * 100 : 999;
+            const tp1DiffPct   = (oldTp1 > 0 && newTp1 > 0) ? Math.abs(newTp1 - oldTp1) / Math.abs(oldTp1) * 100 : 999;
+            const oldMoreFav   = newDir === "long" ? old.price < newLimitPrice : old.price > newLimitPrice;
+            // SL structural = within 15% of current price (not so far OTM that it's stale)
+            const slStructural = oldSl > 0 && opp.price > 0 && Math.abs(opp.price - oldSl) / opp.price < 0.15;
+
+            if (oldMoreFav && slStructural) {
+              // Old has a better entry price and a valid SL — leave it, skip the new signal
+              console.log(`[dedup] ${sym} skip — old limit $${old.price} more favorable than new $${newLimitPrice.toFixed(4)}, SL $${oldSl} structural`);
+              await alertFn?.(`⏭️ Dedup ${sym}: skipped — old limit $${old.price} more favorable (${newDir}), SL $${oldSl} still structural`).catch(() => {});
+              continue;
+            } else if (priceDiffPct <= 0.5 && slDiffPct <= 0.3 && tp1DiffPct <= 1.0) {
+              // Near-identical re-signal — leave old working, avoid thrash
+              console.log(`[dedup] ${sym} skip — near-identical re-signal (price Δ${priceDiffPct.toFixed(2)}% SL Δ${slDiffPct.toFixed(2)}% TP1 Δ${tp1DiffPct.toFixed(2)}%)`);
+              await alertFn?.(`⏭️ Dedup ${sym}: skipped near-identical re-signal (price Δ${priceDiffPct.toFixed(2)}%, SL Δ${slDiffPct.toFixed(2)}%, TP1 Δ${tp1DiffPct.toFixed(2)}%)`).catch(() => {});
+              continue;
+            } else {
+              // Materially different — replace old with new
+              const samePrice = priceDiffPct <= 0.05;
+              if (samePrice) {
+                // Same price level — cancel old FIRST to avoid double-fill at identical price
+                console.log(`[dedup] ${sym} same-price replace — cancelling old ${old.orderId.slice(0, 8)} before placing new`);
+                const cancelOk = await bybitCancelOrder(sym, old.orderId).then(() => true)
+                  .catch(e => { console.warn(`[dedup] cancel failed ${sym}:`, e.message); return false; });
+                if (!cancelOk) {
+                  await alertFn?.(`⚠️ Dedup ${sym}: cancel-old FAILED (same-price replace) — skipping new signal to prevent double-fill`).catch(() => {});
+                  continue;
+                }
+                await db.update(tradeLogTable)
+                  .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
+                  .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
+                  .catch(() => {});
+                await removePendingLimitFill(sym).catch(() => {});
+                await clearPositionMeta(sym).catch(() => {});
+                await alertFn?.(`🔄 Dedup ${sym}: same-price replace — old $${old.price} cancelled, placing fresh with new SL/TP`).catch(() => {});
+                // Fall through to normal placement
+              } else {
+                // Different prices — place new FIRST, then cancel old after confirmation
+                console.log(`[dedup] ${sym} diff-price replace — placing new $${newLimitPrice.toFixed(4)} first, will cancel old $${old.price} (${old.orderId.slice(0, 8)}) after confirmation`);
+                postPlaceCancelOrderId = old.orderId;
+                // Fall through to normal placement; post-cancel runs after Bybit confirms new order
+              }
+            }
+          }
         }
       }
 
@@ -1928,6 +2028,30 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           takeProfit:      opp.takeProfit,
           stopLossMethod:  opp.stopLossMethod,
         }).catch(e => { console.warn(`[cronScanner] logOpenTrade ${sym}:`, e.message); return null; });
+
+        // Diff-price dedup: new order confirmed on Bybit and logged — now safe to cancel old.
+        // Uses specific trade_log ID to void old entry (not the new one just created).
+        if (postPlaceCancelOrderId) {
+          const cancelOldId = postPlaceCancelOrderId;
+          postPlaceCancelOrderId = null;
+          const cancelledOk = await bybitCancelOrder(sym, cancelOldId).then(() => true)
+            .catch(e => { console.warn(`[dedup] post-placement cancel failed ${sym}:`, e.message); return false; });
+          if (cancelledOk) {
+            // Void only the OLD open entry — exclude newTradeId so the new entry is untouched
+            await db.update(tradeLogTable)
+              .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
+              .where(and(
+                eq(tradeLogTable.symbol, sym),
+                isNull(tradeLogTable.exitAt),
+                newTradeId ? ne(tradeLogTable.id, newTradeId) : sql`true`,
+              ))
+              .catch(() => {});
+            console.log(`[dedup] ${sym} post-placement: old order ${cancelOldId.slice(0, 8)} cancelled, old trade_log entry voided`);
+            await alertFn?.(`🔄 Dedup ${sym}: old order cancelled after new placement confirmed`).catch(() => {});
+          } else {
+            await alertFn?.(`⚠️ Dedup ALERT ${sym}: new order placed but old order ${cancelOldId.slice(0, 8)} NOT cancelled — MANUAL CANCEL REQUIRED on Bybit`).catch(() => {});
+          }
+        }
 
         // Selective rule tagging — only tag a rule if it genuinely applied to this trade.
         // Matching on ruleNumber (stable across regens) not on PK id.
