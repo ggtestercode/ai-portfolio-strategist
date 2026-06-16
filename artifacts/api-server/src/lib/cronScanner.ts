@@ -14,6 +14,7 @@ import {
   closePosition   as bybitClose,
   cancelOrder     as bybitCancelOrder,
   getOrders       as bybitGetOrders,
+  getTpslOrders   as bybitGetTpslOrders,
   setTp1Partial   as bybitSetTp1Partial,
   setTp2Partial   as bybitSetTp2Partial,
   closePercentPosition,
@@ -25,6 +26,7 @@ import {
   getClosedPnl    as bybitGetClosedPnl,
   type BybitPosition,
   type BybitKline,
+  type BybitTpslOrder,
 } from "../brokers/bybit";
 import { db, profileTable, botStateTable, tradeMemoryTable, tradeLogTable, tradingRulesTable, ruleOverridesTable, type PositionMeta, type PositionMonitorState, type WatchCoin } from "@workspace/db";
 import { eq, and, desc, isNull, gt } from "drizzle-orm";
@@ -1998,20 +2000,27 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             }
           }
 
-          // TP1 monitoring check — TP1 exits via checkPartialExits() (a monitored market sell
-          // when price crosses the level), NOT a standing Bybit limit order. Searching
-          // bybitGetOrders() for a TP1 limit produces a 100% false-positive rate.
-          // Instead: verify positionMeta.tp1 is set, which is what checkPartialExits() reads.
-          // Only runs when position has actually filled (liveP exists) — unfilled limit entries
-          // defer metadata to fill detection and correctly skip this check.
+          // TP1 check: the bot places a Bybit PartialTakeProfit conditional (via setTp1Partial /
+          // trading-stop API) AND runs checkPartialExits monitoring as a fallback. PartialTakeProfit
+          // orders appear in orderFilter:"tpslOrder", NOT in regular getOrders(). Alert only when
+          // positionMeta.tp1 is set (placement was intended) but no Bybit PartialTakeProfit exists
+          // — that's a genuine failure. Skip for unfilled limits (liveP null): TP1 is deferred to
+          // fill detection there and hasn't been placed yet.
           if (tp1Target && liveP) {
-            const s15    = await loadBotState().catch(() => null);
-            const pm15   = ((s15?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
-            const tp1Tracked = (pm15?.tp1 ?? 0) > 0;
-            console.log(`[rule7] ${sym} — 15s TP1 monitoring: ${tp1Tracked ? `active($${pm15!.tp1!.toFixed(4)})` : "NOT TRACKED in positionMeta"}`);
-            if (!tp1Tracked) {
-              console.warn(`[rule7] ${sym} — TP1 not in positionMeta 15s after fill (expected ~$${tp1Target}) — checkPartialExits will not trigger`);
-              await alertFn?.(`⚠️ Rule 7: TP1 monitoring not active 15s after fill — ${sym}\nExpected TP1: ~$${tp1Target?.toFixed(4) ?? "?"}\npositionMeta.tp1 not set — checkPartialExits cannot fire at this level. Verify.`).catch(() => {});
+            const s15       = await loadBotState().catch(() => null);
+            const pm15      = ((s15?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
+            const tp1InMeta = (pm15?.tp1 ?? 0) > 0;
+            if (tp1InMeta) {
+              const tpslOrders  = await bybitGetTpslOrders(sym).catch(() => [] as BybitTpslOrder[]);
+              const tp1OnBybit  = tpslOrders.some(o => o.stopOrderType === "PartialTakeProfit");
+              console.log(`[rule7] ${sym} — 15s TP1: meta=$${pm15!.tp1!.toFixed(4)} Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
+              if (!tp1OnBybit) {
+                console.warn(`[rule7] ${sym} — TP1 PartialTakeProfit NOT on Bybit 15s after fill — setTp1Partial likely failed`);
+                await alertFn?.(`⚠️ Rule 7: TP1 PartialTakeProfit missing on Bybit 15s after fill — ${sym}\nExpected TP1: ~$${tp1Target.toFixed(4)}\nBybit tpslOrder not found — only the 5-min monitor covers TP1. Verify manually.`).catch(() => {});
+              }
+            } else {
+              // positionMeta.tp1 not set — the 5s metadata check catches this path
+              console.log(`[rule7] ${sym} — 15s TP1: positionMeta.tp1 not set yet (may still be populating)`);
             }
           }
         }, 15000);

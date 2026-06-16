@@ -67,7 +67,12 @@ function normalise(symbol: string): string {
 // ── Types ─────────────────────────────────────────────────────────────────────
 export interface BybitTicker  { symbol: string; lastPrice: number; bid: number; ask: number; change24h: number }
 export interface BybitPosition { symbol: string; side: "Buy" | "Sell" | "None"; size: number; entryPrice: number; markPrice: number; leverage: number; pnl: number; pnlPct: number; margin: number; stopLoss?: number; takeProfit?: number; liqPrice?: number; positionIdx: number; openTime: number }
-export interface BybitOrder   { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string; orderType?: string; sl?: number; tp?: number }
+export interface BybitOrder     { orderId: string; symbol: string; side: string; qty: number; price: number; placedAt: string; orderType?: string; sl?: number; tp?: number }
+export interface BybitTpslOrder { symbol: string; stopOrderType: string; triggerPrice: number; qty: number; orderId: string }
+
+// Registered by telegram.ts startPolling() so bybit.ts can alert without a circular import.
+let _bybitAlertFn: ((msg: string) => Promise<void>) | null = null;
+export function registerBybitAlertFn(fn: (msg: string) => Promise<void>): void { _bybitAlertFn = fn; }
 export interface BybitBalance { totalEquity: number; availableBalance: number; usedMargin: number; currency: string }
 export interface BybitKline   { ts: number; open: number; high: number; low: number; close: number; volume: number }
 
@@ -176,6 +181,26 @@ export async function getOrders(): Promise<BybitOrder[]> {
     }));
 }
 
+// Returns TP/SL conditional orders (PartialTakeProfit, TakeProfit, StopLoss, PartialStopLoss).
+// These do NOT appear in getOrders() (orderFilter:"Order") — they require orderFilter:"tpslOrder".
+export async function getTpslOrders(symbol?: string): Promise<BybitTpslOrder[]> {
+  const params: Record<string, string> = { category: "linear", orderFilter: "tpslOrder", settleCoin: "USDT" };
+  if (symbol) params["symbol"] = normalise(symbol);
+  const r = await get<{ list: Array<{ symbol: string; stopOrderType?: string; triggerPrice?: string; qty?: string; orderId: string }> }>(
+    "/v5/order/realtime", params
+  ).catch(e => {
+    console.error("[orders] getTpslOrders failed:", (e as Error).message);
+    return { list: [] as Array<{ symbol: string; stopOrderType?: string; triggerPrice?: string; qty?: string; orderId: string }> };
+  });
+  return r.list.map(o => ({
+    symbol:        o.symbol,
+    stopOrderType: o.stopOrderType ?? "",
+    triggerPrice:  parseFloat(o.triggerPrice || "0"),
+    qty:           parseFloat(o.qty || "0"),
+    orderId:       o.orderId,
+  }));
+}
+
 export async function cancelOrder(symbol: string, orderId: string): Promise<void> {
   const sym = normalise(symbol);
   await bpost("/v5/order/cancel", { category: "linear", symbol: sym, orderId });
@@ -244,7 +269,10 @@ export async function setTp1Partial(symbol: string, tp1Price: number, positionId
       if (attempt < 3) await new Promise(res => setTimeout(res, 1000));
     }
   }
-  if (!tp1Set) console.error(`[Bybit] TP1 exchange order NOT set for ${sym} — software polling is the only fallback`);
+  if (!tp1Set) {
+    console.error(`[Bybit] TP1 exchange order NOT set for ${sym} — software polling is the only fallback`);
+    _bybitAlertFn?.(`⚠️ TP1 placement FAILED after 3 attempts: ${sym} @ ~$${tp1Str}\nBybit PartialTakeProfit NOT set — only the 5-min checkPartialExits monitor covers TP1. Verify manually.`).catch(() => {});
+  }
   return tp1Set;
 }
 

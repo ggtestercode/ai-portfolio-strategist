@@ -58,6 +58,7 @@ import {
 } from "../lib/leverageManager";
 import { startWatchdog, registerWatchdogAlert } from "../lib/watchdog";
 import { getRecentTrades, getOpenTrades, getRecentMemory, getDailyPnl, getActiveRules, generateTradingRules, registerRuleAlertFn } from "../lib/tradeMemoryLib";
+import { registerBybitAlertFn } from "../brokers/bybit";
 import {
   db,
   profileTable,
@@ -271,6 +272,7 @@ export function startPolling(): void {
   registerLeverageAlert(alertHandler);
   registerWatchdogAlert(alertHandler);
   registerRuleAlertFn(alertHandler);
+  registerBybitAlertFn(alertHandler);
   startWatchdog();
 
   registerReviewNotifier(async (symbol, decision, reason, pnlPctStr, reviewId) => {
