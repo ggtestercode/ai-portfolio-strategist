@@ -199,7 +199,13 @@ async function checkDailyLossLimit(bybitBalance: number): Promise<boolean> {
       ].join("\n");
       tradingPaused = true;
       pausedReason  = msg;
-      await saveBotState({ tradingPaused: true, pausedReason: msg }).catch(() => {});
+      await saveBotState({ tradingPaused: true, pausedReason: msg }).catch(e => {
+        // In-memory pause is active for this session, but if the process restarts
+        // tradingPaused resets to false — a failed save means trading resumes on restart.
+        const saveErr = `🚨 CRITICAL: peak-drawdown pause state FAILED to persist (DB write error) — trading WILL RESUME on restart despite halt. Error: ${(e as Error).message}`;
+        console.error("[cronScanner] CRITICAL pause save failed:", saveErr);
+        alertFn?.(saveErr).catch(() => {});
+      });
       await alertFn?.(msg).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.warn("[cronScanner] Peak drawdown halt triggered");
       return false;
@@ -218,7 +224,13 @@ async function checkDailyLossLimit(bybitBalance: number): Promise<boolean> {
       ].join("\n");
       tradingPaused = true;
       pausedReason  = msg;
-      await saveBotState({ tradingPaused: true, pausedReason: msg }).catch(() => {});
+      await saveBotState({ tradingPaused: true, pausedReason: msg }).catch(e => {
+        // In-memory pause is active for this session, but if the process restarts
+        // tradingPaused resets to false — a failed save means trading resumes on restart.
+        const saveErr = `🚨 CRITICAL: daily-loss pause state FAILED to persist (DB write error) — trading WILL RESUME on restart despite halt. Error: ${(e as Error).message}`;
+        console.error("[cronScanner] CRITICAL pause save failed:", saveErr);
+        alertFn?.(saveErr).catch(() => {});
+      });
       await alertFn?.(msg).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
       console.warn("[cronScanner] Daily loss limit hit — trading paused");
       return false;
@@ -1063,7 +1075,11 @@ async function handlePositionDecision(
       await bybitClose(sym);
       const preOrderPrice = pos.entryPrice + (pos.pnl / Math.max(pos.size, 0.0001));
       const exitPrice = await fetchActualFillPrice(sym, pos.entryPrice, preOrderPrice);
-      await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(() => {});
+      await closeOpenTrade({ symbol: sym, broker: "bybit", exitPrice, amountUsd: pos.size * pos.entryPrice, entryPriceOverride: pos.entryPrice, directionOverride: pos.side === "Buy" ? "long" : "short", exitReason: "review" }).catch(e => {
+        const errMsg = `⚠️ DB/Bybit mismatch: ${sym} CUT executed on exchange but trade_log close FAILED — DB still shows position open. Manual DB cleanup required. Error: ${(e as Error).message}`;
+        console.error("[cronScanner] closeOpenTrade CUT failed:", errMsg);
+        alertFn?.(errMsg).catch(() => {});
+      });
       await clearPositionMeta(sym).catch(() => {});
       await logScalingDecision(sym, "CUT", decision.reason, pos.pnlPct);
       outcomes.push({ symbol: sym, action: "CUT", reason: decision.reason, pnlPct: pos.pnlPct });
