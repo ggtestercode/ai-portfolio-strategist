@@ -1990,12 +1990,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
               const tp2Live = (liveP.takeProfit ?? 0) > 0;
               console.log(`[rule7] ${sym} — 15s check: SL=${slLive ? `live($${liveP.stopLoss})` : "MISSING"} TP2=${tp2Live ? `live($${liveP.takeProfit})` : tp2Target ? "MISSING" : "not set"}`);
               if (!slLive && slTarget) {
-                console.warn(`[rule7] ${sym} — SL not live on exchange 15s after fill (expected $${slTarget})`);
-                await alertFn?.(`⚠️ Rule 7: SL not live on exchange 15s after fill — ${sym}\nExpected SL: $${slTarget?.toFixed(4) ?? "?"}\nVerify manually on Bybit.`).catch(() => {});
+                console.warn(`[rule7] ${sym} — SL not live on Bybit 15s after fill (expected $${slTarget})`);
+                await alertFn?.(`⚠️ ${sym}: SL NOT live on Bybit (expected $${slTarget.toFixed(4)}) — verify manually`).catch(() => {});
               }
               if (!tp2Live && tp2Target) {
-                console.warn(`[rule7] ${sym} — TP2 not live on exchange 15s after fill (expected $${tp2Target})`);
-                await alertFn?.(`⚠️ Rule 7: TP2 not live on exchange 15s after fill — ${sym}\nExpected TP2: $${tp2Target?.toFixed(4) ?? "?"}\nVerify manually on Bybit.`).catch(() => {});
+                console.warn(`[rule7] ${sym} — TP2 not live on Bybit 15s after fill (expected $${tp2Target})`);
+                await alertFn?.(`⚠️ ${sym}: TP2 NOT live on Bybit (expected $${tp2Target.toFixed(4)}) — verify manually`).catch(() => {});
               }
             }
           }
@@ -2015,8 +2015,8 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
               const tp1OnBybit  = tpslOrders.some(o => o.stopOrderType === "PartialTakeProfit");
               console.log(`[rule7] ${sym} — 15s TP1: meta=$${pm15!.tp1!.toFixed(4)} Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
               if (!tp1OnBybit) {
-                console.warn(`[rule7] ${sym} — TP1 PartialTakeProfit NOT on Bybit 15s after fill — setTp1Partial likely failed`);
-                await alertFn?.(`⚠️ Rule 7: TP1 PartialTakeProfit missing on Bybit 15s after fill — ${sym}\nExpected TP1: ~$${tp1Target.toFixed(4)}\nBybit tpslOrder not found — only the 5-min monitor covers TP1. Verify manually.`).catch(() => {});
+                console.warn(`[rule7] ${sym} — TP1 PartialTakeProfit NOT on Bybit 15s after fill (expected $${tp1Target})`);
+                await alertFn?.(`⚠️ ${sym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${tp1Target.toFixed(4)}) — verify/replace manually`).catch(() => {});
               }
             } else {
               // positionMeta.tp1 not set — the 5s metadata check catches this path
@@ -2444,8 +2444,20 @@ async function checkPositionMonitor(): Promise<void> {
         tp2ClosePercent: pending.tp2ClosePercent,
       }).catch(() => {});
       if (pending.tp1 && pending.tp1 > 0) {
-        await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size, pending.tp1ClosePercent)
-          .catch(e => console.warn(`[posMonitor] TP1 on fill ${pos.symbol}:`, (e as Error).message));
+        const tp1Placed = await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size, pending.tp1ClosePercent)
+          .catch(() => false);
+        console.log(`[posMonitor] ${pos.symbol} TP1 placement on fill: ${tp1Placed ? `OK ($${pending.tp1})` : "FAILED — alert sent"}`);
+        // 15s post-fill verification: confirm PartialTakeProfit is actually on Bybit
+        const _fillSym = pos.symbol;
+        const _fillTp1 = pending.tp1;
+        setTimeout(async () => {
+          const tpslOrders = await bybitGetTpslOrders(_fillSym).catch(() => [] as BybitTpslOrder[]);
+          const tp1OnBybit = tpslOrders.some(o => o.stopOrderType === "PartialTakeProfit");
+          console.log(`[posMonitor] ${_fillSym} — 15s post-fill TP1: Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
+          if (!tp1OnBybit) {
+            await alertFn?.(`⚠️ ${_fillSym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${_fillTp1.toFixed(4)}) — verify/replace manually`).catch(() => {});
+          }
+        }, 15000);
       }
       if (pending.tp2 && pending.tp2 > 0 && (pending.tp2ClosePercent ?? 100) < 100) {
         await bybitSetTp2Partial(pos.symbol, pending.tp2, pos.positionIdx, pos.size, pending.tp2ClosePercent)

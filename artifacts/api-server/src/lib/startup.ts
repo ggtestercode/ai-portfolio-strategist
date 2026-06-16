@@ -191,8 +191,9 @@ async function recoverPendingLimitFills(): Promise<void> {
     const tp1Executed = (posMeta[symbol]?.tp1Executed ?? false);
     if (!tp1Executed && fill.tp1 && fill.tp1 > 0) {
       console.log(`[startup] Recovering TP1 partial for ${symbol} at $${fill.tp1} (${fill.tp1ClosePercent ?? 30}%)`);
-      await bybitSetTp1Partial(symbol, fill.tp1, fill.positionIdx, livePos.size, fill.tp1ClosePercent)
-        .catch(e => console.warn(`[startup] Recovery TP1 ${symbol}:`, (e as Error).message));
+      const tp1Recovered = await bybitSetTp1Partial(symbol, fill.tp1, fill.positionIdx, livePos.size, fill.tp1ClosePercent)
+        .catch(() => false);
+      console.log(`[startup] ${symbol} TP1 recovery: ${tp1Recovered ? `OK ($${fill.tp1})` : "FAILED — alert sent by setTp1Partial"}`);
     }
     if (fill.tp2 && fill.tp2 > 0 && (fill.tp2ClosePercent ?? 100) < 100) {
       console.log(`[startup] Recovering TP2 partial for ${symbol} at $${fill.tp2} (${fill.tp2ClosePercent}%)`);

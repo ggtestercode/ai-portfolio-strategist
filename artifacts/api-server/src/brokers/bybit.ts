@@ -271,7 +271,7 @@ export async function setTp1Partial(symbol: string, tp1Price: number, positionId
   }
   if (!tp1Set) {
     console.error(`[Bybit] TP1 exchange order NOT set for ${sym} — software polling is the only fallback`);
-    _bybitAlertFn?.(`⚠️ TP1 placement FAILED after 3 attempts: ${sym} @ ~$${tp1Str}\nBybit PartialTakeProfit NOT set — only the 5-min checkPartialExits monitor covers TP1. Verify manually.`).catch(() => {});
+    _bybitAlertFn?.(`⚠️ ${sym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${tp1Str}) — placement failed after 3 attempts, verify/replace manually`).catch(() => {});
   }
   return tp1Set;
 }
