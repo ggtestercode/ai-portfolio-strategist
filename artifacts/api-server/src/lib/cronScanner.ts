@@ -1960,10 +1960,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           }
         }, 5000);
 
-        // Rule 7: verify SL/TP orders are actually live on exchange 15s after fill.
-        // Alert-only v1 — measure false-positive rate before adding auto-retry.
-        // SL + TP2: checked via bybitGetPositions() (position-level, not in getOrders).
-        // TP1 partial limit: checked via bybitGetOrders() (regular limit order).
+        // Rule 7: verify SL/TP orders are live 15s after fill.
+        // SL + TP2: position-level on Bybit — checked via bybitGetPositions().
+        // TP1: monitoring-based (checkPartialExits market sell) — checked via positionMeta.tp1.
         const tp1Target  = opp.tp1;
         const tp2Target  = opp.tp2 ?? opp.takeProfit;
         const slTarget   = opp.stopLoss;
@@ -1999,24 +1998,20 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             }
           }
 
-          // TP1 partial limit order check via getOrders (only when TP1 is a partial, not position-level)
-          if (tp1Target && (opp.tp1ClosePercent ?? 100) < 100) {
-            let orders: Awaited<ReturnType<typeof bybitGetOrders>> = [];
-            let ordCheckFailed = false;
-            try {
-              orders = await bybitGetOrders();
-            } catch (e) {
-              ordCheckFailed = true;
-              console.warn(`[rule7] ${sym} — bybitGetOrders failed at 15s TP1 check:`, (e as Error).message);
-              await alertFn?.(`⚠️ Rule 7: could not verify TP1 order for ${sym} — exchange check failed. Verify manually.`).catch(() => {});
-            }
-            if (!ordCheckFailed) {
-              const tp1Order = orders.find(o => o.symbol === sym && Math.abs(o.price - tp1Target) / tp1Target < 0.001);
-              console.log(`[rule7] ${sym} — 15s TP1 limit check: ${tp1Order ? `live(orderId=${tp1Order.orderId})` : "MISSING"}`);
-              if (!tp1Order) {
-                console.warn(`[rule7] ${sym} — TP1 limit order not live on exchange 15s after fill (expected ~$${tp1Target})`);
-                await alertFn?.(`⚠️ Rule 7: TP1 limit order not live on exchange 15s after fill — ${sym}\nExpected TP1: $${tp1Target?.toFixed(4) ?? "?"}\nVerify manually on Bybit.`).catch(() => {});
-              }
+          // TP1 monitoring check — TP1 exits via checkPartialExits() (a monitored market sell
+          // when price crosses the level), NOT a standing Bybit limit order. Searching
+          // bybitGetOrders() for a TP1 limit produces a 100% false-positive rate.
+          // Instead: verify positionMeta.tp1 is set, which is what checkPartialExits() reads.
+          // Only runs when position has actually filled (liveP exists) — unfilled limit entries
+          // defer metadata to fill detection and correctly skip this check.
+          if (tp1Target && liveP) {
+            const s15    = await loadBotState().catch(() => null);
+            const pm15   = ((s15?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
+            const tp1Tracked = (pm15?.tp1 ?? 0) > 0;
+            console.log(`[rule7] ${sym} — 15s TP1 monitoring: ${tp1Tracked ? `active($${pm15!.tp1!.toFixed(4)})` : "NOT TRACKED in positionMeta"}`);
+            if (!tp1Tracked) {
+              console.warn(`[rule7] ${sym} — TP1 not in positionMeta 15s after fill (expected ~$${tp1Target}) — checkPartialExits will not trigger`);
+              await alertFn?.(`⚠️ Rule 7: TP1 monitoring not active 15s after fill — ${sym}\nExpected TP1: ~$${tp1Target?.toFixed(4) ?? "?"}\npositionMeta.tp1 not set — checkPartialExits cannot fire at this level. Verify.`).catch(() => {});
             }
           }
         }, 15000);
