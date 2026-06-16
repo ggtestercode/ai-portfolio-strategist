@@ -410,15 +410,26 @@ async function cancelStaleOrders(): Promise<{
         await bybitCancelOrder(order.symbol, order.orderId).catch(e =>
           console.warn(`[cronScanner] Cancel order ${order.orderId} failed:`, e.message)
         );
-        // Void the trade_log entry — no position was ever opened, no reflection needed
+        // Void the trade_log entry — target the row opened near order.placedAt (±5min)
+        // so a newer same-symbol entry is never accidentally closed.
+        const placedAtMs = new Date(order.placedAt).getTime();
         await db.update(tradeLogTable)
           .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
-          .where(and(eq(tradeLogTable.symbol, order.symbol), isNull(tradeLogTable.exitAt)))
-          .catch(() => {});
+          .where(and(
+            eq(tradeLogTable.symbol, order.symbol),
+            isNull(tradeLogTable.exitAt),
+            gte(tradeLogTable.entryAt, new Date(placedAtMs - 5 * 60_000)),
+            lte(tradeLogTable.entryAt, new Date(placedAtMs + 5 * 60_000)),
+          ))
+          .catch(e => {
+            const msg = `⚠️ DB/Bybit mismatch: ${order.symbol} cancelled on Bybit (${order.orderId.slice(0, 8)}) but trade_log exit_at NOT updated — manual cleanup required. Error: ${(e as Error).message}`;
+            console.error("[cancelStale] DB void failed:", msg);
+            alertFn?.(msg).catch(() => {});
+          });
         await removePendingLimitFill(order.symbol).catch(() => {});
         await clearPositionMeta(order.symbol).catch(() => {});
-        await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 4h, re-evaluating`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
-        console.log(`[cronScanner] Cancelled stale 4h order ${order.orderId} ${order.symbol}`);
+        await alertFn?.(`🚫 Limit order ${order.symbol} $${order.price} cancelled — unfilled after 3h50m, re-evaluating`).catch(e => console.error("[telegram] Send failed:", (e as Error).message));
+        console.log(`[cronScanner] Cancelled stale order ${order.orderId} ${order.symbol}`);
         cancelled.push({ symbol: order.symbol, price: order.price });
       } else {
         active.push({ symbol: order.symbol, side: order.side, price: order.price, qty: order.qty, placedAt: order.placedAt });
@@ -1785,10 +1796,20 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             const cancelOk = await bybitCancelOrder(sym, old.orderId).then(() => true)
               .catch(e => { console.warn(`[dedup] cancel failed ${sym}:`, e.message); return false; });
             if (cancelOk) {
+              const flipPlacedMs = new Date(old.placedAt).getTime();
               await db.update(tradeLogTable)
                 .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
-                .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
-                .catch(() => {});
+                .where(and(
+                  eq(tradeLogTable.symbol, sym),
+                  isNull(tradeLogTable.exitAt),
+                  gte(tradeLogTable.entryAt, new Date(flipPlacedMs - 5 * 60_000)),
+                  lte(tradeLogTable.entryAt, new Date(flipPlacedMs + 5 * 60_000)),
+                ))
+                .catch(e => {
+                  const msg = `⚠️ DB/Bybit mismatch: ${sym} direction-flip cancel on Bybit succeeded but trade_log exit_at NOT updated — manual cleanup required. Error: ${(e as Error).message}`;
+                  console.error("[dedup] direction-flip DB void failed:", msg);
+                  alertFn?.(msg).catch(() => {});
+                });
               await removePendingLimitFill(sym).catch(() => {});
               await clearPositionMeta(sym).catch(() => {});
               await alertFn?.(`🔄 Dedup ${sym}: direction flipped (${oldDir}→${newDir}), old limit $${old.price} cancelled — placing fresh ${newDir}`).catch(() => {});
@@ -1836,10 +1857,20 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
                   await alertFn?.(`⚠️ Dedup ${sym}: cancel-old FAILED (same-price replace) — skipping new signal to prevent double-fill`).catch(() => {});
                   continue;
                 }
+                const spPlacedMs = new Date(old.placedAt).getTime();
                 await db.update(tradeLogTable)
                   .set({ exitAt: new Date(), pnl: "0", pnlPct: "0" })
-                  .where(and(eq(tradeLogTable.symbol, sym), isNull(tradeLogTable.exitAt)))
-                  .catch(() => {});
+                  .where(and(
+                    eq(tradeLogTable.symbol, sym),
+                    isNull(tradeLogTable.exitAt),
+                    gte(tradeLogTable.entryAt, new Date(spPlacedMs - 5 * 60_000)),
+                    lte(tradeLogTable.entryAt, new Date(spPlacedMs + 5 * 60_000)),
+                  ))
+                  .catch(e => {
+                    const msg = `⚠️ DB/Bybit mismatch: ${sym} same-price cancel on Bybit succeeded but trade_log exit_at NOT updated — manual cleanup required. Error: ${(e as Error).message}`;
+                    console.error("[dedup] same-price DB void failed:", msg);
+                    alertFn?.(msg).catch(() => {});
+                  });
                 await removePendingLimitFill(sym).catch(() => {});
                 await clearPositionMeta(sym).catch(() => {});
                 await alertFn?.(`🔄 Dedup ${sym}: same-price replace — old $${old.price} cancelled, placing fresh with new SL/TP`).catch(() => {});
