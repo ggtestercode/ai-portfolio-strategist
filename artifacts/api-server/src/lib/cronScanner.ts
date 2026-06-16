@@ -3048,6 +3048,80 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
+
+// Restores tradingPaused from DB so a halted bot stays halted across PM2 restarts.
+// Daily-loss pauses auto-expire at UTC midnight (getDailyPnl() returns 0 for a fresh
+// day — if the threshold is no longer breached, the pause is auto-cleared in DB).
+// Drawdown pauses never auto-expire and always require manual /resume.
+async function restorePauseState(): Promise<void> {
+  try {
+    const [row] = await db.select({
+      tradingPaused: botStateTable.tradingPaused,
+      pausedReason:  botStateTable.pausedReason,
+      peakEquity:    botStateTable.peakEquity,
+    }).from(botStateTable).limit(1);
+
+    if (!row?.tradingPaused) {
+      console.log("[cronScanner] Pause state: not paused — starting normally");
+      return;
+    }
+
+    const reason      = row.pausedReason ?? "";
+    const peakProxy   = row.peakEquity ?? 0;  // used as balance proxy when balance unavailable
+    const isDrawdown  = reason.includes("Peak drawdown");
+    const isDailyLoss = reason.includes("Daily loss limit");
+
+    if (isDrawdown) {
+      tradingPaused = true;
+      pausedReason  = reason;
+      const warn = `⚠️ Restarted while peak-drawdown halt was active — trading remains PAUSED. Use /resume to lift.`;
+      console.warn("[cronScanner]", warn);
+      alertFn?.(warn).catch(() => {});
+      return;
+    }
+
+    if (isDailyLoss) {
+      // getDailyPnl() resets to 0 at UTC midnight — auto-clear if new day has no losses.
+      // peakProxy overestimates balance slightly, making the threshold more conservative (safe).
+      const dailyPnl      = await getDailyPnl().catch(() => -Infinity); // err → keep paused (safe)
+      const lossThreshold = peakProxy > 0 ? -(peakProxy * DAILY_LOSS_PCT) : -Infinity;
+
+      if (dailyPnl > lossThreshold) {
+        // New UTC day (or P&L no longer at halt level) — auto-clear pause
+        tradingPaused = false;
+        pausedReason  = "";
+        await db.update(botStateTable)
+          .set({ tradingPaused: false, pausedReason: null, lastUpdated: new Date() })
+          .where(eq(botStateTable.id, 1))
+          .catch(e => console.warn("[cronScanner] Auto-clear daily-loss pause failed:", (e as Error).message));
+        const info = `✅ Daily-loss pause auto-cleared on restart — new UTC day, P&L resets at midnight. Trading resumed.`;
+        console.log("[cronScanner]", info);
+        alertFn?.(info).catch(() => {});
+      } else {
+        // Daily loss still at or above limit for today
+        tradingPaused = true;
+        pausedReason  = reason;
+        const warn = `⚠️ Restarted while daily-loss halt was still active (daily P&L ${dailyPnl >= 0 ? "+" : ""}${dailyPnl.toFixed(2)}) — trading remains PAUSED. Use /resume to lift or wait for UTC midnight.`;
+        console.warn("[cronScanner]", warn);
+        alertFn?.(warn).catch(() => {});
+      }
+      return;
+    }
+
+    // Unknown pause type — restore conservatively (never silently resume after an unknown halt)
+    tradingPaused = true;
+    pausedReason  = reason;
+    const warn = `⚠️ Restarted while trading was paused (unrecognised pause type) — trading remains PAUSED. Use /resume to lift.`;
+    console.warn("[cronScanner]", warn);
+    alertFn?.(warn).catch(() => {});
+
+  } catch (e) {
+    // On DB error, default to NOT restoring pause — a DB glitch should not permanently freeze the bot.
+    // The loss-limit check in runCronScan will re-trigger the pause if limits are still breached.
+    console.warn("[cronScanner] restorePauseState failed — defaulting to unpaused:", (e as Error).message);
+  }
+}
+
 export function startCronScanner(): void {
   if (SCAN_INTERVAL === "disabled") {
     cronEnabled = false;
@@ -3058,6 +3132,8 @@ export function startCronScanner(): void {
   if (!cron.validate(SCAN_INTERVAL)) console.warn(`[cronScanner] Invalid SCAN_INTERVAL, using every 30 min`);
   cronTask = cron.schedule(interval, () => { void runCronScan("cron").catch(e => console.error("[cronScanner] unhandled:", e)); });
   console.log(`[cronScanner] Started — schedule: ${humanInterval(interval)}`);
+  // Async: restores pause state before the first scan fires (first scan is ≥10s away)
+  void restorePauseState();
 }
 
 export function setCronEnabled(enabled: boolean): void {
