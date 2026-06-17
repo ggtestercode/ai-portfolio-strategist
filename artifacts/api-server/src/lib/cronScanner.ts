@@ -14,9 +14,8 @@ import {
   closePosition   as bybitClose,
   cancelOrder     as bybitCancelOrder,
   getOrders       as bybitGetOrders,
-  getTpslOrders   as bybitGetTpslOrders,
-  setTp1Partial   as bybitSetTp1Partial,
-  setTp2Partial   as bybitSetTp2Partial,
+  getTpslOrders         as bybitGetTpslOrders,
+  ensurePartialOrder    as bybitEnsurePartialOrder,
   closePercentPosition,
   setStopLoss     as bybitSetStopLoss,
   setTrailingStop,
@@ -2444,9 +2443,8 @@ async function checkPositionMonitor(): Promise<void> {
         tp2ClosePercent: pending.tp2ClosePercent,
       }).catch(() => {});
       if (pending.tp1 && pending.tp1 > 0) {
-        const tp1Placed = await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size, pending.tp1ClosePercent)
-          .catch(() => false);
-        console.log(`[posMonitor] ${pos.symbol} TP1 placement on fill: ${tp1Placed ? `OK ($${pending.tp1})` : "FAILED — alert sent"}`);
+        const r = await bybitEnsurePartialOrder(pos.symbol, "PartialTakeProfit", pending.tp1, pos.size, pos.positionIdx, pending.tp1ClosePercent);
+        console.log(`[posMonitor] ${pos.symbol} TP1 on fill: ${r} ($${pending.tp1})`);
       }
       // Fix 3: 15s post-fill TP1 verification — runs regardless of whether the signal included tp1.
       // Reads positionMeta at 15s (includes ATR fallback values written by applyAtrSlTp).
@@ -2466,8 +2464,8 @@ async function checkPositionMonitor(): Promise<void> {
         }
       }, 15000);
       if (pending.tp2 && pending.tp2 > 0 && (pending.tp2ClosePercent ?? 100) < 100) {
-        await bybitSetTp2Partial(pos.symbol, pending.tp2, pos.positionIdx, pos.size, pending.tp2ClosePercent)
-          .catch(e => console.warn(`[posMonitor] TP2 on fill ${pos.symbol}:`, (e as Error).message));
+        const r = await bybitEnsurePartialOrder(pos.symbol, "PartialTakeProfit", pending.tp2, pos.size, pos.positionIdx, pending.tp2ClosePercent);
+        console.log(`[posMonitor] ${pos.symbol} TP2 on fill: ${r} ($${pending.tp2})`);
       }
       await alertFn?.([
         `✅ <b>Limit filled — ${pos.symbol} ${pending.direction.toUpperCase()}</b>`,
