@@ -202,6 +202,70 @@ export async function getTpslOrders(symbol?: string): Promise<BybitTpslOrder[]> 
   }));
 }
 
+// ── Idempotent partial conditional order placement ────────────────────────────
+// Root fix for per-site idempotency gaps: all PartialTakeProfit/PartialStopLoss placements
+// route through this function instead of calling setTp1Partial/setTp2Partial directly.
+//
+// Guarantees:
+//   1. FAIL-CLOSED: if the exchange check fails (API down/timeout), the order is NOT placed
+//      and an alert fires — never place blind on an uncertain exchange state.
+//   2. IDEMPOTENT: matches existing orders by type AND price (±0.1%) so TP1 and TP2 partials
+//      at different prices don't confuse each other.
+//   3. CORRECT ENDPOINT: uses orderFilter=StopOrder (where PartialTakeProfit lives), not
+//      orderFilter=tpslOrder (which returns empty for these orders).
+//
+// CALLERS own business-logic pre-checks (tp1Executed, size-shrink, closePercent < 100).
+// This function owns only the exchange-state check and idempotent placement.
+//
+// qty parameter = current position size (not order size); setTp1Partial computes partial qty.
+export type EnsurePartialResult = "placed" | "skipped-exists" | "skipped-error";
+
+export async function ensurePartialOrder(
+  symbol:       string,
+  type:         "PartialTakeProfit" | "PartialStopLoss",
+  price:        number,
+  qty:          number,
+  positionIdx:  number,
+  closePercent  = 30,
+): Promise<EnsurePartialResult> {
+  const sym = normalise(symbol);
+  const pfx = `[ensurePartialOrder] ${sym} ${type} $${price.toFixed(4)}`;
+
+  // Step 1: query exchange via raw get — getTpslOrders silently returns [] on error,
+  // so we call get() directly to distinguish API failure from a genuinely empty list.
+  type RawOrder = { symbol: string; stopOrderType?: string; triggerPrice?: string; qty?: string; orderId: string };
+  let orders: RawOrder[];
+  try {
+    const r = await get<{ list: RawOrder[] }>(
+      "/v5/order/realtime",
+      { category: "linear", orderFilter: "StopOrder", symbol: sym, settleCoin: "USDT" }
+    );
+    orders = r.list;
+  } catch (e) {
+    console.error(`${pfx}: exchange check FAILED —`, (e as Error).message);
+    await _bybitAlertFn?.(`⚠️ ${sym}: ${type} exchange check failed — NOT placed, verify manually`).catch(() => {});
+    return "skipped-error";
+  }
+
+  // Step 2: match by type AND price within 0.1% — price matching is required so a live
+  // TP1 at $209.2 does not cause the TP2 guard at $203 to return skipped-exists.
+  const PRICE_TOL = 0.001;
+  const found = orders.find(
+    o => (o.stopOrderType ?? "") === type &&
+      Math.abs(parseFloat(o.triggerPrice ?? "0") - price) / price < PRICE_TOL
+  );
+  if (found) {
+    console.log(`${pfx}: skipped — exists on exchange (id=...${found.orderId.slice(-8)})`);
+    return "skipped-exists";
+  }
+
+  // Step 3: place — setTp1Partial handles retry (3 attempts) and its own alert on failure.
+  // Both TP1 and TP2 partials are PartialTakeProfit on Bybit; the distinction is the price.
+  console.log(`${pfx}: placing (posQty=${qty} closePercent=${closePercent})`);
+  const placed = await setTp1Partial(sym, price, positionIdx, qty, closePercent);
+  return placed ? "placed" : "skipped-error";
+}
+
 export async function cancelOrder(symbol: string, orderId: string): Promise<void> {
   const sym = normalise(symbol);
   await bpost("/v5/order/cancel", { category: "linear", symbol: sym, orderId });
