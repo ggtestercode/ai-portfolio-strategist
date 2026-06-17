@@ -2447,18 +2447,24 @@ async function checkPositionMonitor(): Promise<void> {
         const tp1Placed = await bybitSetTp1Partial(pos.symbol, pending.tp1, pos.positionIdx, pos.size, pending.tp1ClosePercent)
           .catch(() => false);
         console.log(`[posMonitor] ${pos.symbol} TP1 placement on fill: ${tp1Placed ? `OK ($${pending.tp1})` : "FAILED — alert sent"}`);
-        // 15s post-fill verification: confirm PartialTakeProfit is actually on Bybit
-        const _fillSym = pos.symbol;
-        const _fillTp1 = pending.tp1;
-        setTimeout(async () => {
+      }
+      // Fix 3: 15s post-fill TP1 verification — runs regardless of whether the signal included tp1.
+      // Reads positionMeta at 15s (includes ATR fallback values written by applyAtrSlTp).
+      // Alerts with symbol + expected price + "software-only" context if exchange TP1 is missing.
+      const _fillSym = pos.symbol;
+      setTimeout(async () => {
+        const s15   = await loadBotState().catch(() => null);
+        const pm15  = ((s15?.positionMetadata ?? {}) as Record<string, PositionMeta>)[_fillSym];
+        const expectedTp1 = pm15?.tp1 ?? 0;
+        if (expectedTp1 > 0) {
           const tpslOrders = await bybitGetTpslOrders(_fillSym).catch(() => [] as BybitTpslOrder[]);
           const tp1OnBybit = tpslOrders.some(o => o.stopOrderType === "PartialTakeProfit");
-          console.log(`[posMonitor] ${_fillSym} — 15s post-fill TP1: Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
+          console.log(`[posMonitor] ${_fillSym} — 15s post-fill TP1: meta=$${expectedTp1.toFixed(4)} Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
           if (!tp1OnBybit) {
-            await alertFn?.(`⚠️ ${_fillSym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${_fillTp1.toFixed(4)}) — verify/replace manually`).catch(() => {});
+            await alertFn?.(`⚠️ ${_fillSym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${expectedTp1.toFixed(4)}) — software-only fallback, verify/replace manually`).catch(() => {});
           }
-        }, 15000);
-      }
+        }
+      }, 15000);
       if (pending.tp2 && pending.tp2 > 0 && (pending.tp2ClosePercent ?? 100) < 100) {
         await bybitSetTp2Partial(pos.symbol, pending.tp2, pos.positionIdx, pos.size, pending.tp2ClosePercent)
           .catch(e => console.warn(`[posMonitor] TP2 on fill ${pos.symbol}:`, (e as Error).message));

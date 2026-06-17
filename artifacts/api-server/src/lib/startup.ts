@@ -11,9 +11,11 @@ import {
   getClosedPnl    as bybitGetClosedPnl,
   setTp1Partial   as bybitSetTp1Partial,
   setTp2Partial   as bybitSetTp2Partial,
+  getTpslOrders   as bybitGetTpslOrders,
   getKlines,
   getTicker,
   type BybitKline,
+  type BybitTpslOrder,
 } from "../brokers/bybit";
 import { openPosition as okxOpen, testConnection, setPositionMode } from "../brokers/okx";
 import { openPositionPaper }       from "../brokers/okxPaper";
@@ -130,6 +132,23 @@ export async function applyAtrSlTp(
     bybitSetTakeProfit(symbol, exchangeTp, positionIdx),
   ]);
 
+  // Fix 1: place TP1 on exchange — guarded against double-placement and post-fire restarts.
+  // (a) check Bybit for existing PartialTakeProfit; (b) check if position already shrank ≥15%
+  // (TP1 fired during downtime) via positionMeta.tp1Executed or size comparison.
+  const [_guardRow] = await db.select({ positionMetadata: botStateTable.positionMetadata })
+    .from(botStateTable).limit(1).catch(() => [null]);
+  const _existingPm = ((_guardRow?.positionMetadata ?? {}) as Record<string, PositionMeta>)[symbol];
+  const _tp1AlreadyFired = (_existingPm?.tp1Executed ?? false) ||
+    Boolean(_existingPm?.originalQty && _existingPm.originalQty > 0 && originalQty < _existingPm.originalQty * 0.85);
+  const _tpslCheck = await bybitGetTpslOrders(symbol).catch(() => [] as BybitTpslOrder[]);
+  const _tp1OnBybit = _tpslCheck.some(o => o.stopOrderType === "PartialTakeProfit");
+  if (!_tp1OnBybit && !_tp1AlreadyFired) {
+    await bybitSetTp1Partial(symbol, tp1, positionIdx, originalQty).catch(e =>
+      console.warn(`[startup] applyAtrSlTp TP1 placement failed ${symbol}:`, (e as Error).message));
+  } else {
+    console.log(`[startup] applyAtrSlTp ${symbol} TP1 skipped — tp1OnBybit=${_tp1OnBybit} alreadyFired=${_tp1AlreadyFired}`);
+  }
+
   await storePositionMeta(symbol, {
     originalQty,
     entryPrice,
@@ -189,11 +208,35 @@ async function recoverPendingLimitFills(): Promise<void> {
     pendingLimitFills.set(symbol, fill);
     toKeep[symbol] = fill;
     const tp1Executed = (posMeta[symbol]?.tp1Executed ?? false);
-    if (!tp1Executed && fill.tp1 && fill.tp1 > 0) {
-      console.log(`[startup] Recovering TP1 partial for ${symbol} at $${fill.tp1} (${fill.tp1ClosePercent ?? 30}%)`);
-      const tp1Recovered = await bybitSetTp1Partial(symbol, fill.tp1, fill.positionIdx, livePos.size, fill.tp1ClosePercent)
-        .catch(() => false);
-      console.log(`[startup] ${symbol} TP1 recovery: ${tp1Recovered ? `OK ($${fill.tp1})` : "FAILED — alert sent by setTp1Partial"}`);
+    // Fix 2: guard against re-placing TP1 after it already fired during bot downtime.
+    // If position has shrunk ≥15% since fill, TP1 already executed — mark and skip.
+    const originalFillQty = fill.qty ?? 0;
+    if (!tp1Executed && originalFillQty > 0 && livePos.size < originalFillQty * 0.85) {
+      console.log(`[startup] ${symbol} TP1 already fired (live ${livePos.size} < ${originalFillQty} × 0.85) — marking tp1Executed, skipping`);
+      const [_pr] = await db.select({ positionMetadata: botStateTable.positionMetadata })
+        .from(botStateTable).limit(1).catch(() => [null]);
+      const _pm = (_pr?.positionMetadata ?? {}) as Record<string, PositionMeta>;
+      _pm[symbol] = { ...(_pm[symbol] ?? {} as PositionMeta), tp1Executed: true };
+      await db.update(botStateTable)
+        .set({ positionMetadata: _pm, lastUpdated: new Date() })
+        .where(eq(botStateTable.id, 1)).catch(() => {});
+    } else {
+      // Resolve TP1: use signal value if present, otherwise fall back to positionMeta ATR value.
+      // The ATR fallback path handles positions whose signal lacked tp1 (e.g. HYPE $73.4).
+      const resolvedTp1 = (fill.tp1 && fill.tp1 > 0) ? fill.tp1 : (posMeta[symbol]?.tp1 ?? 0);
+      if (!tp1Executed && resolvedTp1 > 0) {
+        // Idempotency: skip if PartialTakeProfit already live on Bybit
+        const _recTpsl = await bybitGetTpslOrders(symbol).catch(() => [] as BybitTpslOrder[]);
+        const _recTp1OnBybit = _recTpsl.some(o => o.stopOrderType === "PartialTakeProfit");
+        if (_recTp1OnBybit) {
+          console.log(`[startup] ${symbol} TP1 already on exchange — skipping recovery`);
+        } else {
+          console.log(`[startup] Recovering TP1 partial for ${symbol} at $${resolvedTp1} (${fill.tp1ClosePercent ?? 30}%)`);
+          const tp1Recovered = await bybitSetTp1Partial(symbol, resolvedTp1, fill.positionIdx, livePos.size, fill.tp1ClosePercent)
+            .catch(() => false);
+          console.log(`[startup] ${symbol} TP1 recovery: ${tp1Recovered ? `OK ($${resolvedTp1})` : "FAILED — alert sent by setTp1Partial"}`);
+        }
+      }
     }
     if (fill.tp2 && fill.tp2 > 0 && (fill.tp2ClosePercent ?? 100) < 100) {
       console.log(`[startup] Recovering TP2 partial for ${symbol} at $${fill.tp2} (${fill.tp2ClosePercent}%)`);
