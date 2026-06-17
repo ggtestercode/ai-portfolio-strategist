@@ -182,9 +182,10 @@ export async function getOrders(): Promise<BybitOrder[]> {
 }
 
 // Returns TP/SL conditional orders (PartialTakeProfit, TakeProfit, StopLoss, PartialStopLoss).
-// These do NOT appear in getOrders() (orderFilter:"Order") — they require orderFilter:"tpslOrder".
+// IMPORTANT: orderFilter="StopOrder" is required — PartialTakeProfit conditionals placed via
+// /v5/position/trading-stop live here. orderFilter="tpslOrder" returns empty for these orders.
 export async function getTpslOrders(symbol?: string): Promise<BybitTpslOrder[]> {
-  const params: Record<string, string> = { category: "linear", orderFilter: "tpslOrder", settleCoin: "USDT" };
+  const params: Record<string, string> = { category: "linear", orderFilter: "StopOrder", settleCoin: "USDT" };
   if (symbol) params["symbol"] = normalise(symbol);
   const r = await get<{ list: Array<{ symbol: string; stopOrderType?: string; triggerPrice?: string; qty?: string; orderId: string }> }>(
     "/v5/order/realtime", params
