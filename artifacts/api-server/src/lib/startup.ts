@@ -124,10 +124,25 @@ export async function applyAtrSlTp(
   const tp2        = dbTp2 > 0 ? dbTp2 : atrTp2;
   const exchangeTp = dbTp2 > 0 ? dbTp2 : atrTp1; // Full-mode TP on exchange = TP2 if known
 
-  await Promise.allSettled([
-    slOnside(sl) ? bybitSetStopLoss(symbol, sl, positionIdx) : Promise.resolve(),
-    bybitSetTakeProfit(symbol, exchangeTp, positionIdx),
-  ]);
+  // SL and TP placed separately so we can capture SL success/failure for verification.
+  const slPlaced = slOnside(sl) ? await bybitSetStopLoss(symbol, sl, positionIdx) : false;
+  await bybitSetTakeProfit(symbol, exchangeTp, positionIdx);
+  // Async SL verification: re-read Bybit 5s later to confirm SL is actually live.
+  // Catches the rare case where the API returned OK but the exchange state didn't register.
+  if (slOnside(sl)) {
+    const _vSym = symbol.toUpperCase().replace(/[-/]/g, "").replace(/[^A-Z0-9]/g, "");
+    const _vNorm = (_vSym.endsWith("USDT") || _vSym.endsWith("USDC")) ? _vSym : `${_vSym}USDT`;
+    const _vSl = sl;
+    setTimeout(async () => {
+      const vPs = await bybitGetPositions().catch(() => []);
+      const vP  = vPs.find(p => p.symbol === _vNorm);
+      if (vP && !(vP.stopLoss && vP.stopLoss > 0)) {
+        await sendAlert(`⚠️ ${_vNorm}: SL NOT live on Bybit (expected $${_vSl.toFixed(4)}) — position UNPROTECTED, verify/set manually`).catch(() => {});
+      } else if (vP) {
+        console.log(`[startup] ${_vNorm} SL verify: $${vP.stopLoss} ✓ (placed=${slPlaced})`);
+      }
+    }, 5000);
+  }
 
   // Caller pre-check: skip if TP1 already fired during downtime (tp1Executed flag or ≥15% size shrink).
   // ensurePartialOrder handles the exchange-side idempotency check internally (fail-closed).
@@ -511,19 +526,36 @@ async function setSlTpForExistingPositions(): Promise<void> {
           : claudeSl;
         const slSource    = chosenSl !== claudeSl ? "positionMeta ratchet" : "trade_log";
 
-        await bybitSetStopLoss(pos.symbol, chosenSl, pos.positionIdx)
-          .catch(e => console.warn(`[startup] setStopLoss ${pos.symbol}:`, e.message));
-        await storePositionMeta(pos.symbol, {
-          originalQty: pm?.originalQty ?? pos.size,
-          entryPrice:  pos.entryPrice,
-          sl:          chosenSl,
-          atr:         pm?.atr ?? 0,
-          tp1:         pm?.tp1 ?? (dbRows[0]?.tp1 ? parseFloat(dbRows[0].tp1!) : pos.entryPrice + mult * 0.01),
-          tp2:         pm?.tp2 ?? (dbRows[0]?.tp2 ? parseFloat(dbRows[0].tp2!) : pos.entryPrice + mult * 0.02),
-          openedAt:    pm?.openedAt ?? (pos.openTime ?? Date.now()),
-        }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}:`, e.message));
-        console.log(`[startup] ${pos.symbol} — SL $${chosenSl.toFixed(4)} (${slSource})`);
-        continue;
+        const slPlaced = await bybitSetStopLoss(pos.symbol, chosenSl, pos.positionIdx);
+        // CRITICAL: only short-circuit on success. On failure, fall through to Priority 2/3
+        // so ATR backstop SL can still be set. bybitSetStopLoss alerts after 3 retries.
+        if (slPlaced) {
+          await storePositionMeta(pos.symbol, {
+            originalQty: pm?.originalQty ?? pos.size,
+            entryPrice:  pos.entryPrice,
+            sl:          chosenSl,
+            atr:         pm?.atr ?? 0,
+            tp1:         pm?.tp1 ?? (dbRows[0]?.tp1 ? parseFloat(dbRows[0].tp1!) : pos.entryPrice + mult * 0.01),
+            tp2:         pm?.tp2 ?? (dbRows[0]?.tp2 ? parseFloat(dbRows[0].tp2!) : pos.entryPrice + mult * 0.02),
+            openedAt:    pm?.openedAt ?? (pos.openTime ?? Date.now()),
+          }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}:`, e.message));
+          console.log(`[startup] ${pos.symbol} — SL $${chosenSl.toFixed(4)} (${slSource})`);
+          // Async verification: confirm SL actually live on exchange 5s later.
+          const _vsym = pos.symbol, _vsl = chosenSl;
+          setTimeout(async () => {
+            const vPs = await bybitGetPositions().catch(() => []);
+            const vP  = vPs.find(p => p.symbol === _vsym);
+            if (vP && !(vP.stopLoss && vP.stopLoss > 0)) {
+              await sendAlert(`⚠️ ${_vsym}: SL NOT live after Priority 1 placement (expected $${_vsl.toFixed(4)}) — position UNPROTECTED, verify/set manually`).catch(() => {});
+            } else if (vP) {
+              console.log(`[startup] ${_vsym} SL verify (P1): $${vP.stopLoss} ✓`);
+            }
+          }, 5000);
+          continue;
+        } else {
+          console.warn(`[startup] ${pos.symbol} — Priority 1 SL failed after retries, falling through to Priority 2/3`);
+          // fallthrough: Priority 2 checks existing exchange SL, Priority 3 tries ATR
+        }
       }
     }
 
@@ -582,10 +614,8 @@ async function setSlTpForExistingPositions(): Promise<void> {
       console.warn(`[startup] ${pos.symbol} ATR SL=$${sl.toFixed(4)} invalid vs live $${livePrice.toFixed(4)} — skipping SL`);
     }
 
-    await Promise.allSettled([
-      slValid ? bybitSetStopLoss(pos.symbol, sl, pos.positionIdx) : Promise.resolve(),
-      bybitSetTakeProfit(pos.symbol, tp2, pos.positionIdx),
-    ]);
+    const slPlaced = slValid ? await bybitSetStopLoss(pos.symbol, sl, pos.positionIdx) : false;
+    await bybitSetTakeProfit(pos.symbol, tp2, pos.positionIdx);
 
     await storePositionMeta(pos.symbol, {
       originalQty: pm?.originalQty ?? pos.size,
@@ -598,5 +628,19 @@ async function setSlTpForExistingPositions(): Promise<void> {
     }).catch(e => console.warn(`[startup] storePositionMeta ${pos.symbol}: ${e.message}`));
 
     console.log(`[startup] ${pos.symbol} — ATR fallback SL (no prior SL found): $${sl.toFixed(4)}`);
+
+    // Async verification — this is the last-resort path: alert immediately if SL still missing.
+    if (slValid) {
+      const _vsym = pos.symbol, _vsl = sl;
+      setTimeout(async () => {
+        const vPs = await bybitGetPositions().catch(() => []);
+        const vP  = vPs.find(p => p.symbol === _vsym);
+        if (vP && !(vP.stopLoss && vP.stopLoss > 0)) {
+          await sendAlert(`⚠️ ${_vsym}: SL NOT live after ATR fallback (expected $${_vsl.toFixed(4)}) — position UNPROTECTED, verify/set manually`).catch(() => {});
+        } else if (vP) {
+          console.log(`[startup] ${_vsym} SL verify (P3): $${vP.stopLoss} ✓ (placed=${slPlaced})`);
+        }
+      }, 5000);
+    }
   }
 }

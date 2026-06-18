@@ -519,10 +519,28 @@ export async function setTrailingStop(symbol: string, trailingPct = 0.40): Promi
   console.log(`[Bybit] Trailing stop ${trailingPct * 100}% on ${sym} posIdx=${posIdx} ≈ $${trail}`);
 }
 
-export async function setStopLoss(symbol: string, stopLossPrice: number, positionIdx = 0): Promise<void> {
+export async function setStopLoss(symbol: string, stopLossPrice: number, positionIdx = 0): Promise<boolean> {
   const sym = normalise(symbol);
-  await bpost("/v5/position/trading-stop", { category: "linear", symbol: sym, stopLoss: String(stopLossPrice), positionIdx })
-    .catch(e => console.warn(`[Bybit] setStopLoss ${sym}: ${e.message}`));
+  let slSet = false;
+  for (let attempt = 1; attempt <= 3 && !slSet; attempt++) {
+    try {
+      await bpost("/v5/position/trading-stop", {
+        category: "linear", symbol: sym, stopLoss: String(stopLossPrice), positionIdx,
+      });
+      slSet = true;
+      console.log(`[Bybit] SL set ${sym}: $${stopLossPrice}`);
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (msg.includes("34040")) { slSet = true; break; } // "not modified" = already at this price = OK
+      console.warn(`[Bybit] setStopLoss ${sym} attempt ${attempt}/3:`, msg);
+      if (attempt < 3) await new Promise(res => setTimeout(res, 1000));
+    }
+  }
+  if (!slSet) {
+    console.error(`[Bybit] SL NOT set for ${sym} — position may be UNPROTECTED`);
+    _bybitAlertFn?.(`⚠️ ${sym}: STOP LOSS placement FAILED after 3 attempts — position may be UNPROTECTED, verify/set manually`).catch(() => {});
+  }
+  return slSet;
 }
 
 export async function setTakeProfit(symbol: string, takeProfitPrice: number, positionIdx = 0): Promise<void> {
