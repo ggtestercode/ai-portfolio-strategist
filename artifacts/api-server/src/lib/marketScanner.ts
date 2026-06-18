@@ -786,6 +786,7 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
     `WHY NOW: name a specific edge — e.g. 'Funding +0.09% longs trapped at $96.5 rejection'. Generic → direction=neutral.`,
     `RS data: set relativeStrengthVsBtc. CONFLICTS: MAJOR_SKIP→direction=neutral. Sweep→sweepDetected=true+setupType=LIQUIDITY_SWEEP. Squeeze→squeezeDetected=true.`,
     `EXISTING POSITIONS: Do not suggest opening a position on any symbol that already has an open position (shown in "Bybit live positions" above). This applies regardless of direction — no adding a short on a symbol where a long is already open, and vice versa.`,
+    `REGIME IS AUTHORITATIVE: The computed "Market regime (BTC proxy)" is code-derived from ADX, DI+, DI-, and EMA structure — it is a fact, not a label you may override. Do NOT contradict it in your whyNow, reasoning, or score. A CHOPPY regime with high ADX means high volatility WITHOUT directional bias — do not describe it as STRONG_TREND or TRENDING_UP in whyNow. In CHOPPY BTC regime: setupType=MOMENTUM is prohibited regardless of a symbol's own ADX — return direction=neutral for any MOMENTUM idea. Your score must reflect the actual regime; a score above 70 for any MOMENTUM setup in CHOPPY contradicts the classifier and is an error.`,
   ].join("\n");
 
   // Per-symbol regime section: shows each symbol's own 4h ADX/DI alongside BTC proxy.
@@ -904,6 +905,23 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
     const bf = blowoffMap.get(opp.symbol);
     if (bf?.suspected) opp.blowoffSuspected = true;
   }
+
+  // Post-LLM score cap: CHOPPY regime + bullish-trend narrative = classifier-narrative contradiction.
+  // If LLM writes STRONG_TREND/TRENDING_UP in whyNow but BTC regime is CHOPPY, the score is
+  // inflated relative to actual market conditions. Cap at 65 (below any threshold). MOMENTUM+CHOPPY
+  // is already hard-blocked in applyHardFilters; this cap catches other setup types and logs the contradiction.
+  if (regime.regime === "CHOPPY") {
+    for (const opp of opportunities) {
+      if ((opp.score ?? 0) > 65) {
+        const narrative = (opp.whyNow ?? opp.reasoning ?? "").toUpperCase();
+        if (narrative.includes("STRONG_TREND") || narrative.includes("TRENDING_UP")) {
+          console.log(`[gate] CHOPPY+trend-narrative score cap: ${opp.symbol} score ${opp.score}→65 (whyNow: ${(opp.whyNow ?? "").slice(0, 80)})`);
+          opp.score = 65;
+        }
+      }
+    }
+  }
+
   return { opportunities, scanFailed: false };
 }
 

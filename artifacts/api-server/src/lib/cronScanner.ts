@@ -317,6 +317,14 @@ async function applyHardFilters(
       }
     }
 
+    // Hard gate: MOMENTUM in CHOPPY BTC regime — 23% win rate, avg −1.50%, n=13 (Jun-2026 population).
+    // BTC CHOPPY = no macro directional support; altcoin momentum fails to sustain.
+    // Kelly = negative → optimal size = 0 → hard block. Not score-cappable; must exclude entirely.
+    if (opp.setupType === "MOMENTUM" && regime?.regime === "CHOPPY") {
+      rejected.push({ symbol: opp.symbol, reason: `MOMENTUM+CHOPPY gate: BTC non-directional, altcoin momentum fails (23% win, avg −1.50%, n=13)` });
+      continue;
+    }
+
     // Filter 5: Low liquidity (volume24h < $10M)
     if (opp.volume24h && opp.volume24h < 10_000_000) {
       rejected.push({ symbol: opp.symbol, reason: `low liquidity $${(opp.volume24h / 1e6).toFixed(1)}M < $10M` });
@@ -1444,6 +1452,17 @@ async function runWatchScan(): Promise<void> {
           await removeFromWatchList(signal.symbol);
           continue;
         }
+      }
+
+      // Hard gate — MOMENTUM+CHOPPY (mirrors applyHardFilters; watchScan bypasses that path)
+      if (signal.setupType === "MOMENTUM" && regime?.regime === "CHOPPY") {
+        console.log(`[gate] REJECTED ${sym} (watchScan) — MOMENTUM+CHOPPY gate: BTC non-directional, altcoin momentum fails (23% win, avg −1.50%)`);
+        await alertFn?.([
+          `🚫 Entry blocked — ${sym}`,
+          `MOMENTUM+CHOPPY gate: BTC regime non-directional, altcoin momentum historically fails (23% win rate).`,
+        ].join("\n")).catch(() => {});
+        await removeFromWatchList(signal.symbol);
+        continue;
       }
 
       // R:R gate — blended reward across both exits (more reliable than Claude's reported field)
