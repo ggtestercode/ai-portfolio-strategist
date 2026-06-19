@@ -1567,7 +1567,7 @@ async function runWatchScan(): Promise<void> {
         }
         if (gateResult.action === "executed") {
           patchEntrySource(sym, "auto_scan").catch(() => {});
-          patchPositionMeta(sym, { score: signal.score ?? 0 }).catch(() => {});
+          patchPositionMeta(sym, { score: signal.score ?? 0, entryRegime: regime?.regime, setupType: signal.setupType }).catch(() => {});
 
           // Verify metadata completeness, confirm fill on Bybit, then log trade.
           // logOpenTrade is deferred 5s so we can verify the position exists before creating a record.
@@ -2005,7 +2005,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       if (gateResult.action === "executed") {
         openedThisScan++; // track toward position limit
         patchEntrySource(sym, "auto_scan").catch(e => console.warn(`[cronScanner] patchEntrySource ${sym}:`, e.message));
-        patchPositionMeta(sym, { score: opp.score ?? 0 }).catch(() => {});
+        patchPositionMeta(sym, { score: opp.score ?? 0, entryRegime: regime?.regime, setupType: opp.setupType }).catch(() => {});
 
         // Verify metadata completeness — atr excluded: startup stores atr=0 for Claude SL/TP
         setTimeout(async () => {
@@ -2610,17 +2610,20 @@ async function checkPositionMonitor(): Promise<void> {
       continue;
     }
 
-    // Mechanical breakeven: regime-aware threshold via TP1 distance.
-    // If TP1 was set within 1.5% of entry (CHOPPY-calibrated scan target), fire at +0.8% —
-    // protecting directionally-correct CHOPPY trades before the typical ~1.2% reversal.
-    // All other trades (TP1 > 1.5% = trending calibration) keep the standard +2% threshold.
-    // THINLY EVIDENCED: based on 2 clean CHOPPY directional trades (SOL, ATOM Jun 12).
-    // Tune the 0.8% threshold from [choppy_be] observation logs over the next 10-15 CHOPPY trades.
+    // Mechanical breakeven: regime-aware threshold.
+    // CHOPPY → +0.8% trigger (directional trades need early protection before typical reversal).
+    // All other regimes → +2.0% standard threshold.
+    // Reads entryRegime stored in positionMeta at trade entry — canonical source, set by the
+    // scanner that placed the trade. Falls back to the tp1Dist ≤ 1.5% proxy for positions
+    // opened before entryRegime was stored (old trades don't have this field).
     const tp1Meta    = posMeta[pos.symbol]?.tp1;
     const tp1Price   = typeof tp1Meta === "number" ? tp1Meta : parseFloat(String(tp1Meta ?? "0"));
     const tp1DistPct = tp1Price > 0 && pos.entryPrice > 0
       ? Math.abs((tp1Price - pos.entryPrice) / pos.entryPrice * 100) : 0;
-    const isChoppyCalibrated = tp1DistPct > 0 && tp1DistPct <= 1.5;
+    const storedRegime = posMeta[pos.symbol]?.entryRegime;
+    const isChoppyCalibrated = storedRegime !== undefined
+      ? storedRegime === "CHOPPY"
+      : (tp1DistPct > 0 && tp1DistPct <= 1.5); // legacy fallback for pre-entryRegime positions
     const beTriggerPct = isChoppyCalibrated ? 0.8 : 2;
     if (pnlPct >= beTriggerPct && pos.entryPrice > 0) {
       const beSlRaw = posMeta[pos.symbol]?.sl ?? pos.stopLoss ?? 0;
@@ -3072,6 +3075,8 @@ async function runPositionReview(
 }
 
 export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): void {
+  // Run once immediately so a post-deploy restart doesn't create a 10-min coverage gap.
+  void checkPositionMonitor().catch(e => console.error("[posMonitor] startup check:", e));
   setInterval(() => {
     void checkPositionMonitor().catch(e => console.error("[posMonitor]", e));
   }, MONITOR_INTERVAL_MS);
@@ -3128,7 +3133,7 @@ export function startPositionMonitor(alertFn?: (msg: string) => Promise<void>): 
     }
   });
 
-  console.log("[posMonitor] Started — checks every 5 min");
+  console.log(`[posMonitor] Started — immediate check + every ${MONITOR_INTERVAL_MS / 60_000} min`);
   console.log("[dbHealth] Daily 9am SGT DB health check scheduled");
   console.log("[dailySummary] Daily midnight SGT position summary scheduled");
 }

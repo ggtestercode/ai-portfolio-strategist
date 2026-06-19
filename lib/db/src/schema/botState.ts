@@ -23,6 +23,8 @@ export interface PositionMeta {
   openedAt:         number; // epoch ms
   entrySource?:     "manual_nl" | "auto_scan";
   score?:           number;  // Claude signal score at open
+  entryRegime?:     string;  // BTC regime at entry (CHOPPY/TRENDING_UP/etc.) — canonical source for posMonitor beTrigger
+  setupType?:       string;  // scanner setup type (MOMENTUM/VOL_BREAKOUT/etc.)
   trailingActive?:  boolean; // trailing SL has been activated
   lastTrailPrice?:  number;  // price at which trail was last updated
   tp1Executed?:     boolean; // TP1 partial has been executed
