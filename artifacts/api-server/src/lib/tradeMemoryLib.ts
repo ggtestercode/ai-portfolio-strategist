@@ -779,12 +779,16 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `Was SL hit this trade: ${exitMethod === "sl_hit" ? "YES" : "NO"}`,
     `Post-exit adverse continuation: ${maxAdditionalLossPct.toFixed(2)}%`,
     exitBranch === "original_sl"
-      ? `→ slTooTight verdict: was the ORIGINAL entry SL ($${plannedSL.toFixed(4)}, ${slDistancePct.toFixed(2)}% away) placed inside the noise zone? too_tight = SL hit but price then moved in trade direction (original SL was premature). good = appropriate distance. too_wide = absorbed excessive loss before stopping out.`
+      ? `SL-hit wick analysis (CODE-COMPUTED — do not override): slTooTight = ${computedSlTooTight ? "TRUE" : "FALSE"}. ${
+          computedSlTooTight
+            ? `Price wicked through $${plannedSL.toFixed(4)} but the candle CLOSED on the safe side — the SL was triggered by market noise, not a structural break. slPlacement=too_tight is valid here; mistakeType=stop_too_tight is valid here.`
+            : `Price CLOSED through $${plannedSL.toFixed(4)} — this is a structural breach, not a wick artifact. The SL placement was NOT the issue. RULES: slPlacement CANNOT be too_tight (use good or too_wide); mistakeType CANNOT be stop_too_tight (use wrong_direction if directionCorrect=false, or gave_back_profits if trade was previously green). Do NOT infer "stop_too_tight" simply because the SL was hit — that establishes the exit, not the cause.`
+        }`
       : exitBranch === "ratcheted_sl"
       ? (tp1Executed
-        ? `→ slTooTight MUST BE false. The ORIGINAL entry SL was never hit — it was replaced by a profit-protection ratchet after TP1. Set slTooTight=false unconditionally. Instead assess tp2Verdict: was TP2 placed too far to be realistically reached after TP1?`
-        : `→ slTooTight MUST BE false. The ORIGINAL entry SL was never hit — price moved 2%+ into profit triggering a breakeven lock (path-C), then reversed to entry. Set slTooTight=false unconditionally. The original SL distance is irrelevant here. Focus entryTimingVerdict on whether entry timing was early/wrong, and TP1 placement on whether a closer TP1 would have locked profit before the reversal.`)
-      : `→ slTooTight = false (not applicable for TP exits and manual/review closes)`,
+        ? `SL-hit wick analysis: slTooTight = FALSE. The ORIGINAL entry SL was never hit — it was replaced by a profit-protection ratchet after TP1. slPlacement CANNOT be too_tight; mistakeType CANNOT be stop_too_tight. Instead assess tp2Verdict: was TP2 placed too far to be realistically reached after TP1?`
+        : `SL-hit wick analysis: slTooTight = FALSE. The ORIGINAL entry SL was never hit — price moved into profit triggering a breakeven lock (path-C), then reversed to entry. slPlacement CANNOT be too_tight; mistakeType CANNOT be stop_too_tight. The original SL distance is irrelevant here. Focus entryTimingVerdict on whether entry timing was early/wrong, and TP1 placement on whether a closer TP1 would have locked profit before the reversal.`)
+      : `SL-hit wick analysis: slTooTight = FALSE (not applicable for TP exits and manual/review closes). slPlacement CANNOT be too_tight; mistakeType CANNOT be stop_too_tight.`,
     ["manual_full","manual_partial"].includes(exitMethod)
       ? `Verdict needed: na — human closed position, SL was not the exit mechanism`
       : null,
@@ -860,10 +864,10 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `"optimalTp1Price":null,"optimalPnlPct":null,"opportunityCostPct":null,`,
     `"entryCandleQuality":"strong|neutral|weak","entryVolumeConfirmed":true,`,
     `"preTradeWarningsMissed":["string"],"preTradeConfirmationsPresent":["string"],`,
-    `"slPlacement":"good|too_tight|too_wide","tpRealism":"good|too_tight|too_ambitious",`,
+    `"slPlacement":"good|too_tight|too_wide [too_tight ONLY if slTooTight=TRUE above]","tpRealism":"good|too_tight|too_ambitious",`,
     `"slWasCorrect":true,"tpWasConservative":false,"missedGainPct":null,"continuedLossPct":null,`,
     `"sizingCorrect":true,"partialsCorrect":true,"marketContextCorrect":true,`,
-    `"mistakeType":"wrong_direction|late_entry|stop_too_tight|stop_too_wide|chasing_extended_move|gave_back_profits|cut_winner_early|tp2_too_ambitious|position_review_interference|stale_metadata_bug|correct_but_unlucky|null",`,
+    `"mistakeType":"wrong_direction|late_entry|stop_too_tight [ONLY if slTooTight=TRUE above]|stop_too_wide|chasing_extended_move|gave_back_profits|cut_winner_early|tp2_too_ambitious|position_review_interference|stale_metadata_bug|correct_but_unlucky|null",`,
     `"signalsThatWorked":["specific signal name"],"signalsThatFailed":["specific signal name"],`,
     `"signalAccuracyInsight":"one sentence about which signals to trust more/less",`,
     `"candlePatternLesson":"specific candle pattern lesson from this trade",`,
