@@ -80,6 +80,10 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   // Phase 3 reconstruction — batch 7
   pnlSource:              text("pnl_source"),            // 'actual' | 'reconstructed' | 'ambiguous_excluded'
   reconstructedOutcome:   text("reconstructed_outcome"), // 'tp2_hit' | 'sl_hit' | 'inconclusive_review'
+  // Path-C diagnostic — batch 8 (Piece 5)
+  // Gap between breakeven-trigger threshold and TP1 distance. Positive = TP1 set beyond BE trigger;
+  // a wide gap means path-C trades exit with nothing even though price moved into profit.
+  beToTp1GapPct:          decimal("be_to_tp1_gap_pct",  { precision: 10, scale: 4 }),
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;

@@ -13,7 +13,7 @@ let _ruleAlertFn: ((msg: string) => Promise<void>) | null = null;
 export function registerRuleAlertFn(fn: (msg: string) => Promise<void>): void { _ruleAlertFn = fn; }
 
 // ─── C-rule contradiction counters (in-process; reset on restart) ─────────────
-const cRuleFires = { c1: 0, c2: 0, c3: 0, c4: 0, c5: 0, c6: 0 };
+const cRuleFires = { c1: 0, c2: 0, c3: 0, c4: 0, c5: 0, c6: 0, c7: 0, c7v: 0 };
 export function getCRuleStats(): typeof cRuleFires { return { ...cRuleFires }; }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -848,7 +848,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `"slPlacement":"good|too_tight|too_wide","tpRealism":"good|too_tight|too_ambitious",`,
     `"slWasCorrect":true,"tpWasConservative":false,"missedGainPct":null,"continuedLossPct":null,`,
     `"sizingCorrect":true,"partialsCorrect":true,"marketContextCorrect":true,`,
-    `"mistakeType":"wrong_direction|late_entry|stop_too_tight|stop_too_wide|chasing_extended_move|gave_back_profits|cut_winner_early|position_review_interference|stale_metadata_bug|correct_but_unlucky|null",`,
+    `"mistakeType":"wrong_direction|late_entry|stop_too_tight|stop_too_wide|chasing_extended_move|gave_back_profits|cut_winner_early|tp2_too_ambitious|position_review_interference|stale_metadata_bug|correct_but_unlucky|null",`,
     `"signalsThatWorked":["specific signal name"],"signalsThatFailed":["specific signal name"],`,
     `"signalAccuracyInsight":"one sentence about which signals to trust more/less",`,
     `"candlePatternLesson":"specific candle pattern lesson from this trade",`,
@@ -991,6 +991,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const pathCBeTriggerPct = entryRegime === "CHOPPY" ? 0.8 : 2.0;
   const isPathC = exitBranch === "ratcheted_sl" && !tp1Executed && maxProfitPct >= pathCBeTriggerPct;
 
+  // be_to_tp1_gap_pct: how far TP1 sits beyond the breakeven-trigger threshold.
+  // Positive = TP1 is farther than the BE trigger (path-C risk: price moved to profit but not to TP1).
+  // Zero or negative = TP1 is at or inside the BE trigger distance (TP1 would fire before ratchet).
+  // Only meaningful when TP1 is set; null otherwise.
+  const beToTp1GapPct = tp1DistancePct > 0 ? tp1DistancePct - pathCBeTriggerPct : null;
+
   // C1 — stop_too_tight requires wick evidence (computedSlTooTight=true).
   // If the SL was hit structurally (close through SL level), the stop distance is not
   // what ended the trade. Under Piece 3: original_sl+slTooTight=false → directionCorrect=false
@@ -1001,10 +1007,14 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   //   tp_hit / other                         → null
   if (d.mistakeType === "stop_too_tight" && !computedSlTooTight) {
     const before = d.mistakeType;
-    d.mistakeType = exitBranch === "ratcheted_sl" ? "gave_back_profits"
+    // ratcheted_sl + tp1Executed: TP1 banked a partial, remainder ratcheted to entry+1% and stopped
+    // before TP2. The mistake is TP2 too far — not the SL. C7a below catches any gave_back_profits
+    // the LLM emits on these same trades (belt-and-suspenders).
+    d.mistakeType = (exitBranch === "ratcheted_sl" && tp1Executed) ? "tp2_too_ambitious"
+      : exitBranch === "ratcheted_sl" ? "gave_back_profits"
       : (exitBranch === "original_sl" && !d.directionCorrect) ? "wrong_direction"
       : null;
-    console.log(`[C1] ${input.symbol}: mistakeType ${before}→${d.mistakeType ?? "null"} (slTooTight=false; exitBranch=${exitBranch}; directionCorrect=${d.directionCorrect})`);
+    console.log(`[C1] ${input.symbol}: mistakeType ${before}→${d.mistakeType ?? "null"} (slTooTight=false; exitBranch=${exitBranch}; tp1Executed=${tp1Executed}; directionCorrect=${d.directionCorrect})`);
     cRuleFires.c1++;
   }
 
@@ -1052,6 +1062,32 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       + ` (path-C: ratcheted w/o TP1, maxProfit=${maxProfitPct.toFixed(2)}%≥${pathCBeTriggerPct}%)`);
     d.mistakeType = "gave_back_profits";
     cRuleFires.c6++;
+  }
+
+  // C7a — post-TP1 ratcheted exit: TP1 hit and locked profit; remainder stopped before TP2.
+  // The mistake is "TP2 too far", not "stop_too_tight" or "gave_back_profits".
+  // stop_too_tight case is handled in C1 (above); this fires as belt-and-suspenders for any
+  // gave_back_profits label the LLM emits on these same trades, ensuring the more specific
+  // tp2_too_ambitious label wins. Condition covers both paths so ordering doesn't matter.
+  if (tp1Executed && exitBranch === "ratcheted_sl"
+    && (d.mistakeType === "stop_too_tight" || d.mistakeType === "gave_back_profits")) {
+    const before = d.mistakeType;
+    d.mistakeType = "tp2_too_ambitious";
+    console.log(`[C7a] ${input.symbol}: mistakeType ${before}→tp2_too_ambitious`
+      + ` (tp1Executed=true, ratcheted_sl — TP1 banked partial; remainder stopped before TP2)`);
+    cRuleFires.c7++;
+  }
+
+  // C7b — tp1_verdict bias fix: LLM labels tp1_verdict=too_ambitious on ALL original_sl losses,
+  // including trades that moved <30% toward TP1. A trade that barely moved in the right direction
+  // cannot have "TP1 too far" as its lesson. Override to null when tp1_reach < 30%.
+  const tp1ReachPct = (tp1DistancePct > 0 && maxProfitPct >= 0)
+    ? (maxProfitPct / tp1DistancePct) * 100 : 0;
+  if (!tp1Reached && tp1ReachPct < 30 && d.tp1Verdict === "too_ambitious") {
+    console.log(`[C7b] ${input.symbol}: tp1Verdict too_ambitious→null`
+      + ` (tp1_reach=${tp1ReachPct.toFixed(0)}%<30%; trade didn't move enough for TP1 distance to be the lesson)`);
+    d.tp1Verdict = "na";
+    cRuleFires.c7v++;
   }
 
   const outcome    = input.pnl >= 0 ? "WIN" : "LOSS";
@@ -1137,6 +1173,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       : exitMethod === "sl_hit" || exitMethod === "tp_hit" ? "actual"
       : null,
     reconstructedOutcome: reconstruction?.outcome !== "ambiguous_excluded" ? reconstruction?.outcome ?? null : null,
+    beToTp1GapPct:        beToTp1GapPct !== null ? String(beToTp1GapPct.toFixed(4)) : null,
   });
 
   // Alert on execution failures (suppressed for backfill runs)
