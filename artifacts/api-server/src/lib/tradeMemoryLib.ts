@@ -82,6 +82,18 @@ function getMaxProfitDuringHold(candles: Array<{high: number; low: number}>, ent
   return best;
 }
 
+function getMaxCloseFavorable(candles: Array<{close: number}>, entryPrice: number, direction: "long" | "short"): number {
+  if (entryPrice <= 0 || candles.length === 0) return 0;
+  let best = 0;
+  for (const c of candles) {
+    const pct = direction === "long"
+      ? (c.close - entryPrice) / entryPrice * 100
+      : (entryPrice - c.close) / entryPrice * 100;
+    if (pct > best) best = pct;
+  }
+  return best;
+}
+
 // ─── Candle analysis helpers ──────────────────────────────────────────────────
 
 interface CandleDetail {
@@ -451,6 +463,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const hadReviewPartial = memPartials.some(p => p.partialType === "review_partial");
 
   const maxProfitPct = getMaxProfitDuringHold(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
+  const maxCloseFavorablePct = getMaxCloseFavorable(tradePeriodCandles, input.entryPrice, input.direction as "long" | "short");
 
   // Fraction of TP1→TP2 corridor price reached. Uses Math.abs so distances are
   // direction-agnostic (both tp1Price and tp2Price are on the profitable side of entry).
@@ -728,7 +741,8 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `If uncertain, set executionIssues to []. Never fabricate partial close prices.`,
     `TP1 ($${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"}): reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}${tp1Price > 0 && tp1Reached && !tp1Executed ? " ⚠️ MISSED" : ""}`,
     `TP2 ($${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"}): reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
-    `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
+    `Max profit during hold (INTRABAR PEAK, wick-based HIGH/LOW): ${maxProfitPct.toFixed(2)}% — highest price touched within any 1h candle. A TP1 limit order at this price would have filled; do NOT infer the securing ratchet acted on this number.`,
+    `Max close favorable (close-based, posMonitor view): ${maxCloseFavorablePct.toFixed(2)}% — highest 1h candle close above entry; approximates what the 5-min posMonitor checks actually saw at each poll interval.`,
     `Slippage: ${slippage.toFixed(3)}%${slippage > 1.5 ? " ⚠️ SIGNIFICANT" : ""}`,
     `Partial closes: ${memPartials.length > 0 ? memPartials.map(p => `${p.partialType ?? "?"}@$${parseFloat(p.priceAtClose ?? "0").toFixed(4)}`).join(", ") : "none"}`,
     `Execution issues: ${executionIssues.length > 0 ? executionIssues.join("; ") : "none"}`,
@@ -778,9 +792,10 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `═══ TP ASSESSMENT ═══`,
     `TP1: $${tp1Price > 0 ? tp1Price.toFixed(4) : "not set"} — reached=${tp1Reached ? "YES" : "NO"} | executed=${tp1Executed ? "YES" : "NO"}`,
     `TP2: $${tp2Price > 0 ? tp2Price.toFixed(4) : "not set"} — reached=${tp2Reached ? "YES" : "NO"} | executed=${tp2Executed ? "YES" : "NO"}`,
-    `Max profit during hold: ${maxProfitPct.toFixed(2)}%`,
+    `Max profit during hold (INTRABAR PEAK, wick-based): ${maxProfitPct.toFixed(2)}%`,
+    `Max close favorable (posMonitor view, close-based): ${maxCloseFavorablePct.toFixed(2)}%`,
     `Additional gain available after exit: ${additionalGainPct.toFixed(2)}%`,
-    `TP1 verdict: too_tight (price ran far past TP1 quickly — target too conservative), good, too_ambitious (price never reached TP1)`,
+    `TP1 verdict — use INTRABAR PEAK (${maxProfitPct.toFixed(2)}%) because TP1 is a LIMIT ORDER that fills on intrabar touch, not on close: too_tight = tp1_reached=YES and price ran far further (large additionalGain); good = reasonable target; too_ambitious = tp1_reached=NO AND max_profit_pct ≥ ${(entryRegime === "CHOPPY" ? 0.8 : 2.0).toFixed(1)}% (price moved meaningfully but TP1 was just out of reach — TP1 was set too far); na = max_profit_pct < ${(entryRegime === "CHOPPY" ? 0.8 : 2.0).toFixed(1)}% (price barely moved — direction/entry failure, TP1 placement irrelevant). Do NOT apply max_close_favorable to this verdict — that is the ratchet/posMonitor metric, not the TP1-limit metric.`,
     exitBranch === "ratcheted_sl"
       ? (!tp1Executed
         ? `TP2 verdict: na — TP1 never fired (path-C breakeven lock exited at entry price). Set tp2Verdict="na". The relevant TP1 question is in the TP ASSESSMENT above.`
@@ -1078,14 +1093,13 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     cRuleFires.c7++;
   }
 
-  // C7b — tp1_verdict bias fix: LLM labels tp1_verdict=too_ambitious on ALL original_sl losses,
-  // including trades that moved <30% toward TP1. A trade that barely moved in the right direction
-  // cannot have "TP1 too far" as its lesson. Override to null when tp1_reach < 30%.
-  const tp1ReachPct = (tp1DistancePct > 0 && maxProfitPct >= 0)
-    ? (maxProfitPct / tp1DistancePct) * 100 : 0;
-  if (!tp1Reached && tp1ReachPct < 30 && d.tp1Verdict === "too_ambitious") {
-    console.log(`[C7b] ${input.symbol}: tp1Verdict too_ambitious→null`
-      + ` (tp1_reach=${tp1ReachPct.toFixed(0)}%<30%; trade didn't move enough for TP1 distance to be the lesson)`);
+  // C7b — tp1_verdict bias fix: override too_ambitious→na when the wick-based intrabar peak
+  // never crossed beTriggerPct. If price (wick) didn't move into the meaningful-profit zone,
+  // TP1 placement is irrelevant — the failure was direction or entry, not TP1 distance.
+  // Uses wick-based maxProfitPct (not close) because TP1 is a limit order that fills on touch.
+  if (!tp1Reached && maxProfitPct < pathCBeTriggerPct && d.tp1Verdict === "too_ambitious") {
+    console.log(`[C7b] ${input.symbol}: tp1Verdict too_ambitious→na`
+      + ` (maxProfit=${maxProfitPct.toFixed(2)}%<beTrigger=${pathCBeTriggerPct}%; price never moved meaningfully — TP1 distance irrelevant)`);
     d.tp1Verdict = "na";
     cRuleFires.c7v++;
   }
@@ -1129,7 +1143,8 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     executionIssues:        executionIssues,
     tp1Reached,
     tp2Reached,
-    maxProfitPct:           String(maxProfitPct.toFixed(4)),
+    maxProfitPct:              String(maxProfitPct.toFixed(4)),
+    maxCloseFavorablePct:      String(maxCloseFavorablePct.toFixed(4)),
     profitProtectionMissed: false,
     slippagePct:            String(slippage.toFixed(4)),
     excessivePartials:      memPartials.length > 3,

@@ -37,6 +37,7 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   tp1Reached:           boolean("tp1_reached"),
   tp2Reached:           boolean("tp2_reached"),
   maxProfitPct:         decimal("max_profit_pct", { precision: 10, scale: 4 }),
+  maxCloseFavorablePct: decimal("max_close_favorable_pct", { precision: 10, scale: 4 }),
   profitProtectionMissed: boolean("profit_protection_missed"),
   slippagePct:          decimal("slippage_pct", { precision: 10, scale: 4 }),
   excessivePartials:    boolean("excessive_partials"),
