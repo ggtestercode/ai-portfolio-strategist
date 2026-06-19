@@ -2151,9 +2151,10 @@ export async function closeOpenTrade(params: {
     setupType: openTrade.setupType,
     score:     openTrade.score,
     whyNow:    openTrade.whyNow,
-    sl:        openTrade.sl,
-    tp1:       openTrade.tp1,
-    tp2:       openTrade.tp2,
+    sl:         openTrade.sl,
+    effectiveSl: openTrade.effectiveSl,   // ratcheted SL at exit — was missing, causing slWasRatcheted=false for all live closes
+    tp1:        openTrade.tp1,
+    tp2:        openTrade.tp2,
     exitReasonOverride: params.exitReason,
   }).catch(e => console.error("[tradeMemory] reflection failed:", e));
 
