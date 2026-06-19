@@ -553,10 +553,11 @@ async function runPhase2(
   const fundingHistLines:string[] = [];
   const recentExitLines: string[] = [];
   const pendingLines:    string[] = [];
-  const sweepMap     = new Map<string, SweepResult>();
-  const squeezeMap   = new Map<string, string>();
-  const symRegimeMap = new Map<string, { regime: RegimeType; adx: number; diPlus: number; diMinus: number; atr: number }>();
-  const blowoffMap   = new Map<string, BlowoffMetrics>();
+  const sweepMap        = new Map<string, SweepResult>();
+  const squeezeMap      = new Map<string, string>();
+  const symRegimeMap    = new Map<string, { regime: RegimeType; adx: number; diPlus: number; diMinus: number; atr: number }>();
+  const blowoffMap      = new Map<string, BlowoffMetrics>();
+  const last1hBullishMap = new Map<string, boolean>(); // last COMPLETED 1h candle direction per symbol
 
   // ── Recent exits (last 24h) per selected symbol ───────────────────────────
   try {
@@ -626,6 +627,12 @@ async function runPhase2(
         // scans last 5 completed candles (skips [length-1] which is still forming).
         const bf = detectBlowoff(symK4h, symR.atr);
         if (bf) blowoffMap.set(sym, bf);
+      }
+      // Record last COMPLETED 1h candle direction for TRENDING_UP counter-candle gate.
+      // klines1h[length-1] is still-forming; [length-2] is the last closed candle.
+      if (klines1h.length >= 2) {
+        const lc = klines1h[klines1h.length - 2]!;
+        last1hBullishMap.set(sym, lc.close > lc.open);
       }
       const rSign = fr.rate >= 0 ? "+" : "";
       const price  = klines.length > 0 ? klines[klines.length - 1]!.close : 0;
@@ -918,6 +925,24 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
           console.log(`[gate] CHOPPY+trend-narrative score cap: ${opp.symbol} score ${opp.score}→65 (whyNow: ${(opp.whyNow ?? "").slice(0, 80)})`);
           opp.score = 65;
         }
+      }
+    }
+  }
+
+  // Pre-filter gate: MOMENTUM in BTC TRENDING_UP regime with counter-direction last completed 1h candle.
+  // June-2026 backtest: counter-candle sub-cohort = 0W/3L (ADA −2.32%, NEAR −2.94%, HYPE −2.32%).
+  // Confirming-candle sub-cohort = 3W/0L (+14.53%). Kelly for counter-candle = 0 → exclude at source.
+  // REJECTION and LIQUIDITY_SWEEP exempt (different mechanics). STRONG_TREND exempt (costs ATOM/BNB wins).
+  if (regime.regime === "TRENDING_UP") {
+    for (let i = opportunities.length - 1; i >= 0; i--) {
+      const opp = opportunities[i]!;
+      if (opp.setupType !== "MOMENTUM") continue;
+      const candleBullish = last1hBullishMap.get(opp.symbol);
+      if (candleBullish === undefined) continue; // no candle data — do not block
+      const candleAgainst = opp.direction === "long" ? !candleBullish : candleBullish;
+      if (candleAgainst) {
+        console.log(`[gate] TRENDING_UP+counter-candle: ${opp.symbol} ${opp.direction} MOMENTUM filtered (last 1h candle ${candleBullish ? "bullish" : "bearish"}) — 0W/3L Jun-2026`);
+        opportunities.splice(i, 1);
       }
     }
   }

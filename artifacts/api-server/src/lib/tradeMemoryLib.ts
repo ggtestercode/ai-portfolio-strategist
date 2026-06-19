@@ -1522,6 +1522,45 @@ export async function generateTradingRules(force = false): Promise<void> {
     .catch(e => console.error("[rules] Trim obsolete rules:", e));
 
   console.log(`[rules] Upserted ${generated} rules, trimmed to set [${newNumbers.join(",")}] from ${reflections.length} reflections`);
+
+  // Confidence-promotion audit: after each regen, identify HIGH-confidence active rules that have
+  // accumulated enough trades to prove negative EV. These are soft rules the LLM silently ignores —
+  // the human needs to promote them to applyHardFilters in cronScanner.ts.
+  // Threshold: HIGH confidence + win_rate < 25% + n >= 10 (Kelly negative → hard block warranted).
+  const promoAuditRules = await db.select({
+    ruleNumber:      tradingRulesTable.ruleNumber,
+    ruleText:        tradingRulesTable.ruleText,
+    confidence:      tradingRulesTable.confidence,
+    winsFollowing:   tradingRulesTable.winsFollowing,
+    lossesFollowing: tradingRulesTable.lossesFollowing,
+  }).from(tradingRulesTable)
+    .where(and(
+      eq(tradingRulesTable.active, true),
+      eq(tradingRulesTable.confidence, "HIGH"),
+    ))
+    .catch(() => [] as Array<{ ruleNumber: number; ruleText: string; confidence: string; winsFollowing: number; lossesFollowing: number }>);
+
+  const promoFlags: string[] = [];
+  for (const r of promoAuditRules) {
+    const total = r.winsFollowing + r.lossesFollowing;
+    if (total < 10) continue;
+    const winRate = r.winsFollowing / total;
+    if (winRate < 0.25) {
+      const pct = Math.round(winRate * 100);
+      promoFlags.push(`Rule ${r.ruleNumber}: ${r.winsFollowing}W/${r.lossesFollowing}L (${pct}% win) — "${r.ruleText.slice(0, 70)}..."`);
+      console.log(`[rules] PROMO CANDIDATE Rule ${r.ruleNumber}: ${r.winsFollowing}W/${r.lossesFollowing}L (${pct}%) HIGH confidence, Kelly<0`);
+    }
+  }
+
+  if (promoFlags.length > 0) {
+    await _ruleAlertFn?.([
+      `🚨 <b>Hard-gate promotion candidates (${promoFlags.length} rule${promoFlags.length > 1 ? "s" : ""}):</b>`,
+      `HIGH confidence + negative EV (win rate &lt;25%, n≥10) — soft rules the LLM silently ignores:`,
+      ...promoFlags,
+      `\nPromote these to <code>applyHardFilters</code> in cronScanner.ts.`,
+    ].join("\n")).catch(() => {});
+  }
+
   await _ruleAlertFn?.(
     `🧠 <b>Trading rules updated (${generated} rules)</b>\nBased on ${reflections.length} trade reflections\nUse /rules to see current rules`
   ).catch(() => {});

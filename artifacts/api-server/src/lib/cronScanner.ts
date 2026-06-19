@@ -325,6 +325,25 @@ async function applyHardFilters(
       continue;
     }
 
+    // Hard gate: MOMENTUM in BTC TRENDING_UP regime with counter-direction last completed 1h candle.
+    // June-2026: counter-candle sub-cohort = 0W/3L (ADA −2.32%, NEAR −2.94%, HYPE −2.32%); Kelly = 0.
+    // Confirming-candle sub-cohort = 3W/0L (+14.53%) — preserved. REJECTION/SWEEP/STRONG_TREND exempt.
+    // Fetches only 2 candles — minimal API cost, fires only for MOMENTUM+TRENDING_UP signals.
+    if (opp.setupType === "MOMENTUM" && regime?.regime === "TRENDING_UP") {
+      try {
+        const k1h = await getKlines(opp.symbol, "60", 2);
+        if (k1h.length >= 2) {
+          const lastC = k1h[k1h.length - 2]!;
+          const candleBullish = lastC.close > lastC.open;
+          const candleAgainst = opp.direction === "long" ? !candleBullish : candleBullish;
+          if (candleAgainst) {
+            rejected.push({ symbol: opp.symbol, reason: `MOMENTUM+TRENDING_UP counter-candle gate: last 1h ${candleBullish ? "bullish" : "bearish"} vs ${opp.direction} — Jun-2026: 0W/3L counter-candle vs 3W/0L confirming` });
+            continue;
+          }
+        }
+      } catch { /* kline fetch failed — pass (do not block on missing data) */ }
+    }
+
     // Filter 5: Low liquidity (volume24h < $10M)
     if (opp.volume24h && opp.volume24h < 10_000_000) {
       rejected.push({ symbol: opp.symbol, reason: `low liquidity $${(opp.volume24h / 1e6).toFixed(1)}M < $10M` });
@@ -1463,6 +1482,28 @@ async function runWatchScan(): Promise<void> {
         ].join("\n")).catch(() => {});
         await removeFromWatchList(signal.symbol);
         continue;
+      }
+
+      // Hard gate — MOMENTUM+TRENDING_UP counter-candle (mirrors applyHardFilters; watchScan bypasses that path)
+      if (signal.setupType === "MOMENTUM" && regime?.regime === "TRENDING_UP") {
+        try {
+          const k1h = await getKlines(sym, "60", 2);
+          if (k1h.length >= 2) {
+            const lastC = k1h[k1h.length - 2]!;
+            const candleBullish = lastC.close > lastC.open;
+            const candleAgainst = signal.direction === "long" ? !candleBullish : candleBullish;
+            if (candleAgainst) {
+              console.log(`[gate] REJECTED ${sym} (watchScan) — MOMENTUM+TRENDING_UP counter-candle gate: last 1h ${candleBullish ? "bull" : "bear"} vs ${signal.direction}`);
+              await alertFn?.([
+                `🚫 Entry blocked — ${sym}`,
+                `MOMENTUM+TRENDING_UP counter-candle gate: last 1h candle ${candleBullish ? "bullish" : "bearish"} vs ${signal.direction} direction.`,
+                `Jun-2026: counter-candle = 0W/3L; confirming candle = 3W/0L.`,
+              ].join("\n")).catch(() => {});
+              await removeFromWatchList(signal.symbol);
+              continue;
+            }
+          }
+        } catch { /* kline fetch failed — allow trade */ }
       }
 
       // R:R gate — blended reward across both exits (more reliable than Claude's reported field)
