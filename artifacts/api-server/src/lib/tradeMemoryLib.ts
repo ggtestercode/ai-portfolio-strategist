@@ -423,9 +423,12 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
 
   const tp1Reached = checkCandlesReachedPrice(tradePeriodCandles, tp1Price, input.direction as "long" | "short");
   const tp2Reached = checkCandlesReachedPrice(tradePeriodCandles, tp2Price, input.direction as "long" | "short");
-  // Also treat as executed if Bybit shows multiple partial closes — exchange-level
-  // PartialTakeProfit fires without writing a trade_memory PARTIAL record.
-  const tp1Executed = memPartials.some(p => p.partialType === "tp1") || bybitCloses.length > 1;
+  // Also treat as executed if any Bybit close matched TP1 price within 0.3% — catches
+  // exchange-level PartialTakeProfit fills that never wrote a trade_memory PARTIAL record
+  // (~10 reconciler-gap cases). Replaces the bare bybitCloses.length > 1 heuristic which
+  // fired on any multi-close (review partial + SL, two manual closes) regardless of price.
+  const tp1Executed = memPartials.some(p => p.partialType === "tp1")
+    || (tp1Price > 0 && bybitCloses.some(c => Math.abs(c.avgExitPrice - tp1Price) / tp1Price < 0.003));
   // Exchange-side TP2 fallback: query stopOrderType on the final close order's orderId.
   // This is a point query on a specific orderId — no cross-symbol contamination risk
   // (unlike tp1's count heuristic which relies only on the 6% entry-price filter).
