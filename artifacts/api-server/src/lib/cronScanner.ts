@@ -320,6 +320,10 @@ async function applyHardFilters(
     // Hard gate: MOMENTUM in CHOPPY BTC regime — 23% win rate, avg −1.50%, n=13 (Jun-2026 population).
     // BTC CHOPPY = no macro directional support; altcoin momentum fails to sustain.
     // Kelly = negative → optimal size = 0 → hard block. Not score-cappable; must exclude entirely.
+    // VOL_BREAKOUT intentionally bypasses this gate: price breaking a structural level on real volume
+    // is mechanically distinct from trend-following in directionless BTC. SOL +3.22% and ATOM +1.23%
+    // (Jun-2026, both correctly VOL_BREAKOUT, both mislabeled MOMENTUM) are the false-positive origin.
+    // VOL_BREAKOUT+CHOPPY is NOT gated here; it accumulates its own track record.
     if (opp.setupType === "MOMENTUM" && regime?.regime === "CHOPPY") {
       rejected.push({ symbol: opp.symbol, reason: `MOMENTUM+CHOPPY gate: BTC non-directional, altcoin momentum fails (23% win, avg −1.50%, n=13)` });
       continue;
@@ -2199,7 +2203,9 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
               case 10: return isShort;   // volume climax exhaustion filter for shorts
 
               // Regime-gated: per-symbol regime (not BTC proxy)
-              case 9:  return symReg === "STRONG_TREND" && setup.includes("MOMENTUM") && score >= 78;
+              // VOL_BREAKOUT falls through to universal rules (2,3,6,7,8,15) via default.
+              // Rule 9 is MOMENTUM-specific: VOL_BREAKOUT excluded — different mechanics, own track record.
+              case 9:  return symReg === "STRONG_TREND" && setup === "MOMENTUM" && score >= 78;
               case 11: return symReg === "CHOPPY";
               case 14: return symReg === "RANGING" || symReg === "EXHAUSTION";
 
