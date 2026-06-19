@@ -12,6 +12,10 @@ import { getClosedPnl as bybitGetClosedPnl, getOrderStopType, getKlines, fetchKl
 let _ruleAlertFn: ((msg: string) => Promise<void>) | null = null;
 export function registerRuleAlertFn(fn: (msg: string) => Promise<void>): void { _ruleAlertFn = fn; }
 
+// ─── C-rule contradiction counters (in-process; reset on restart) ─────────────
+const cRuleFires = { c1: 0, c2: 0, c3: 0, c4: 0, c5: 0, c6: 0 };
+export function getCRuleStats(): typeof cRuleFires { return { ...cRuleFires }; }
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface ClosedTradeParams {
@@ -969,6 +973,77 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   // TP2 was not fairly tested. The bot's judgment ended the trade; TP2 distance is not the signal.
   if (exitBranch === "ratcheted_sl" && tp1Executed && hadReviewPartial) {
     d.tp2Verdict = "na";
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // C-RULES (C1–C6): LLM contradiction detection — evaluated in order.
+  // Code-computed facts (exitBranch, computedSlTooTight, directionCorrect) win
+  // over LLM conclusions (mistakeType, slPlacement). Fires are logged + counted.
+  // Depends on Pieces 1–3 (exitBranch, tp1Executed, directionCorrect all correct).
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // C4 threshold: TP1 distance is the structural proxy for "price confirmed direction."
+  // ATR is not available in reflection input; tp1DistancePct (the bot's own nearest-level
+  // assessment) is the most defensible structural marker. Fallback 1.5% when TP1 not set.
+  const c4StructuralPct = tp1DistancePct > 0 ? tp1DistancePct : 1.5;
+
+  // Path-C: breakeven ratchet fired before TP1 fired. beTriggerPct mirrors cronScanner logic.
+  const pathCBeTriggerPct = entryRegime === "CHOPPY" ? 0.8 : 2.0;
+  const isPathC = exitBranch === "ratcheted_sl" && !tp1Executed && maxProfitPct >= pathCBeTriggerPct;
+
+  // C1 — stop_too_tight requires wick evidence (computedSlTooTight=true).
+  // If the SL was hit on a candle that closed through the level (structural), the stop
+  // distance is not what ended the trade — the direction or trade setup was the problem.
+  if (d.mistakeType === "stop_too_tight" && !computedSlTooTight) {
+    const before = d.mistakeType;
+    d.mistakeType = exitBranch === "ratcheted_sl" ? "gave_back_profits" : null;
+    console.log(`[C1] ${input.symbol}: mistakeType ${before}→${d.mistakeType ?? "null"} (slTooTight=false refutes stop_too_tight; exitBranch=${exitBranch})`);
+    cRuleFires.c1++;
+  }
+
+  // C2 — slPlacement=too_tight requires wick evidence.
+  if (d.slPlacement === "too_tight" && !computedSlTooTight) {
+    console.log(`[C2] ${input.symbol}: slPlacement too_tight→good (slTooTight=false; exitBranch=${exitBranch})`);
+    d.slPlacement = "good";
+    cRuleFires.c2++;
+  }
+
+  // C3 — stop_too_tight and directionCorrect=false are mutually exclusive.
+  // Under Piece 3 + C1, this state can't occur (C1 clears stop_too_tight first,
+  // and slTooTight=true → directionCorrect=true). Kept as a regression guard.
+  if (d.mistakeType === "stop_too_tight" && !d.directionCorrect) {
+    console.log(`[C3] ${input.symbol}: mistakeType stop_too_tight→wrong_direction (directionCorrect=false contradicts stop_too_tight assumption)`);
+    d.mistakeType = "wrong_direction";
+    cRuleFires.c3++;
+  }
+
+  // C4 — flag only (no auto-flip): price structurally moved in trade's favor,
+  // but LLM still labeled mistakeType=wrong_direction while directionCorrect=true.
+  // Surfaces for human promotion to a hard gate if pattern accumulates.
+  if ((exitBranch === "ratcheted_sl" || maxProfitPct >= c4StructuralPct)
+    && d.mistakeType === "wrong_direction" && d.directionCorrect) {
+    console.log(`[C4] ${input.symbol}: CONFLICT mistakeType=wrong_direction but directionCorrect=true`
+      + ` AND (exitBranch=${exitBranch} || maxProfit=${maxProfitPct.toFixed(2)}%≥${c4StructuralPct.toFixed(2)}%)`
+      + ` — flag for manual review; no auto-flip`);
+    cRuleFires.c4++;
+  }
+
+  // C5 — clean wins can't carry a loss-category mistakeType.
+  const C5_LOSS_MISTAKES = ["stop_too_tight", "wrong_direction", "late_entry", "stop_too_wide"];
+  if (failureType === "success" && d.mistakeType && C5_LOSS_MISTAKES.includes(d.mistakeType)) {
+    console.log(`[C5] ${input.symbol}: mistakeType ${d.mistakeType}→null (success; loss-category mistake label is invalid on a winning trade)`);
+    d.mistakeType = null;
+    cRuleFires.c5++;
+  }
+
+  // C6 — path-C breakeven exit: price moved far enough in trade's favor to trigger ratchet
+  // before TP1. wrong_direction is a contradiction — the direction was correct enough to move
+  // price away from SL by beTriggerPct. Correct label: gave_back_profits.
+  if (isPathC && d.mistakeType === "wrong_direction") {
+    console.log(`[C6] ${input.symbol}: mistakeType wrong_direction→gave_back_profits`
+      + ` (path-C: ratcheted w/o TP1, maxProfit=${maxProfitPct.toFixed(2)}%≥${pathCBeTriggerPct}%)`);
+    d.mistakeType = "gave_back_profits";
+    cRuleFires.c6++;
   }
 
   const outcome    = input.pnl >= 0 ? "WIN" : "LOSS";
