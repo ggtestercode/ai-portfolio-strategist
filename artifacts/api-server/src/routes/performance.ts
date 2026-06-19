@@ -9,7 +9,7 @@ import { buildPerformanceSeries } from "../lib/performance";
 import { db } from "@workspace/db";
 import { tradeMemoryTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
-import { backfillStructuredReflections } from "../lib/tradeMemoryLib";
+import { backfillStructuredReflections, previewTradingRules, generateTradingRules } from "../lib/tradeMemoryLib";
 
 const router: IRouter = Router();
 
@@ -64,6 +64,28 @@ router.post("/admin/re-reflect", async (req, res): Promise<void> => {
     console.error("[admin/re-reflect] backfill error:", e)
   );
   res.json({ deleted, backfillTriggered: true, note: "check PM2 logs for [C1]/[C2]/[C7b] fires and [tradeMemory] stored lines" });
+});
+
+// Admin-only: dry-run rule generation — LLM call runs, proposed rules returned, nothing written to DB.
+// Usage: GET /admin/preview-rules
+router.get("/admin/preview-rules", async (_req, res): Promise<void> => {
+  try {
+    const result = await previewTradingRules();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+// Admin-only: apply the regen — writes new rules to DB (creates backup first).
+// Usage: POST /admin/apply-rules
+router.post("/admin/apply-rules", async (_req, res): Promise<void> => {
+  try {
+    await generateTradingRules(true);
+    res.json({ ok: true, note: "rules written; check PM2 logs for [rules] lines and backup table name" });
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 export default router;

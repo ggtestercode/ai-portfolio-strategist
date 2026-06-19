@@ -1723,6 +1723,131 @@ async function checkAndGenerateRules(): Promise<void> {
   }
 }
 
+export type ProposedRule = {
+  ruleNumber: number; ruleText: string; evidence: string;
+  causalLogic: string; confidence: string; occurrences: number;
+  contradictsFundamentals: boolean; flagNote: string | null;
+};
+
+// Dry-run: run the full LLM rule generation and return proposed rules without writing to DB.
+export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; patternsFound: string; reflectionCount: number }> {
+  const reflections = await db.select()
+    .from(tradeMemoryTable)
+    .where(and(
+      eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
+      inArray(tradeMemoryTable.exitMethod, ["sl_hit", "original_sl", "ratcheted_sl", "tp_hit"]),
+      sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+    ))
+    .orderBy(desc(tradeMemoryTable.createdAt))
+    .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
+
+  if (reflections.length < 10) throw new Error(`Insufficient reflections: ${reflections.length}`);
+
+  const N = reflections.length;
+  const slTightCount = reflections.filter(r => r.slTooTight === true).length;
+  const slWideCount  = reflections.filter(r => r.slTooWide  === true).length;
+  const tp1VerdictCounts: Record<string, number> = {};
+  const tp2VerdictCounts: Record<string, number> = {};
+  const entryTimingCounts: Record<string, number> = {};
+  const partialTimingCounts: Record<string, number> = {};
+  const failureTypeCounts: Record<string, number> = {};
+  let profitMissedSum = 0, profitMissedCount = 0;
+  let opCostSum = 0, opCostCount = 0;
+  for (const r of reflections) {
+    if (r.tp1Verdict)                                    tp1VerdictCounts[r.tp1Verdict]         = (tp1VerdictCounts[r.tp1Verdict]         ?? 0) + 1;
+    if (r.tp2Verdict      && r.tp2Verdict      !== "na") tp2VerdictCounts[r.tp2Verdict]         = (tp2VerdictCounts[r.tp2Verdict]         ?? 0) + 1;
+    if (r.entryTimingVerdict)                            entryTimingCounts[r.entryTimingVerdict] = (entryTimingCounts[r.entryTimingVerdict] ?? 0) + 1;
+    if (r.partialTiming   && r.partialTiming   !== "na") partialTimingCounts[r.partialTiming]    = (partialTimingCounts[r.partialTiming]    ?? 0) + 1;
+    if (r.failureType)                                   failureTypeCounts[r.failureType]        = (failureTypeCounts[r.failureType]        ?? 0) + 1;
+    if (r.profitMissedPct   != null) { profitMissedSum += parseFloat(String(r.profitMissedPct));   profitMissedCount++; }
+    if (r.opportunityCostPct != null) { opCostSum       += parseFloat(String(r.opportunityCostPct)); opCostCount++;       }
+  }
+  const topFailureType  = Object.entries(failureTypeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "unknown";
+  const avgProfitMissed = profitMissedCount > 0 ? (profitMissedSum / profitMissedCount).toFixed(2) : "n/a";
+  const avgOpCost       = opCostCount       > 0 ? (opCostSum       / opCostCount      ).toFixed(2) : "n/a";
+  const fmtCounts = (m: Record<string, number>) => Object.entries(m).sort((a,b) => b[1]-a[1]).map(([k,v]) => `${k}=${v}`).join(", ") || "no data";
+  const verdictAggregates = [
+    `VERDICT AGGREGATES (last ${N} trades):`,
+    `- SL too tight: ${slTightCount}/${N} trades`,
+    `- SL too wide:  ${slWideCount}/${N} trades`,
+    `- TP1 verdict:  ${fmtCounts(tp1VerdictCounts)}`,
+    `- TP2 verdict:  ${fmtCounts(tp2VerdictCounts)}`,
+    `- Entry timing: ${fmtCounts(entryTimingCounts)}`,
+    `- Partial timing: ${fmtCounts(partialTimingCounts)}`,
+    `- Avg profit missed: ${avgProfitMissed}%`,
+    `- Avg opportunity cost: ${avgOpCost}%`,
+    `- Most common failure type: ${topFailureType}`,
+  ].join("\n");
+
+  const reflStr = reflections.map(r => {
+    const pct = parseFloat(r.pnlPct ?? "0");
+    const slVerdict = r.slTooTight ? "too_tight" : r.slTooWide ? "too_wide" : null;
+    return [
+      `${r.symbol} | P/L: ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`,
+      r.entryQuality        ? `  Entry: ${r.entryQuality} timing=${r.entryTiming}` : "",
+      r.entryTimingVerdict  ? `  EntryVerdict: ${r.entryTimingVerdict}` : "",
+      slVerdict             ? `  SL: ${slVerdict}` : "",
+      r.tp1Verdict          ? `  TP1Verdict: ${r.tp1Verdict}` : "",
+      r.tp2Verdict          ? `  TP2Verdict: ${r.tp2Verdict}` : "",
+      r.opportunityCostPct != null ? `  OpportunityCost: ${parseFloat(String(r.opportunityCostPct)).toFixed(2)}%` : "",
+      r.mistakeType         ? `  Mistake: ${r.mistakeType}` : "",
+      r.signalsThatWorked   ? `  Worked: ${r.signalsThatWorked}` : "",
+      r.signalsThatFailed   ? `  Failed: ${r.signalsThatFailed}` : "",
+      r.lessonsLearned      ? `  Lesson: ${r.lessonsLearned}` : "",
+      r.nextTimeWouldDo     ? `  Next: ${r.nextTimeWouldDo}` : "",
+      r.failureType         ? `  Type: ${r.failureType}` : "",
+    ].filter(Boolean).join("\n");
+  }).join("\n---\n");
+
+  const prompt = [
+    `Analyse trade reflections and generate between 5 and 15 actionable trading rules — as many as the evidence supports with minimum 3 trade occurrences each. Do not invent rules to fill a quota.`,
+    ``,
+    verdictAggregates,
+    ``,
+    `Rules derived from VERDICT AGGREGATES must be specific and quantified.`,
+    `Good: "SL was too tight in 7/10 losses — widen SL to 2.0× ATR minimum"`,
+    `Bad:  "Consider SL placement more carefully"`,
+    `Good: "TP1 too_ambitious in 8/12 trades — set TP1 at 1.0× ATR not 2.0×"`,
+    `Bad:  "Be more realistic with TP targets"`,
+    ``,
+    `Analyse ALL ${reflections.length} trade reflections below for rule generation:`,
+    ``,
+    `Requirements per rule:`,
+    `- Minimum 3 trade occurrences as evidence`,
+    `- Clear causal logic (not just correlation)`,
+    `- Cross-check: funding positive = longs crowded = short bias; price above EMA = bullish; high volume breakout = real move`,
+    `- Flag if rule contradicts market fundamentals`,
+    `- Confidence: HIGH (5+ occurrences) | MEDIUM (3-4) | LOW (<3)`,
+    ``,
+    `Trade reflections (${reflections.length} trades):`,
+    reflStr,
+    ``,
+    `Return ONLY valid JSON:`,
+    `{"rules":[{"ruleNumber":1,"ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
+  ].join("\n");
+
+  type RuleGenResult = {
+    rules: Array<{
+      ruleNumber: number; ruleText: string; evidence: string;
+      causalLogic: string; confidence: string; occurrences: number;
+      contradictsFundamentals: boolean; flagNote: string | null;
+    }>;
+    patternsFound: string;
+  };
+
+  const res = await llm.json<RuleGenResult>({
+    taskType:      "rule_generation",
+    systemContext: "You are a trading performance analyst. Generate evidence-based rules from trade data. Reply JSON only.",
+    prompt,
+    schema: { type: "object", properties: { rules: { type: "array" }, patternsFound: { type: "string" } }, required: ["rules"] },
+    fallback: { rules: [], patternsFound: "" },
+  });
+
+  const validRules = res.data.rules.filter(r => r.occurrences >= 3);
+  console.log(`[rules/preview] ${validRules.length} valid rules from ${N} reflections (dry-run, nothing written)`);
+  return { rules: validRules as ProposedRule[], patternsFound: res.data.patternsFound, reflectionCount: N };
+}
+
 // ─── Recent memory for scan prompt ───────────────────────────────────────────
 
 export async function getRecentMemory(limit = 15): Promise<string> {
