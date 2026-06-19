@@ -833,7 +833,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     `- profitMissedPct: profit missed specifically due to execution (missed TP triggers, premature exits)`,
     ``,
     `Review ALL candle data above with hindsight. Return ONLY valid JSON (no markdown):`,
-    `{"entryQuality":"good|ok|poor","directionCorrect":true,"entryTiming":"early|middle|late",`,
+    `{"entryQuality":"good|ok|poor","entryTiming":"early|middle|late",`,
     `"entryTimingVerdict":"early|good|late|wrong","slTooWide":false,`,
     `"tp1Verdict":"too_tight|good|too_ambitious","tp2Verdict":"too_tight|good|too_ambitious|na",`,
     `"partialTiming":"correct|too_early|too_late|na","manualCloseVerdict":"correct|wrong|neutral|na",`,
@@ -881,7 +881,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     prompt,
     schema: {
       type: "object",
-      required: ["entryQuality", "directionCorrect", "entryTiming", "slPlacement", "tpRealism",
+      required: ["entryQuality", "entryTiming", "slPlacement", "tpRealism",
                  "entryCandleQuality", "preTradeWarningsMissed", "preTradeConfirmationsPresent",
                  "signalsThatWorked", "signalsThatFailed", "candlePatternLesson",
                  "signalAccuracyInsight", "whatWorked", "whatDidnt", "lessonsLearned", "nextTimeWouldDo",
@@ -889,7 +889,6 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
                  "partialTiming", "manualCloseVerdict"],
       properties: {
         entryQuality:                 { type: "string" },
-        directionCorrect:             { type: "boolean" },
         entryTiming:                  { type: "string" },
         entryCandleQuality:           { type: "string" },
         entryVolumeConfirmed:         { type: "boolean" },
@@ -929,7 +928,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       },
     },
     fallback: {
-      entryQuality: "ok", directionCorrect: true, entryTiming: "middle",
+      entryQuality: "ok", directionCorrect: true, entryTiming: "middle",  // directionCorrect fallback overridden unconditionally by code
       entryCandleQuality: "neutral", entryVolumeConfirmed: false,
       preTradeWarningsMissed: [], preTradeConfirmationsPresent: [],
       slPlacement: "good", tpRealism: "good",
@@ -957,6 +956,14 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   if (exitBranch === "ratcheted_sl" || exitBranch === "tp_hit") {
     d.slTooTight = false;
   }
+
+  // directionCorrect is code-computed — never delegated to LLM (removed from template/required/fallback).
+  // True  → price moved in trade's favor at some point (ratcheted/tp_hit/review/profit_protection),
+  //         OR the SL was a noise wick (direction right, SL too tight — computedSlTooTight=true).
+  // False → price structurally broke the original SL without recovery (exitBranch=original_sl
+  //         AND computedSlTooTight=false). Only this case proves the direction call was wrong.
+  // Depends on Piece 1 (exitBranch, effectiveSl) and Piece 2 (tp1Executed) being correct.
+  d.directionCorrect = exitBranch !== "original_sl" || computedSlTooTight;
 
   // Hard override — a discretionary posMonitor PARTIAL_CLOSE between TP1 and final exit means
   // TP2 was not fairly tested. The bot's judgment ended the trade; TP2 distance is not the signal.
