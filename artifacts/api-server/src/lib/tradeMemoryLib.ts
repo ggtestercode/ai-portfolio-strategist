@@ -1738,8 +1738,7 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
       inArray(tradeMemoryTable.exitMethod, ["sl_hit", "original_sl", "ratcheted_sl", "tp_hit"]),
       sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
-    .orderBy(desc(tradeMemoryTable.createdAt))
-    .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
+    .orderBy(desc(tradeMemoryTable.createdAt));
 
   if (reflections.length < 10) throw new Error(`Insufficient reflections: ${reflections.length}`);
 
