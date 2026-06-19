@@ -350,7 +350,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     }).from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
-        sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+        sql`${tradeMemoryTable.sourceTradeId} IN (SELECT id::text FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(50);
@@ -1449,7 +1449,7 @@ export async function generateTradingRules(force = false): Promise<void> {
     .where(and(
       eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
       inArray(tradeMemoryTable.exitMethod, ["sl_hit", "original_sl", "ratcheted_sl", "tp_hit"]),
-      sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+      sql`${tradeMemoryTable.sourceTradeId} IN (SELECT id::text FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .catch(() => [] as typeof tradeMemoryTable.$inferSelect[]);
@@ -1736,7 +1736,7 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
     .where(and(
       eq(tradeMemoryTable.action,     "TRADE_CLOSE"),
       inArray(tradeMemoryTable.exitMethod, ["sl_hit", "original_sl", "ratcheted_sl", "tp_hit"]),
-      sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+      sql`${tradeMemoryTable.sourceTradeId} IN (SELECT id::text FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
     .orderBy(desc(tradeMemoryTable.createdAt));
 
@@ -1867,7 +1867,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
   }).from(tradeMemoryTable)
     .where(and(
       eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
-      sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+      sql`${tradeMemoryTable.sourceTradeId} IN (SELECT id::text FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
     ))
     .orderBy(desc(tradeMemoryTable.createdAt))
     .limit(50)
@@ -1976,7 +1976,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
     }).from(tradeMemoryTable)
       .where(and(
         eq(tradeMemoryTable.action,    "TRADE_CLOSE"),
-        sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+        sql`${tradeMemoryTable.sourceTradeId} IN (SELECT id::text FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(50);
@@ -2021,7 +2021,7 @@ export async function getRecentMemory(limit = 15): Promise<string> {
       .where(and(
         eq(tradeMemoryTable.action, "TRADE_CLOSE"),
         isNotNull(tradeMemoryTable.candlePatternLesson),
-        sql`${tradeMemoryTable.sourceTradeId}::uuid IN (SELECT id FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
+        sql`${tradeMemoryTable.sourceTradeId} IN (SELECT id::text FROM trade_log WHERE entry_at >= ${new Date('2026-06-04T00:00:00Z')})`,
       ))
       .orderBy(desc(tradeMemoryTable.createdAt))
       .limit(10)
