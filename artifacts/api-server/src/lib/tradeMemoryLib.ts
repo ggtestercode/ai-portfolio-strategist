@@ -992,12 +992,19 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const isPathC = exitBranch === "ratcheted_sl" && !tp1Executed && maxProfitPct >= pathCBeTriggerPct;
 
   // C1 — stop_too_tight requires wick evidence (computedSlTooTight=true).
-  // If the SL was hit on a candle that closed through the level (structural), the stop
-  // distance is not what ended the trade — the direction or trade setup was the problem.
+  // If the SL was hit structurally (close through SL level), the stop distance is not
+  // what ended the trade. Under Piece 3: original_sl+slTooTight=false → directionCorrect=false
+  // (always). So the original_sl branch uses directionCorrect to set the most specific label:
+  //   ratcheted_sl → gave_back_profits (price moved in favor, ratchet locked, then gave it back)
+  //   original_sl  + directionCorrect=false → wrong_direction (SL hit structurally; direction wrong)
+  //   original_sl  + directionCorrect=true  → null         (impossible under Piece 3; safety net)
+  //   tp_hit / other                         → null
   if (d.mistakeType === "stop_too_tight" && !computedSlTooTight) {
     const before = d.mistakeType;
-    d.mistakeType = exitBranch === "ratcheted_sl" ? "gave_back_profits" : null;
-    console.log(`[C1] ${input.symbol}: mistakeType ${before}→${d.mistakeType ?? "null"} (slTooTight=false refutes stop_too_tight; exitBranch=${exitBranch})`);
+    d.mistakeType = exitBranch === "ratcheted_sl" ? "gave_back_profits"
+      : (exitBranch === "original_sl" && !d.directionCorrect) ? "wrong_direction"
+      : null;
+    console.log(`[C1] ${input.symbol}: mistakeType ${before}→${d.mistakeType ?? "null"} (slTooTight=false; exitBranch=${exitBranch}; directionCorrect=${d.directionCorrect})`);
     cRuleFires.c1++;
   }
 
@@ -1009,8 +1016,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   }
 
   // C3 — stop_too_tight and directionCorrect=false are mutually exclusive.
-  // Under Piece 3 + C1, this state can't occur (C1 clears stop_too_tight first,
-  // and slTooTight=true → directionCorrect=true). Kept as a regression guard.
+  // C1 now handles this for original_sl (sets wrong_direction directly). C3 is kept as a
+  // regression guard for any schema-drift case where C1 doesn't fire but this contradiction
+  // still appears (e.g., LLM returns stop_too_tight and code somehow has directionCorrect=false).
   if (d.mistakeType === "stop_too_tight" && !d.directionCorrect) {
     console.log(`[C3] ${input.symbol}: mistakeType stop_too_tight→wrong_direction (directionCorrect=false contradicts stop_too_tight assumption)`);
     d.mistakeType = "wrong_direction";
