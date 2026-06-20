@@ -2160,14 +2160,23 @@ export function gateRules(rules: ProposedRule[], cf: CounterfactualResult): Gate
     }
 
     // ── Gate 3: Counterfactual-match (comboKey available, non-null engineNet) ─
+    // PREFER_SETUP rules cite positiveSelection.netEvIfTaken (positive = EV from taking).
+    // trade_skip / monitor_only rules cite blockCandidates.netDelta (positive = EV from blocking).
+    // These measure opposite views of the same combo — must NOT be cross-compared.
     if (!rejectReason && rule.comboKey && rule.engineNet) {
       const claimedNet = parseNetPct(rule.engineNet);
       if (claimedNet !== null) {
-        const engineBlock = cf.blockCandidates.find(b => b.key === rule.comboKey);
-        const posSel      = cf.positiveSelection.find(p => p.key === rule.comboKey);
-        const actualNet   = engineBlock?.netDelta ?? posSel?.netEvIfTaken ?? null;
+        let actualNet: number | null = null;
+        if (rule.lever === "PREFER_SETUP") {
+          // Positive-selection EV: net gain from taking this combo
+          actualNet = cf.positiveSelection.find(p => p.key === rule.comboKey)?.netEvIfTaken ?? null;
+        } else if (rule.lever === "trade_skip" || rule.lever === "monitor_only") {
+          // Block EV: net gain from avoiding this combo
+          actualNet = cf.blockCandidates.find(b => b.key === rule.comboKey)?.netDelta ?? null;
+        }
+        // entry_timing / hold_longer / tp2_cap are reflection-derived → no numeric match required
         if (actualNet !== null && Math.abs(claimedNet - actualNet) > 2.0) {
-          rejectReason = `engineNet mismatch for ${rule.comboKey}: rule claims ${claimedNet}% but engine has ${actualNet.toFixed(2)}% (diff=${Math.abs(claimedNet-actualNet).toFixed(1)}%, tolerance=±2.0%)`;
+          rejectReason = `engineNet mismatch for ${rule.comboKey} (lever=${rule.lever}): rule claims ${claimedNet}% but engine has ${actualNet.toFixed(2)}% (diff=${Math.abs(claimedNet-actualNet).toFixed(1)}%, tolerance=±2.0%)`;
         }
       }
     }
