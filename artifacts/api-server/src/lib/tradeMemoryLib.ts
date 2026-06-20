@@ -1723,6 +1723,149 @@ async function checkAndGenerateRules(): Promise<void> {
   }
 }
 
+// ─── Phase 1 counterfactual engine ───────────────────────────────────────────
+// Validates rules against historical data before the LLM sees them.
+// Assumptions (documented):
+//   - TP1 fires 30% partial close; SL ratchets to BE on remainder.
+//   - After TP1 + BE ratchet: remaining 70% exits at ~0% in reversal scenario.
+//   - Secured gain per protected reversal = 0.30 × newTP1Pct.
+//   - beTriggerPct: CHOPPY=0.8%, all other regimes=2.0% (matches posMonitor).
+//   - autoReject if netDelta <= 0 (rule worsens or ties net P&L vs baseline).
+export type Tp1CandidateResult = {
+  candidatePct: number;
+  reversalsProtected: number;
+  reversalCoverage: number;
+  netGainFromProtection: number;
+  winsEarlyExited: number;
+  costFromEarlyExit: number;
+  netDelta: number;
+  autoReject: boolean;
+};
+export type BlockCandidateResult = {
+  key: string; setupType: string; regime: string;
+  n: number; wins: number; losses: number; winRate: number;
+  avoidedLoss: number; blockedWin: number; netDelta: number;
+  autoReject: boolean;
+};
+export type CounterfactualResult = {
+  populationN: number;
+  reversalCount: number;
+  winCount: number;
+  tp1Sweep: Tp1CandidateResult[];
+  blockCandidates: BlockCandidateResult[];
+  choppyTp2: { totalChoppy: number; aboveCap35: number; tp2HitAboveCap35: number; wins: number; losses: number };
+  slTightCohort: { n: number; wins: number; losses: number; totalLoss: number };
+};
+
+const CF_TP1_PARTIAL   = 0.30;
+const CF_MIN_BLOCK_N   = 3;
+const CF_TP1_CANDIDATES = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0];
+const CF_CUTOFF        = new Date("2026-06-04T00:00:00Z");
+
+export async function computeCounterfactuals(): Promise<CounterfactualResult> {
+  type Row = {
+    pnl: number; max_profit_pct: number | null;
+    tp1_price: number | null; tp2_price: number | null;
+    entry_price: number | null; sl_price: number | null;
+    setup_type: string | null; reasoning: string | null;
+    sl_too_tight: boolean | null; tp1_reached: boolean | null; tp2_reached: boolean | null;
+  };
+  const res = await db.execute<Row>(sql`
+    SELECT
+      tl.pnl_pct::float        AS pnl,
+      tm.max_profit_pct::float AS max_profit_pct,
+      tl.tp1::float            AS tp1_price,
+      tl.tp2::float            AS tp2_price,
+      tl.entry_price::float    AS entry_price,
+      tl.sl::float             AS sl_price,
+      tl.setup_type, tl.reasoning,
+      tm.sl_too_tight, tm.tp1_reached, tm.tp2_reached
+    FROM trade_memory tm
+    JOIN trade_log tl ON tm.source_trade_id = tl.id::text
+    WHERE tm.action = 'TRADE_CLOSE'
+      AND tl.broker = 'bybit'
+      AND tl.entry_at >= ${CF_CUTOFF}
+    ORDER BY tl.entry_at
+  `);
+  const rows = res.rows as Row[];
+
+  const getRegime  = (r: Row) => (r.reasoning ?? "").match(/regime=(\w+)/)?.[1] ?? "UNKNOWN";
+  const getBeTrig  = (r: Row) => getRegime(r) === "CHOPPY" ? 0.8 : 2.0;
+  const getTp1Dist = (r: Row) => (r.tp1_price && r.entry_price) ? Math.abs(r.tp1_price - r.entry_price) / r.entry_price * 100 : null;
+  const getTp2Dist = (r: Row) => (r.tp2_price && r.entry_price) ? Math.abs(r.tp2_price - r.entry_price) / r.entry_price * 100 : null;
+
+  const reversals = rows.filter(r => r.max_profit_pct != null && r.max_profit_pct >= getBeTrig(r) && r.pnl <= 0);
+  const wins      = rows.filter(r => r.pnl > 0);
+
+  const tp1Sweep: Tp1CandidateResult[] = CF_TP1_CANDIDATES.map(cand => {
+    const prot  = reversals.filter(r => { const d = getTp1Dist(r); return r.max_profit_pct! >= cand && (d == null || d > cand); });
+    const netG  = prot.reduce((s, r) => s + (CF_TP1_PARTIAL * cand - r.pnl), 0);
+    const early = wins.filter(r => { const d = getTp1Dist(r); return d != null && d > cand && (r.max_profit_pct ?? 0) >= cand; });
+    const cost  = early.reduce((s, r) => s + (getTp1Dist(r)! - cand) * CF_TP1_PARTIAL, 0);
+    const net   = netG - cost;
+    return {
+      candidatePct:          cand,
+      reversalsProtected:    prot.length,
+      reversalCoverage:      Math.round(prot.length / (reversals.length || 1) * 100),
+      netGainFromProtection: Math.round(netG * 100) / 100,
+      winsEarlyExited:       early.length,
+      costFromEarlyExit:     Math.round(cost * 100) / 100,
+      netDelta:              Math.round(net  * 100) / 100,
+      autoReject:            net <= 0,
+    };
+  });
+
+  const combos: Record<string, { setupType: string; regime: string; trades: Row[] }> = {};
+  for (const r of rows) {
+    const key = `${r.setup_type ?? "unknown"}+${getRegime(r)}`;
+    if (!combos[key]) combos[key] = { setupType: r.setup_type ?? "unknown", regime: getRegime(r), trades: [] };
+    combos[key].trades.push(r);
+  }
+  const blockCandidates: BlockCandidateResult[] = Object.entries(combos)
+    .filter(([, g]) => g.trades.length >= CF_MIN_BLOCK_N)
+    .map(([key, g]) => {
+      const w = g.trades.filter(r => r.pnl > 0), l = g.trades.filter(r => r.pnl <= 0);
+      const avL = l.reduce((s, r) => s + Math.abs(r.pnl), 0);
+      const blW = w.reduce((s, r) => s + r.pnl, 0);
+      const net = avL - blW;
+      return {
+        key, setupType: g.setupType, regime: g.regime,
+        n: g.trades.length, wins: w.length, losses: l.length,
+        winRate:     Math.round(w.length / g.trades.length * 100),
+        avoidedLoss: Math.round(avL * 100) / 100,
+        blockedWin:  Math.round(blW * 100) / 100,
+        netDelta:    Math.round(net * 100) / 100,
+        autoReject:  net <= 0,
+      };
+    })
+    .sort((a, b) => b.netDelta - a.netDelta);
+
+  const choppyRows = rows.filter(r => getRegime(r) === "CHOPPY");
+  const above35    = choppyRows.filter(r => { const d = getTp2Dist(r); return d != null && d > 3.5; });
+  const slTight    = rows.filter(r => r.sl_too_tight === true);
+
+  return {
+    populationN:   rows.length,
+    reversalCount: reversals.length,
+    winCount:      wins.length,
+    tp1Sweep,
+    blockCandidates,
+    choppyTp2: {
+      totalChoppy:      choppyRows.length,
+      aboveCap35:       above35.length,
+      tp2HitAboveCap35: above35.filter(r => r.tp2_reached === true).length,
+      wins:             above35.filter(r => r.pnl > 0).length,
+      losses:           above35.filter(r => r.pnl <= 0).length,
+    },
+    slTightCohort: {
+      n:         slTight.length,
+      wins:      slTight.filter(r => r.pnl > 0).length,
+      losses:    slTight.filter(r => r.pnl <= 0).length,
+      totalLoss: Math.round(slTight.filter(r => r.pnl <= 0).reduce((s, r) => s + r.pnl, 0) * 100) / 100,
+    },
+  };
+}
+
 export type ProposedRule = {
   ruleNumber: number; ruleText: string; evidence: string;
   causalLogic: string; confidence: string; occurrences: number;
@@ -1730,7 +1873,8 @@ export type ProposedRule = {
 };
 
 // Dry-run: run the full LLM rule generation and return proposed rules without writing to DB.
-export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; patternsFound: string; reflectionCount: number }> {
+// Also runs the Phase 1 counterfactual engine and returns both side-by-side for comparison.
+export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; patternsFound: string; reflectionCount: number; counterfactuals: CounterfactualResult }> {
   const reflections = await db.select()
     .from(tradeMemoryTable)
     .where(and(
@@ -1844,7 +1988,9 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
 
   const validRules = res.data.rules.filter(r => r.occurrences >= 3);
   console.log(`[rules/preview] ${validRules.length} valid rules from ${N} reflections (dry-run, nothing written)`);
-  return { rules: validRules as ProposedRule[], patternsFound: res.data.patternsFound, reflectionCount: N };
+  const counterfactuals = await computeCounterfactuals();
+  console.log(`[rules/preview] counterfactuals: pop=${counterfactuals.populationN} reversals=${counterfactuals.reversalCount} wins=${counterfactuals.winCount}`);
+  return { rules: validRules as ProposedRule[], patternsFound: res.data.patternsFound, reflectionCount: N, counterfactuals };
 }
 
 // ─── Recent memory for scan prompt ───────────────────────────────────────────

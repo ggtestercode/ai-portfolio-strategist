@@ -9,7 +9,7 @@ import { buildPerformanceSeries } from "../lib/performance";
 import { db } from "@workspace/db";
 import { tradeMemoryTable } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
-import { backfillStructuredReflections, previewTradingRules, generateTradingRules } from "../lib/tradeMemoryLib";
+import { backfillStructuredReflections, previewTradingRules, generateTradingRules, computeCounterfactuals } from "../lib/tradeMemoryLib";
 
 const router: IRouter = Router();
 
@@ -71,6 +71,17 @@ router.post("/admin/re-reflect", async (req, res): Promise<void> => {
 router.get("/admin/preview-rules", async (_req, res): Promise<void> => {
   try {
     const result = await previewTradingRules();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+
+// Admin-only: run counterfactual engine only (no LLM, fast).
+// Usage: GET /admin/counterfactuals
+router.get("/admin/counterfactuals", async (_req, res): Promise<void> => {
+  try {
+    const result = await computeCounterfactuals();
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
