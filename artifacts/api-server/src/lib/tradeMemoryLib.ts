@@ -1566,9 +1566,10 @@ export async function generateTradingRules(force = false): Promise<void> {
     `Include engineNet with exact engine number (e.g. "+22.1%, n=16, margin=16.3pp") or null if reflection-derived.`,
     `Include comboKey: "SETUP_TYPE+REGIME" (e.g. "MOMENTUM+CHOPPY") for combo-specific rules; null for general rules.`,
     `Include sample size in ruleText.`,
+    `IMPORTANT: Start rule numbering at 20 (not 1). First rule = ruleNumber:20, second = ruleNumber:21, etc. Rules 1-19 are reserved for legacy safeguards that must not be overwritten.`,
     ``,
     `Return ONLY valid JSON:`,
-    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","comboKey":"MOMENTUM+CHOPPY","ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
+    `{"rules":[{"ruleNumber":20,"lever":"trade_skip","comboKey":"MOMENTUM+CHOPPY","ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
   ].join("\n");
 
   type RuleGenResult = {
@@ -1629,7 +1630,30 @@ export async function generateTradingRules(force = false): Promise<void> {
   // Phase 3 gate: run before any DB write — engine classification is authoritative
   const gated = gateRules(minEvidenceRules, cfData);
   gated.log.forEach(l => console.log(`[rules/gate] ${l}`));
-  const validRules = gated.passed;
+
+  // Renumber: ensure all rules land in the 20+ slot so they never overwrite legacy
+  // safeguards (rules 5/10/14/15 are soft-only, no code backing — must survive regens).
+  // LLM is instructed to start at 20; this is a safety net for non-compliance.
+  const renumbered = gated.passed.map((r, i) => ({
+    ...r,
+    ruleNumber: r.ruleNumber >= 20 ? r.ruleNumber : 20 + i,
+  }));
+
+  // Ruletext fixes for two soft tensions:
+  // 1. MOMENTUM+CHOPPY trade_skip duplicates the hard code gate — prefix to make non-overridable semantics clear.
+  // 2. PREFER_SETUP MOMENTUM+TRENDING_DOWN — scope to HOLD-bias only (position management), not ADD.
+  const validRules = renumbered.map(r => {
+    if (r.comboKey === "MOMENTUM+CHOPPY" && r.lever === "trade_skip") {
+      return { ...r, ruleText: `CODE GATE (enforced in applyHardFilters — not overridable via ruleOverridden): ${r.ruleText}` };
+    }
+    if (r.comboKey === "MOMENTUM+TRENDING_DOWN" && r.lever === "PREFER_SETUP") {
+      return { ...r, ruleText: r.ruleText
+        .replace(/ACTIVELY PREFER\b[^:.]*/i, "HOLD BIAS when managing a MOMENTUM short in TRENDING_DOWN")
+        .replace(/\bACTIVELY PREFER\b/gi, "HOLD BIAS for")
+      };
+    }
+    return r;
+  });
 
   // Guard: empty output → preserve existing rules unchanged (prevents trim-delete wiping all rules
   // if the LLM returns nothing valid, which would make DELETE WHERE NOT IN ([]) delete everything).
@@ -1693,10 +1717,15 @@ export async function generateTradingRules(force = false): Promise<void> {
   // Inactive rules (4,6,9,12,13) are excluded from deletion — they are preserved
   // until explicitly reactivated or removed. Slug-based identity (deferred) will
   // make this fully robust; for now the active=true guard prevents silent wipe.
+  //
+  // SAFEGUARD_RULES are soft-only (no code backing) — permanently excluded from trim.
+  // Renumbering rules to 20+ means these never collide with new rule numbers anyway,
+  // but the explicit exclusion is a belt-and-suspenders guard.
+  const SAFEGUARD_RULES = [5, 10, 14, 15]; // RS veto, vol climax, RANGING/EXHAUSTION TP caps, adverse candle SL
   const newNumbers = validRules.map(r => r.ruleNumber);
   await db.delete(tradingRulesTable)
     .where(and(
-      notInArray(tradingRulesTable.ruleNumber, newNumbers),
+      notInArray(tradingRulesTable.ruleNumber, [...newNumbers, ...SAFEGUARD_RULES]),
       eq(tradingRulesTable.active, true),
     ))
     .catch(e => console.error("[rules] Trim obsolete rules:", e));
@@ -2382,9 +2411,10 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
     `Include engineNet field: the exact engine number (e.g. "+22.1%, n=16, margin=16.3pp") or null if reflection-derived.`,
     `Include comboKey field: the "SETUP_TYPE+REGIME" key (e.g. "MOMENTUM+CHOPPY") for combo-specific rules (trade_skip, PREFER_SETUP). Set to null for general rules (entry_timing, hold_longer, tp2_cap, monitor_only not targeting a combo).`,
     `Include sample size in ruleText itself ("in N/M trades since Jun 4").`,
+    `IMPORTANT: Start rule numbering at 20 (not 1). First rule = ruleNumber:20, second = ruleNumber:21, etc. Rules 1-19 are reserved for legacy safeguards that must not be overwritten.`,
     ``,
     `Return ONLY valid JSON:`,
-    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","comboKey":"MOMENTUM+CHOPPY","ruleText":"specific actionable rule including sample size","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16, margin=16.3pp","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"2-sentence summary of the most important patterns"}`,
+    `{"rules":[{"ruleNumber":20,"lever":"trade_skip","comboKey":"MOMENTUM+CHOPPY","ruleText":"specific actionable rule including sample size","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16, margin=16.3pp","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"2-sentence summary of the most important patterns"}`,
   ].join("\n");
 
   type RuleGenResult = {
@@ -2409,7 +2439,26 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
   const gateResult = gateRules(rawRules, counterfactuals);
   console.log(`[rules/preview] ${rawRules.length} raw → gate: ${gateResult.passed.length} passed, ${gateResult.rejected.length} rejected, ${gateResult.downgraded.length} downgraded`);
   gateResult.log.forEach(l => console.log(`[rules/gate] ${l}`));
-  return { rules: gateResult.passed, patternsFound: res.data.patternsFound, reflectionCount: N, counterfactuals, gateResult };
+
+  // Apply same renumber + ruletext fixes as generateTradingRules so previews reflect actual write behavior.
+  const renumberedPrev = gateResult.passed.map((r, i) => ({
+    ...r,
+    ruleNumber: r.ruleNumber >= 20 ? r.ruleNumber : 20 + i,
+  }));
+  const finalPreviewRules = renumberedPrev.map(r => {
+    if (r.comboKey === "MOMENTUM+CHOPPY" && r.lever === "trade_skip") {
+      return { ...r, ruleText: `CODE GATE (enforced in applyHardFilters — not overridable via ruleOverridden): ${r.ruleText}` };
+    }
+    if (r.comboKey === "MOMENTUM+TRENDING_DOWN" && r.lever === "PREFER_SETUP") {
+      return { ...r, ruleText: r.ruleText
+        .replace(/ACTIVELY PREFER\b[^:.]*/i, "HOLD BIAS when managing a MOMENTUM short in TRENDING_DOWN")
+        .replace(/\bACTIVELY PREFER\b/gi, "HOLD BIAS for")
+      };
+    }
+    return r;
+  });
+
+  return { rules: finalPreviewRules, patternsFound: res.data.patternsFound, reflectionCount: N, counterfactuals, gateResult };
 }
 
 // ─── Recent memory for scan prompt ───────────────────────────────────────────
