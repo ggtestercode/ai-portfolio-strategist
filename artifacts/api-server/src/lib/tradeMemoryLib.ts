@@ -2161,6 +2161,27 @@ export function gateRules(rules: ProposedRule[], cf: CounterfactualResult): Gate
       }
     }
 
+    // ── Gate 1c: Embedded TP1 level in ruleText (any lever) ──────────────────
+    // Catches rules that set TP1 price levels inside hold_longer / entry_timing
+    // text even though their lever field is not "tp1" (bypassing Gate 1).
+    // Pattern: "tp1 at X%", "tp1 should be X%", "tp1 minimum X%", "tp1 of X%",
+    //          "set tp1 to X%", "tp1 X-Y%", "tp1 X%+".
+    // Max deployed TP1: 2.5% (non-CHOPPY entry×1.025). Any cited level >2.5% is
+    // a contradiction. Upper bound 15% excludes close-percentages (20-100%) which
+    // appear in the same text (e.g. "close 30% at TP1").
+    if (!rejectReason && rule.lever !== "tp1") {
+      const lower = rule.ruleText.toLowerCase();
+      // Requires "tp1" followed within 25 chars by a number then "%"
+      const tp1EmbedRegex = /\btp1\b[^%\n]{0,25}?(\d+\.?\d*)\s*%/g;
+      for (const m of lower.matchAll(tp1EmbedRegex)) {
+        const pct = parseFloat(m[1]);
+        if (pct > 2.5 && pct < 15) {
+          rejectReason = `ruleText embeds TP1 level ${pct}% > deployed max 2.5% (non-CHOPPY) — lever=${rule.lever} doesn't use lever=tp1 but still sets a TP1 price level. TP1 is immutable: use hold_longer to say "hold to TP2" without specifying TP1 price.`;
+          break;
+        }
+      }
+    }
+
     // ── Gate 2: lever vs engine classification (comboKey lookup) ─────────────
     if (!rejectReason && rule.comboKey) {
       const engineBlock = cf.blockCandidates.find(b => b.key === rule.comboKey);
