@@ -1564,15 +1564,16 @@ export async function generateTradingRules(force = false): Promise<void> {
     ``,
     `Valid levers: trade_skip | tp2_cap | PREFER_SETUP | entry_timing | hold_longer | monitor_only`,
     `Include engineNet with exact engine number (e.g. "+22.1%, n=16, margin=16.3pp") or null if reflection-derived.`,
+    `Include comboKey: "SETUP_TYPE+REGIME" (e.g. "MOMENTUM+CHOPPY") for combo-specific rules; null for general rules.`,
     `Include sample size in ruleText.`,
     ``,
     `Return ONLY valid JSON:`,
-    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
+    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","comboKey":"MOMENTUM+CHOPPY","ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
   ].join("\n");
 
   type RuleGenResult = {
     rules: Array<{
-      ruleNumber: number; lever?: string; ruleText: string; evidence: string;
+      ruleNumber: number; lever?: string; comboKey?: string | null; ruleText: string; evidence: string;
       causalLogic: string; confidence: string; occurrences: number;
       engineNet?: string | null; contradictsFundamentals: boolean; flagNote: string | null;
     }>;
@@ -1614,7 +1615,7 @@ export async function generateTradingRules(force = false): Promise<void> {
 
   console.log(`[rules] Raw response: ${res.text}`);
 
-  const validRules = res.data.rules.filter(rule => {
+  const minEvidenceRules = (res.data.rules.filter(rule => {
     if (rule.occurrences < 3) {
       console.log(`[rules] Rule ${rule.ruleNumber} insufficient evidence (${rule.occurrences}<3) — skipped`);
       return false;
@@ -1623,12 +1624,17 @@ export async function generateTradingRules(force = false): Promise<void> {
       console.log(`[rules] Rule ${rule.ruleNumber} flags fundamentals contradiction: ${rule.flagNote ?? "unspecified"}`);
     }
     return true;
-  });
+  }) as ProposedRule[]).map(r => ({ ...r, comboKey: r.comboKey ?? null }));
+
+  // Phase 3 gate: run before any DB write — engine classification is authoritative
+  const gated = gateRules(minEvidenceRules, cfData);
+  gated.log.forEach(l => console.log(`[rules/gate] ${l}`));
+  const validRules = gated.passed;
 
   // Guard: empty output → preserve existing rules unchanged (prevents trim-delete wiping all rules
   // if the LLM returns nothing valid, which would make DELETE WHERE NOT IN ([]) delete everything).
   if (validRules.length === 0) {
-    console.log("[rules] No valid rules produced — skipping mutation to preserve existing rules");
+    console.log("[rules] No valid rules after gate — skipping mutation to preserve existing rules");
     return;
   }
 
@@ -2076,7 +2082,8 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
 
 export type ProposedRule = {
   ruleNumber: number;
-  lever: string;          // trade_skip | tp2_cap | tp1 | sl | PREFER_SETUP | entry_timing | hold_longer
+  lever: string;          // trade_skip | tp2_cap | tp1 | sl | PREFER_SETUP | entry_timing | hold_longer | monitor_only
+  comboKey: string | null; // "SETUP_TYPE+REGIME" for combo-specific rules; null for general rules
   ruleText: string;
   evidence: string;
   causalLogic: string;
@@ -2087,9 +2094,143 @@ export type ProposedRule = {
   flagNote: string | null;
 };
 
+export type GateResult = {
+  passed: ProposedRule[];
+  rejected: Array<{ ruleNumber: number; ruleText: string; reason: string }>;
+  downgraded: Array<{ ruleNumber: number; field: string; from: string; to: string; reason: string }>;
+  log: string[];
+};
+
+// Phase 3 post-LLM validation gate — engine classification is authoritative.
+// Runs after every LLM call, before any rule is returned or written to DB.
+export function gateRules(rules: ProposedRule[], cf: CounterfactualResult): GateResult {
+  const rejected: GateResult["rejected"] = [];
+  const downgraded: GateResult["downgraded"] = [];
+  const log: string[] = [];
+  const passed: ProposedRule[] = [];
+
+  const parseNetPct = (s: string | null): number | null => {
+    if (!s) return null;
+    const m = s.match(/([+-]?\d+\.?\d*)\s*%/);
+    return m ? parseFloat(m[1]) : null;
+  };
+
+  for (const rawRule of rules) {
+    const rule: ProposedRule = { ...rawRule };
+    let rejectReason: string | null = null;
+
+    // ── Gate 1: TP1 immutability ──────────────────────────────────────────────
+    if (rule.lever === "tp1") {
+      rejectReason = "lever=tp1 is forbidden — TP1 is immutable (regime-conditional levels already deployed)";
+    }
+
+    // ── Gate 1b: SL-widening ──────────────────────────────────────────────────
+    if (!rejectReason && rule.lever === "sl") {
+      const lower = rule.ruleText.toLowerCase();
+      if (lower.includes("widen") || lower.includes("wider") || lower.includes("increase sl") || lower.includes("loosen")) {
+        rejectReason = "lever=sl with widening — sl_too_tight trades are directional failures, not SL-placement failures";
+      }
+    }
+
+    // ── Gate 2: lever vs engine classification (comboKey lookup) ─────────────
+    if (!rejectReason && rule.comboKey) {
+      const engineBlock = cf.blockCandidates.find(b => b.key === rule.comboKey);
+      const enginePosSel = cf.positiveSelection.find(p => p.key === rule.comboKey);
+
+      if (engineBlock) {
+        const status = engineBlock.status;
+        if (rule.lever === "trade_skip") {
+          if (status === "VALIDATED_ALLOW") {
+            rejectReason = `lever=trade_skip but engine=VALIDATED_ALLOW for ${rule.comboKey} (net=${engineBlock.netDelta}% — blocking removes more wins than losses)`;
+          } else if (status === "BORDERLINE") {
+            const prev = rule.lever;
+            rule.lever = "monitor_only";
+            const why = `engine=BORDERLINE for ${rule.comboKey} (net=${engineBlock.netDelta.toFixed(1)}%, below +5% hard-block threshold)`;
+            downgraded.push({ ruleNumber: rule.ruleNumber, field: "lever", from: prev, to: "monitor_only", reason: why });
+            log.push(`Rule ${rule.ruleNumber}: DOWNGRADED lever ${prev}→monitor_only — ${why}`);
+          }
+        }
+        if (!rejectReason && rule.lever === "PREFER_SETUP" && status === "VALIDATED_BLOCK") {
+          rejectReason = `lever=PREFER_SETUP contradicts engine=VALIDATED_BLOCK for ${rule.comboKey} — cannot prefer a blocked combo`;
+        }
+      }
+      if (!rejectReason && enginePosSel && rule.lever === "trade_skip") {
+        rejectReason = `lever=trade_skip but ${rule.comboKey} is in positiveSelection (WR=${enginePosSel.winRate}%) — cannot block a preferred combo`;
+      }
+    }
+
+    // ── Gate 3: Counterfactual-match (comboKey available, non-null engineNet) ─
+    if (!rejectReason && rule.comboKey && rule.engineNet) {
+      const claimedNet = parseNetPct(rule.engineNet);
+      if (claimedNet !== null) {
+        const engineBlock = cf.blockCandidates.find(b => b.key === rule.comboKey);
+        const posSel      = cf.positiveSelection.find(p => p.key === rule.comboKey);
+        const actualNet   = engineBlock?.netDelta ?? posSel?.netEvIfTaken ?? null;
+        if (actualNet !== null && Math.abs(claimedNet - actualNet) > 2.0) {
+          rejectReason = `engineNet mismatch for ${rule.comboKey}: rule claims ${claimedNet}% but engine has ${actualNet.toFixed(2)}% (diff=${Math.abs(claimedNet-actualNet).toFixed(1)}%, tolerance=±2.0%)`;
+        }
+      }
+    }
+
+    // ── Gate 4: Threshold — trade_skip requires engine net ≥ +5% ────────────
+    // Fires when comboKey absent (fallback: parse net from engineNet string).
+    if (!rejectReason && rule.lever === "trade_skip") {
+      let thresholdNet: number | null = null;
+      if (rule.comboKey) {
+        const b = cf.blockCandidates.find(b => b.key === rule.comboKey);
+        if (b) thresholdNet = b.netDelta;
+      } else {
+        thresholdNet = parseNetPct(rule.engineNet);
+      }
+      if (thresholdNet !== null && thresholdNet < 5) {
+        const prev = rule.lever;
+        rule.lever = "monitor_only";
+        const why = `engine net=${thresholdNet.toFixed(1)}% < +5% hard-block threshold for trade_skip`;
+        downgraded.push({ ruleNumber: rule.ruleNumber, field: "lever", from: prev, to: "monitor_only", reason: why });
+        log.push(`Rule ${rule.ruleNumber}: DOWNGRADED lever ${prev}→monitor_only — ${why}`);
+      }
+    }
+
+    // ── Gate 5: Confidence — HIGH requires n≥5 AND positive engine net ────────
+    if (!rejectReason) {
+      if (rule.confidence === "HIGH" && rule.occurrences < 5) {
+        const prev = rule.confidence;
+        rule.confidence = "MEDIUM";
+        const why = `occurrences=${rule.occurrences} < 5 required for HIGH confidence`;
+        downgraded.push({ ruleNumber: rule.ruleNumber, field: "confidence", from: prev, to: "MEDIUM", reason: why });
+        log.push(`Rule ${rule.ruleNumber}: DOWNGRADED confidence ${prev}→MEDIUM — ${why}`);
+      }
+      if (rule.confidence === "HIGH" && rule.comboKey) {
+        const b   = cf.blockCandidates.find(b => b.key === rule.comboKey);
+        const p   = cf.positiveSelection.find(p => p.key === rule.comboKey);
+        const net = b?.netDelta ?? p?.netEvIfTaken ?? null;
+        if (net !== null && net <= 0) {
+          const prev = rule.confidence;
+          rule.confidence = "MEDIUM";
+          const why = `engine net=${net.toFixed(1)}% ≤ 0 — HIGH confidence requires positive engine net`;
+          downgraded.push({ ruleNumber: rule.ruleNumber, field: "confidence", from: prev, to: "MEDIUM", reason: why });
+          log.push(`Rule ${rule.ruleNumber}: DOWNGRADED confidence ${prev}→MEDIUM — ${why}`);
+        }
+      }
+    }
+
+    if (rejectReason) {
+      rejected.push({ ruleNumber: rule.ruleNumber, ruleText: rule.ruleText.slice(0, 80), reason: rejectReason });
+      log.push(`Rule ${rule.ruleNumber}: REJECTED — ${rejectReason}`);
+    } else {
+      const changed = downgraded.some(d => d.ruleNumber === rule.ruleNumber);
+      log.push(`Rule ${rule.ruleNumber}: ${changed ? "PASSED (after downgrade)" : "PASSED"} — lever=${rule.lever}, confidence=${rule.confidence}`);
+      passed.push(rule);
+    }
+  }
+
+  log.push(`Gate summary: ${passed.length} passed, ${rejected.length} rejected, ${downgraded.length} downgraded`);
+  return { passed, rejected, downgraded, log };
+}
+
 // Dry-run: run the full LLM rule generation and return proposed rules without writing to DB.
 // Also runs the Phase 1 counterfactual engine and returns both side-by-side for comparison.
-export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; patternsFound: string; reflectionCount: number; counterfactuals: CounterfactualResult }> {
+export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; patternsFound: string; reflectionCount: number; counterfactuals: CounterfactualResult; gateResult: GateResult }> {
   const reflections = await db.select()
     .from(tradeMemoryTable)
     .where(and(
@@ -2230,15 +2371,16 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
     `  monitor_only — flag for observation, no hard action (borderline blocks go here)`,
     ``,
     `Include engineNet field: the exact engine number (e.g. "+22.1%, n=16, margin=16.3pp") or null if reflection-derived.`,
+    `Include comboKey field: the "SETUP_TYPE+REGIME" key (e.g. "MOMENTUM+CHOPPY") for combo-specific rules (trade_skip, PREFER_SETUP). Set to null for general rules (entry_timing, hold_longer, tp2_cap, monitor_only not targeting a combo).`,
     `Include sample size in ruleText itself ("in N/M trades since Jun 4").`,
     ``,
     `Return ONLY valid JSON:`,
-    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","ruleText":"specific actionable rule including sample size","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16, margin=16.3pp","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"2-sentence summary of the most important patterns"}`,
+    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","comboKey":"MOMENTUM+CHOPPY","ruleText":"specific actionable rule including sample size","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16, margin=16.3pp","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"2-sentence summary of the most important patterns"}`,
   ].join("\n");
 
   type RuleGenResult = {
     rules: Array<{
-      ruleNumber: number; lever: string; ruleText: string; evidence: string;
+      ruleNumber: number; lever: string; comboKey?: string | null; ruleText: string; evidence: string;
       causalLogic: string; confidence: string; occurrences: number;
       engineNet: string | null; contradictsFundamentals: boolean; flagNote: string | null;
     }>;
@@ -2247,15 +2389,18 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
 
   const res = await llm.json<RuleGenResult>({
     taskType:      "rule_generation",
-    systemContext: "You are a trading rule writer. The Phase 1 engine has already discovered and validated trading opportunities. Your job is to articulate them as precise, actionable rules. Reply with JSON only — no preamble, no markdown, no explanation outside the JSON.",
+    systemContext: "You are a trading rule writer. The Phase 1 engine has validated opportunities. Articulate them as precise actionable rules. Reply JSON only — no preamble or markdown outside the JSON.",
     prompt,
     schema: { type: "object", properties: { rules: { type: "array" }, patternsFound: { type: "string" } }, required: ["rules"] },
     fallback: { rules: [], patternsFound: "" },
   });
 
-  const validRules = res.data.rules.filter(r => r.occurrences >= 3);
-  console.log(`[rules/preview] ${validRules.length} valid rules from ${N} reflections (dry-run, nothing written)`);
-  return { rules: validRules as ProposedRule[], patternsFound: res.data.patternsFound, reflectionCount: N, counterfactuals };
+  const rawRules = (res.data.rules.filter(r => r.occurrences >= 3) as ProposedRule[])
+    .map(r => ({ ...r, comboKey: r.comboKey ?? null }));
+  const gateResult = gateRules(rawRules, counterfactuals);
+  console.log(`[rules/preview] ${rawRules.length} raw → gate: ${gateResult.passed.length} passed, ${gateResult.rejected.length} rejected, ${gateResult.downgraded.length} downgraded`);
+  gateResult.log.forEach(l => console.log(`[rules/gate] ${l}`));
+  return { rules: gateResult.passed, patternsFound: res.data.patternsFound, reflectionCount: N, counterfactuals, gateResult };
 }
 
 // ─── Recent memory for scan prompt ───────────────────────────────────────────
