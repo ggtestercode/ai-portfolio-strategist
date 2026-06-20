@@ -1518,38 +1518,63 @@ export async function generateTradingRules(force = false): Promise<void> {
     ].filter(Boolean).join("\n");
   }).join("\n---\n");
 
+  // ─── Run engine to embed validated numbers directly in prompt ────────────────
+  const cfData = await computeCounterfactuals();
+  const cfValBlocks    = cfData.recommendations.blocks.filter(b => b.status === "VALIDATED_BLOCK");
+  const cfBorderBlocks = cfData.recommendations.blocks.filter(b => b.status === "BORDERLINE");
+  const cfPosSelText   = cfData.positiveSelection.length > 0
+    ? cfData.positiveSelection.map(p => `  - ${p.key}: n=${p.n}, WR=${p.winRate}% (+${p.wrDelta}pp vs ${p.popWinRate}% pop), netEV=${p.netEvIfTaken>=0?"+":""}${p.netEvIfTaken.toFixed(1)}%. ${p.reason}`).join("\n")
+    : "  (no combo meets n>=3 and WR >15pp above population yet)";
+  const cfCutEarlyText = [
+    `  Total: n=${cfData.cutWinnerEarly.n}, totalOpCost=${cfData.cutWinnerEarly.totalOpCostPct.toFixed(1)}%, avg=${cfData.cutWinnerEarly.avgOpCostPct.toFixed(2)}%/trade`,
+    `  Non-CHOPPY: n=${cfData.cutWinnerEarly.nonChoppyN}, totalOpCost=${cfData.cutWinnerEarly.nonChoppyOpCostPct.toFixed(1)}% — correct-direction trades cut before TP2`,
+    `  CHOPPY: n=${cfData.cutWinnerEarly.choppyN}, totalOpCost=${cfData.cutWinnerEarly.choppyOpCostPct.toFixed(1)}% — addressed by CHOPPY TP2 cap rule`,
+  ].join("\n");
+
   const prompt = [
-    `Analyse trade reflections and generate between 5 and 15 actionable trading rules — as many as the evidence supports with minimum 3 trade occurrences each. Do not invent rules to fill a quota.`,
+    `You are a trading rule writer. The Phase 1 counterfactual engine has validated specific opportunities from ${cfData.populationN} live trades (since 2026-06-04). Articulate those as actionable rules.`,
     ``,
+    `CRITICAL CONSTRAINTS:`,
+    `1. CODE DISCOVERS, YOU ARTICULATE. Every number must come from the engine data below. Do not invent win rates, net%, or trade counts.`,
+    `2. TP1 IS IMMUTABLE. TP1 = regime-conditional profit protection (deployed). Do not propose changing TP1 levels. lever=tp1 is FORBIDDEN.`,
+    `3. SL-WIDENING IS FORBIDDEN. The ${cfData.slTightCohort.n} sl_too_tight trades are directional failures, not SL-placement failures. lever=sl is FORBIDDEN unless tightening.`,
+    `4. BALANCED RULE SET REQUIRED. Generate BOTH loss-avoidance (trade_skip, tp2_cap) AND win-amplification (PREFER_SETUP, hold_longer) rules.`,
+    `5. HIGH confidence requires n>=5 AND positive engine net. MEDIUM = n 3-4.`,
+    ``,
+    `═══ LOSS-AVOIDANCE (engine-validated) ═══`,
+    `VALIDATED BLOCKS (net > +5%):`,
+    cfValBlocks.length > 0 ? cfValBlocks.map(b => `  - ${b.key}: n=${b.n}, WR=${b.winRate}%, ${b.reason}`).join("\n") : "  (none above +5%)",
+    `BORDERLINE BLOCKS (net 0-5%, monitor-only):`,
+    cfBorderBlocks.length > 0 ? cfBorderBlocks.map(b => `  - ${b.key}: n=${b.n}, WR=${b.winRate}%, ${b.reason}`).join("\n") : "  (none)",
+    `CHOPPY TP2 CAP: maxWinPnl=${cfData.recommendations.choppyTp2.choppyWinMaxPnl.toFixed(2)}% → cap at ${cfData.recommendations.choppyTp2.recommendedCap}%. Hit rates: ${cfData.choppyTp2Sweep.map(c => `${c.capPct}%→${c.tp2HitRate}%`).join(", ")}.`,
+    `SL: ${cfData.recommendations.sl.rationale}`,
+    ``,
+    `═══ WIN-AMPLIFICATION (engine-validated) ═══`,
+    `POSITIVE SELECTION (WR > pop ${cfData.populationWR}% by 15pp+, n>=3):`,
+    cfPosSelText,
+    `CUT_WINNER_EARLY COHORT:`,
+    cfCutEarlyText,
+    `  Action: propose hold_longer rule for non-CHOPPY regime with intact directional thesis (TP1 hit, price above entry, direction valid). Do NOT extend CHOPPY holds.`,
+    ``,
+    `═══ SIGNAL QUALIFIERS (use for entry_timing rules) ═══`,
     verdictAggregates,
-    ``,
-    `Rules derived from VERDICT AGGREGATES must be specific and quantified.`,
-    `Good: "SL was too tight in 7/10 losses — widen SL to 2.0× ATR minimum"`,
-    `Bad:  "Consider SL placement more carefully"`,
-    `Good: "TP1 too_ambitious in 8/12 trades — set TP1 at 1.0× ATR not 2.0×"`,
-    `Bad:  "Be more realistic with TP targets"`,
-    ``,
-    `Analyse ALL ${reflections.length} trade reflections below for rule generation:`,
-    ``,
-    `Requirements per rule:`,
-    `- Minimum 3 trade occurrences as evidence`,
-    `- Clear causal logic (not just correlation)`,
-    `- Cross-check: funding positive = longs crowded = short bias; price above EMA = bullish; high volume breakout = real move`,
-    `- Flag if rule contradicts market fundamentals`,
-    `- Confidence: HIGH (5+ occurrences) | MEDIUM (3-4) | LOW (<3)`,
     ``,
     `Trade reflections (${reflections.length} trades):`,
     reflStr,
     ``,
+    `Valid levers: trade_skip | tp2_cap | PREFER_SETUP | entry_timing | hold_longer | monitor_only`,
+    `Include engineNet with exact engine number (e.g. "+22.1%, n=16, margin=16.3pp") or null if reflection-derived.`,
+    `Include sample size in ruleText.`,
+    ``,
     `Return ONLY valid JSON:`,
-    `{"rules":[{"ruleNumber":1,"ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
+    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
   ].join("\n");
 
   type RuleGenResult = {
     rules: Array<{
-      ruleNumber: number; ruleText: string; evidence: string;
+      ruleNumber: number; lever?: string; ruleText: string; evidence: string;
       causalLogic: string; confidence: string; occurrences: number;
-      contradictsFundamentals: boolean; flagNote: string | null;
+      engineNet?: string | null; contradictsFundamentals: boolean; flagNote: string | null;
     }>;
     patternsFound: string;
   };
@@ -1561,7 +1586,7 @@ export async function generateTradingRules(force = false): Promise<void> {
 
   const callLlm = () => llm.json<RuleGenResult>({
     taskType:      "rule_generation",
-    systemContext: "You are a trading performance analyst. Generate evidence-based rules from trade data. Reply JSON only.",
+    systemContext: "You are a trading rule writer. The Phase 1 engine has validated opportunities. Articulate them as precise actionable rules. Reply JSON only — no preamble or markdown outside the JSON.",
     prompt,
     schema: { type: "object", properties: { rules: { type: "array" }, patternsFound: { type: "string" } }, required: ["rules"] },
     fallback: { rules: [], patternsFound: "" },
@@ -1788,8 +1813,25 @@ export type CounterfactualRecommendations = {
     reason: string;
   }>;
 };
+export type PositiveSelectionResult = {
+  key: string; setupType: string; regime: string;
+  n: number; wins: number; winRate: number;
+  popWinRate: number; wrDelta: number;
+  netEvIfTaken: number;
+  reason: string;
+};
+export type CutWinnerEarlyResult = {
+  n: number;
+  totalOpCostPct: number;
+  avgOpCostPct: number;
+  nonChoppyN: number;
+  nonChoppyOpCostPct: number;
+  choppyN: number;
+  choppyOpCostPct: number;
+};
 export type CounterfactualResult = {
   populationN: number;
+  populationWR: number;
   reversalCount: number;
   winCount: number;
   tp1Sweep: Tp1CandidateResult[];
@@ -1797,6 +1839,8 @@ export type CounterfactualResult = {
   choppyTp2Sweep: Tp2CapResult[];
   choppyTp2: { totalChoppy: number; aboveCap35: number; tp2HitAboveCap35: number; wins: number; losses: number };
   slTightCohort: { n: number; wins: number; losses: number; totalLoss: number };
+  positiveSelection: PositiveSelectionResult[];
+  cutWinnerEarly: CutWinnerEarlyResult;
   recommendations: CounterfactualRecommendations;
 };
 
@@ -1812,17 +1856,21 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
     entry_price: number | null; sl_price: number | null;
     setup_type: string | null; reasoning: string | null;
     sl_too_tight: boolean | null; tp1_reached: boolean | null; tp2_reached: boolean | null;
+    mistake_type: string | null; op_cost_pct: number | null; failure_type: string | null;
   };
   const res = await db.execute<Row>(sql`
     SELECT
-      tl.pnl_pct::float        AS pnl,
-      tm.max_profit_pct::float AS max_profit_pct,
-      tl.tp1::float            AS tp1_price,
-      tl.tp2::float            AS tp2_price,
-      tl.entry_price::float    AS entry_price,
-      tl.sl::float             AS sl_price,
+      tl.pnl_pct::float               AS pnl,
+      tm.max_profit_pct::float        AS max_profit_pct,
+      tl.tp1::float                   AS tp1_price,
+      tl.tp2::float                   AS tp2_price,
+      tl.entry_price::float           AS entry_price,
+      tl.sl::float                    AS sl_price,
       tl.setup_type, tl.reasoning,
-      tm.sl_too_tight, tm.tp1_reached, tm.tp2_reached
+      tm.sl_too_tight, tm.tp1_reached, tm.tp2_reached,
+      tm.mistake_type,
+      tm.opportunity_cost_pct::float  AS op_cost_pct,
+      tm.failure_type
     FROM trade_memory tm
     JOIN trade_log tl ON tm.source_trade_id = tl.id::text
     WHERE tm.action = 'TRADE_CLOSE'
@@ -1957,8 +2005,46 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
     reason:   b.reason,
   }));
 
+  // ─── Win-side: positive selection ────────────────────────────────────────────
+  // Combos with WR materially above population average — the engine should PREFER these, not just not-block.
+  const popWR = rows.length > 0 ? wins.length / rows.length : 0;
+  const positiveSelection: PositiveSelectionResult[] = Object.entries(combos)
+    .filter(([, g]) => g.trades.length >= CF_MIN_BLOCK_N)
+    .map(([key, g]) => {
+      const w = g.trades.filter(r => r.pnl > 0);
+      const l = g.trades.filter(r => r.pnl <= 0);
+      const wr = g.trades.length > 0 ? w.length / g.trades.length : 0;
+      const wrDelta = Math.round((wr - popWR) * 100);
+      const netEv   = Math.round((w.reduce((s, r) => s + r.pnl, 0) - l.reduce((s, r) => s + Math.abs(r.pnl), 0)) * 100) / 100;
+      return {
+        key, setupType: g.setupType, regime: g.regime,
+        n: g.trades.length, wins: w.length, winRate: Math.round(wr * 100),
+        popWinRate: Math.round(popWR * 100), wrDelta, netEvIfTaken: netEv,
+        reason: `WR=${Math.round(wr*100)}% (${w.length}/${g.trades.length}), +${wrDelta}pp above population ${Math.round(popWR*100)}%. Net EV if taken: ${netEv>=0?"+":""}${netEv.toFixed(1)}%. Scanner should actively PREFER this combo, not just allow it.`,
+      };
+    })
+    .filter(c => c.wrDelta >= 15)   // materially above population
+    .sort((a, b) => b.wrDelta - a.wrDelta);
+
+  // ─── Win-side: cut_winner_early cohort ───────────────────────────────────────
+  const cutEarly = rows.filter(r => r.mistake_type === "cut_winner_early");
+  const cutEarlyNonChoppy = cutEarly.filter(r => getRegime(r) !== "CHOPPY");
+  const cutEarlyChoppy    = cutEarly.filter(r => getRegime(r) === "CHOPPY");
+  const sumOpCost = (arr: Row[]) => Math.round(arr.reduce((s, r) => s + Math.abs(r.op_cost_pct ?? 0), 0) * 100) / 100;
+  const totalOpCost = sumOpCost(cutEarly);
+  const cutWinnerEarly: CutWinnerEarlyResult = {
+    n:                 cutEarly.length,
+    totalOpCostPct:    totalOpCost,
+    avgOpCostPct:      cutEarly.length > 0 ? Math.round(totalOpCost / cutEarly.length * 100) / 100 : 0,
+    nonChoppyN:        cutEarlyNonChoppy.length,
+    nonChoppyOpCostPct: sumOpCost(cutEarlyNonChoppy),
+    choppyN:           cutEarlyChoppy.length,
+    choppyOpCostPct:   sumOpCost(cutEarlyChoppy),
+  };
+
   return {
     populationN:   rows.length,
+    populationWR:  Math.round(popWR * 100),
     reversalCount: reversals.length,
     winCount:      wins.length,
     tp1Sweep,
@@ -1977,6 +2063,8 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
       losses:    slTight.filter(r => r.pnl <= 0).length,
       totalLoss: Math.round(slTight.filter(r => r.pnl <= 0).reduce((s, r) => s + r.pnl, 0) * 100) / 100,
     },
+    positiveSelection,
+    cutWinnerEarly,
     recommendations: {
       tp1:       tp1Rec,
       choppyTp2: choppyTp2Rec,
@@ -1987,9 +2075,16 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
 }
 
 export type ProposedRule = {
-  ruleNumber: number; ruleText: string; evidence: string;
-  causalLogic: string; confidence: string; occurrences: number;
-  contradictsFundamentals: boolean; flagNote: string | null;
+  ruleNumber: number;
+  lever: string;          // trade_skip | tp2_cap | tp1 | sl | PREFER_SETUP | entry_timing | hold_longer
+  ruleText: string;
+  evidence: string;
+  causalLogic: string;
+  confidence: string;
+  occurrences: number;
+  engineNet: string | null;       // engine counterfactual: "+X% net, n=Y, margin=Z%" — must match engine
+  contradictsFundamentals: boolean;
+  flagNote: string | null;
 };
 
 // Dry-run: run the full LLM rule generation and return proposed rules without writing to DB.
@@ -2062,45 +2157,97 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
     ].filter(Boolean).join("\n");
   }).join("\n---\n");
 
+  // ─── Run engine first so prompt can embed exact validated numbers ────────────
+  const counterfactuals = await computeCounterfactuals();
+  console.log(`[rules/preview] counterfactuals: pop=${counterfactuals.populationN} WR=${counterfactuals.populationWR}% reversals=${counterfactuals.reversalCount} wins=${counterfactuals.winCount} cutEarly=${counterfactuals.cutWinnerEarly.n} posSel=${counterfactuals.positiveSelection.length}`);
+
+  const cf = counterfactuals;
+  const valBlocks   = cf.recommendations.blocks.filter(b => b.status === "VALIDATED_BLOCK");
+  const borderBlocks = cf.recommendations.blocks.filter(b => b.status === "BORDERLINE");
+  const posSelText  = cf.positiveSelection.length > 0
+    ? cf.positiveSelection.map(p => `  - ${p.key}: n=${p.n}, WR=${p.winRate}% (+${p.wrDelta}pp vs ${p.popWinRate}% pop), netEV=${p.netEvIfTaken>=0?"+":""}${p.netEvIfTaken.toFixed(1)}%. ${p.reason}`).join("\n")
+    : "  (no combo meets n>=3 and WR >15pp above population yet)";
+
+  const cutEarlyText = [
+    `  Total: n=${cf.cutWinnerEarly.n}, totalOpCost=${cf.cutWinnerEarly.totalOpCostPct.toFixed(1)}%, avg=${cf.cutWinnerEarly.avgOpCostPct.toFixed(2)}% per trade`,
+    `  Non-CHOPPY: n=${cf.cutWinnerEarly.nonChoppyN}, totalOpCost=${cf.cutWinnerEarly.nonChoppyOpCostPct.toFixed(1)}% — these are correct-direction trades cut before TP2 by posMonitor review`,
+    `  CHOPPY: n=${cf.cutWinnerEarly.choppyN}, totalOpCost=${cf.cutWinnerEarly.choppyOpCostPct.toFixed(1)}% — mostly TP2 set too far; addressed by the CHOPPY TP2 cap rule`,
+  ].join("\n");
+
   const prompt = [
-    `Analyse trade reflections and generate between 5 and 15 actionable trading rules — as many as the evidence supports with minimum 3 trade occurrences each. Do not invent rules to fill a quota.`,
+    `You are a trading rule writer. The Phase 1 counterfactual engine has already validated specific opportunities from ${cf.populationN} live trades (since 2026-06-04). Your job is to ARTICULATE those opportunities as clear, actionable rules.`,
+    ``,
+    `CRITICAL CONSTRAINTS — READ BEFORE WRITING ANY RULE:`,
+    `1. CODE DISCOVERS, YOU ARTICULATE. Every number in a rule must come from the engine data below. Do not invent win rates, net%, or trade counts.`,
+    `2. TP1 IS IMMUTABLE. TP1 = regime-conditional profit protection (CHOPPY: entry×1.01, non-CHOPPY: entry×1.025). Already deployed. Valid because it protects >=50% of reversals. If tp1_verdict=too_tight in reflections, that means TP2 is too far — do NOT propose changing TP1 to a higher level. lever=tp1 is FORBIDDEN.`,
+    `3. SL-WIDENING IS FORBIDDEN. The ${cf.slTightCohort.n} sl_too_tight trades have ${cf.recommendations.sl.slTightWR}% WR — these are directional failures, not SL-placement failures. Widening SL increases loss size without fixing direction. lever=sl is FORBIDDEN unless tightening.`,
+    `4. BALANCED RULE SET REQUIRED. Generate BOTH loss-avoidance rules (trade_skip, tp2_cap) AND win-amplification rules (PREFER_SETUP, hold_longer). A rule set with only defensive rules is incomplete.`,
+    `5. HIGH confidence requires n>=5 AND positive engine net validated below. MEDIUM = n 3-4.`,
+    ``,
+    `═══ LOSS-AVOIDANCE OPPORTUNITIES (engine-validated) ═══`,
+    ``,
+    `VALIDATED BLOCKS (net > +5% — propose as hard trade_skip rules):`,
+    valBlocks.length > 0
+      ? valBlocks.map(b => `  - ${b.key}: n=${b.n}, WR=${b.winRate}%, ${b.reason}`).join("\n")
+      : "  (none above +5% threshold)",
+    ``,
+    `BORDERLINE BLOCKS (net 0-5% — propose as monitor-only, NOT hard block):`,
+    borderBlocks.length > 0
+      ? borderBlocks.map(b => `  - ${b.key}: n=${b.n}, WR=${b.winRate}%, ${b.reason}`).join("\n")
+      : "  (none)",
+    ``,
+    `CHOPPY TP2 CAP (engine-derived):`,
+    `  Max CHOPPY win P&L: ${cf.recommendations.choppyTp2.choppyWinMaxPnl.toFixed(2)}% (n=${cf.recommendations.choppyTp2.populationN} CHOPPY trades)`,
+    `  Recommended TP2 cap: ${cf.recommendations.choppyTp2.recommendedCap}% — TP2 targets above this are never hit in CHOPPY regime`,
+    `  TP2 hit rates: ${cf.choppyTp2Sweep.map(c => `${c.capPct}%→${c.tp2HitRate}%hit`).join(", ")}`,
+    ``,
+    `SL-TIGHT COHORT (n=${cf.slTightCohort.n}): ${cf.recommendations.sl.rationale} — NO SL adjustment proposed.`,
+    ``,
+    `═══ WIN-AMPLIFICATION OPPORTUNITIES (engine-validated) ═══`,
+    ``,
+    `POSITIVE SELECTION — setups/regimes with materially higher WR than population ${cf.populationWR}%:`,
+    posSelText,
+    ``,
+    `CUT_WINNER_EARLY COHORT — ${cf.cutWinnerEarly.n} correct-direction trades closed before TP2:`,
+    cutEarlyText,
+    `  Action: propose hold_longer rule for non-CHOPPY regime trades with intact directional thesis (TP1 hit, price above entry, direction still valid). Do NOT extend CHOPPY holds.`,
+    ``,
+    `═══ TRADE REFLECTIONS — use for SIGNAL QUALIFIER extraction only ═══`,
+    `(These tell you WHICH specific signals were present in winners vs losers — use to qualify PREFER_SETUP rules and entry_timing rules. Do not use to invent new net% numbers.)`,
     ``,
     verdictAggregates,
     ``,
-    `Rules derived from VERDICT AGGREGATES must be specific and quantified.`,
-    `Good: "SL was too tight in 7/10 losses — widen SL to 2.0× ATR minimum"`,
-    `Bad:  "Consider SL placement more carefully"`,
-    `Good: "TP1 too_ambitious in 8/12 trades — set TP1 at 1.0× ATR not 2.0×"`,
-    `Bad:  "Be more realistic with TP targets"`,
-    ``,
-    `Analyse ALL ${reflections.length} trade reflections below for rule generation:`,
-    ``,
-    `Requirements per rule:`,
-    `- Minimum 3 trade occurrences as evidence`,
-    `- Clear causal logic (not just correlation)`,
-    `- Cross-check: funding positive = longs crowded = short bias; price above EMA = bullish; high volume breakout = real move`,
-    `- Flag if rule contradicts market fundamentals`,
-    `- Confidence: HIGH (5+ occurrences) | MEDIUM (3-4) | LOW (<3)`,
-    ``,
-    `Trade reflections (${reflections.length} trades):`,
+    `Reflections (${reflections.length} trades):`,
     reflStr,
     ``,
+    `═══ RULE FORMAT ═══`,
+    `Generate 5-12 rules. Each must have a lever. Valid levers:`,
+    `  trade_skip   — block a setup+regime combo (requires VALIDATED_BLOCK engine status)`,
+    `  tp2_cap      — cap TP2 distance (CHOPPY only; use engine cap)`,
+    `  PREFER_SETUP — actively up-weight/prefer a combo (requires positiveSelection entry above)`,
+    `  entry_timing — require a signal qualifier (volume, RSI extreme, funding) before entry`,
+    `  hold_longer  — do not close a winner before TP2 if thesis still intact (non-CHOPPY only)`,
+    `  monitor_only — flag for observation, no hard action (borderline blocks go here)`,
+    ``,
+    `Include engineNet field: the exact engine number (e.g. "+22.1%, n=16, margin=16.3pp") or null if reflection-derived.`,
+    `Include sample size in ruleText itself ("in N/M trades since Jun 4").`,
+    ``,
     `Return ONLY valid JSON:`,
-    `{"rules":[{"ruleNumber":1,"ruleText":"specific actionable rule","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"contradictsFundamentals":false,"flagNote":null}],"patternsFound":"summary"}`,
+    `{"rules":[{"ruleNumber":1,"lever":"trade_skip","ruleText":"specific actionable rule including sample size","evidence":"X/Y trades","causalLogic":"why","confidence":"HIGH|MEDIUM|LOW","occurrences":5,"engineNet":"+22.1%, n=16, margin=16.3pp","contradictsFundamentals":false,"flagNote":null}],"patternsFound":"2-sentence summary of the most important patterns"}`,
   ].join("\n");
 
   type RuleGenResult = {
     rules: Array<{
-      ruleNumber: number; ruleText: string; evidence: string;
+      ruleNumber: number; lever: string; ruleText: string; evidence: string;
       causalLogic: string; confidence: string; occurrences: number;
-      contradictsFundamentals: boolean; flagNote: string | null;
+      engineNet: string | null; contradictsFundamentals: boolean; flagNote: string | null;
     }>;
     patternsFound: string;
   };
 
   const res = await llm.json<RuleGenResult>({
     taskType:      "rule_generation",
-    systemContext: "You are a trading performance analyst. Generate evidence-based rules from trade data. Reply JSON only.",
+    systemContext: "You are a trading rule writer. The Phase 1 engine has already discovered and validated trading opportunities. Your job is to articulate them as precise, actionable rules. Reply with JSON only — no preamble, no markdown, no explanation outside the JSON.",
     prompt,
     schema: { type: "object", properties: { rules: { type: "array" }, patternsFound: { type: "string" } }, required: ["rules"] },
     fallback: { rules: [], patternsFound: "" },
@@ -2108,8 +2255,6 @@ export async function previewTradingRules(): Promise<{ rules: ProposedRule[]; pa
 
   const validRules = res.data.rules.filter(r => r.occurrences >= 3);
   console.log(`[rules/preview] ${validRules.length} valid rules from ${N} reflections (dry-run, nothing written)`);
-  const counterfactuals = await computeCounterfactuals();
-  console.log(`[rules/preview] counterfactuals: pop=${counterfactuals.populationN} reversals=${counterfactuals.reversalCount} wins=${counterfactuals.winCount}`);
   return { rules: validRules as ProposedRule[], patternsFound: res.data.patternsFound, reflectionCount: N, counterfactuals };
 }
 
