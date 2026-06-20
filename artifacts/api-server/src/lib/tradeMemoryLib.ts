@@ -1875,6 +1875,8 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
       // reason explains the decision so the LLM doesn't have to re-derive it
       const reason = net <= 0
         ? `WR=${wr}% — blocking removes ${blW.toFixed(1)}% of wins while only avoiding ${avL.toFixed(1)}% of losses; net negative (${net.toFixed(1)}%). Do NOT propose this as a block rule.`
+        : net < 5
+        ? `WR=${wr}% — borderline: avoids ${avL.toFixed(1)}% losses vs ${blW.toFixed(1)}% blocked wins; net +${net.toFixed(1)}% (near-zero, not robust). Treat as monitor-only, not a hard block.`
         : `WR=${wr}% — blocking avoids ${avL.toFixed(1)}% losses vs ${blW.toFixed(1)}% blocked wins; net +${net.toFixed(1)}%. Valid block candidate.`;
       return {
         key, setupType: g.setupType, regime: g.regime,
@@ -1920,12 +1922,12 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
     rationale: `TP1=${tp1Best.candidatePct}% is the validated level: protects ${tp1Best.reversalsProtected}/${reversals.length} reversals (${tp1Best.reversalCoverage}% coverage), net +${tp1Best.netDelta}% vs baseline (n=${rows.length} population). Current TP1 avg ~3.5% catches ${tp1Sweep.find(c => c.candidatePct === 3.5)?.reversalsProtected ?? 1}/${reversals.length} reversals. All candidates with coverage >=50%: ${tp1Viable.map(c => `${c.candidatePct}%(net=${c.netDelta}%,cov=${c.reversalCoverage}%)`).join(", ")}. Recomputed fresh from ${rows.length} trades.`,
   } : null;
 
-  // CHOPPY TP2 cap: derived from max winning CHOPPY pnl — not hardcoded
+  // CHOPPY TP2 cap: derived from max winning CHOPPY pnl — not hardcoded.
+  // Snaps to the largest sweep cap that is <= maxWinPnl, ensuring hit-rate lookup is exact.
   const choppyWins   = choppyRows.filter(r => r.pnl > 0);
   const choppyWinMaxPnl = choppyWins.length > 0 ? Math.max(...choppyWins.map(r => r.pnl)) : 3.0;
-  // Recommended cap = floor of best CHOPPY winner (conservative), min 2.0, max 3.5
-  const choppyTp2RecCap = Math.max(2.0, Math.min(3.5, Math.floor(choppyWinMaxPnl * 10) / 10));
-  const choppyTp2RecEntry = choppyTp2Sweep.find(c => c.capPct === choppyTp2RecCap) ?? choppyTp2Sweep[choppyTp2Sweep.length - 2];
+  const choppyTp2RecEntry = [...choppyTp2Sweep].reverse().find(c => c.capPct <= choppyWinMaxPnl) ?? choppyTp2Sweep[0];
+  const choppyTp2RecCap = choppyTp2RecEntry.capPct;
   const choppyTp2Rec: CounterfactualRecommendations["choppyTp2"] = {
     recommendedCap:   choppyTp2RecCap,
     choppyWinMaxPnl:  Math.round(choppyWinMaxPnl * 100) / 100,
