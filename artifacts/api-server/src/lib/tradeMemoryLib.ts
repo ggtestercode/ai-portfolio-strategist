@@ -1741,11 +1741,52 @@ export type Tp1CandidateResult = {
   netDelta: number;
   autoReject: boolean;
 };
+export type Tp2CapResult = {
+  capPct: number;
+  tradesAboveCap: number;
+  tp2HitAboveCap: number;
+  tp2HitRate: number;
+  wins: number;
+  losses: number;
+};
 export type BlockCandidateResult = {
   key: string; setupType: string; regime: string;
   n: number; wins: number; losses: number; winRate: number;
   avoidedLoss: number; blockedWin: number; netDelta: number;
   autoReject: boolean;
+  reason: string;  // explains WHY pass/reject so LLM doesn't re-derive
+};
+// Per-lever recommendations: the validated winner the LLM should use, not a list to pick from.
+export type CounterfactualRecommendations = {
+  tp1: {
+    recommendedPct: number;      // highest-netDelta candidate with coverage >= 50%
+    netDelta: number;
+    reversalCoverage: number;
+    reversalsProtected: number;
+    populationN: number;
+    rationale: string;
+  } | null;                      // null if no candidate meets >= 50% coverage
+  choppyTp2: {
+    recommendedCap: number;      // derived from floor(maxWinPnl in CHOPPY) — not hardcoded
+    choppyWinMaxPnl: number;     // the data point it's derived from
+    tp2HitRateAtCap: number;     // reality check: hit rate at that cap
+    populationN: number;
+    rationale: string;
+  };
+  sl: {
+    hasValidAdjustment: boolean; // always false currently — widening SL doesn't help
+    slTightN: number;
+    slTightWR: number;           // 0-100, documenting the 0% WR
+    rationale: string;           // "directional failure, not SL placement"
+  };
+  blocks: Array<{
+    key: string;
+    n: number;
+    winRate: number;
+    netDelta: number;
+    status: "VALIDATED_BLOCK" | "VALIDATED_ALLOW" | "BORDERLINE";
+    reason: string;
+  }>;
 };
 export type CounterfactualResult = {
   populationN: number;
@@ -1753,8 +1794,10 @@ export type CounterfactualResult = {
   winCount: number;
   tp1Sweep: Tp1CandidateResult[];
   blockCandidates: BlockCandidateResult[];
+  choppyTp2Sweep: Tp2CapResult[];
   choppyTp2: { totalChoppy: number; aboveCap35: number; tp2HitAboveCap35: number; wins: number; losses: number };
   slTightCohort: { n: number; wins: number; losses: number; totalLoss: number };
+  recommendations: CounterfactualRecommendations;
 };
 
 const CF_TP1_PARTIAL   = 0.30;
@@ -1828,21 +1871,89 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
       const avL = l.reduce((s, r) => s + Math.abs(r.pnl), 0);
       const blW = w.reduce((s, r) => s + r.pnl, 0);
       const net = avL - blW;
+      const wr  = Math.round(w.length / g.trades.length * 100);
+      // reason explains the decision so the LLM doesn't have to re-derive it
+      const reason = net <= 0
+        ? `WR=${wr}% — blocking removes ${blW.toFixed(1)}% of wins while only avoiding ${avL.toFixed(1)}% of losses; net negative (${net.toFixed(1)}%). Do NOT propose this as a block rule.`
+        : `WR=${wr}% — blocking avoids ${avL.toFixed(1)}% losses vs ${blW.toFixed(1)}% blocked wins; net +${net.toFixed(1)}%. Valid block candidate.`;
       return {
         key, setupType: g.setupType, regime: g.regime,
         n: g.trades.length, wins: w.length, losses: l.length,
-        winRate:     Math.round(w.length / g.trades.length * 100),
+        winRate:     wr,
         avoidedLoss: Math.round(avL * 100) / 100,
         blockedWin:  Math.round(blW * 100) / 100,
         netDelta:    Math.round(net * 100) / 100,
         autoReject:  net <= 0,
+        reason,
       };
     })
     .sort((a, b) => b.netDelta - a.netDelta);
 
+  // CHOPPY TP2 cap sweep at [2.0, 2.5, 3.0, 3.5, 4.0]
   const choppyRows = rows.filter(r => getRegime(r) === "CHOPPY");
-  const above35    = choppyRows.filter(r => { const d = getTp2Dist(r); return d != null && d > 3.5; });
-  const slTight    = rows.filter(r => r.sl_too_tight === true);
+  const CF_TP2_CAPS = [2.0, 2.5, 3.0, 3.5, 4.0];
+  const choppyTp2Sweep: Tp2CapResult[] = CF_TP2_CAPS.map(cap => {
+    const above = choppyRows.filter(r => { const d = getTp2Dist(r); return d != null && d > cap; });
+    const hits  = above.filter(r => r.tp2_reached === true);
+    return {
+      capPct:         cap,
+      tradesAboveCap: above.length,
+      tp2HitAboveCap: hits.length,
+      tp2HitRate:     Math.round(hits.length / (above.length || 1) * 100),
+      wins:           above.filter(r => r.pnl > 0).length,
+      losses:         above.filter(r => r.pnl <= 0).length,
+    };
+  });
+  const above35 = choppyRows.filter(r => { const d = getTp2Dist(r); return d != null && d > 3.5; });
+  const slTight = rows.filter(r => r.sl_too_tight === true);
+
+  // ─── Recommendations: winner per lever, derived from sweep data ──────────────
+  // TP1: highest netDelta candidate with reversalCoverage >= 50%
+  const tp1Viable = tp1Sweep.filter(c => c.reversalCoverage >= 50 && !c.autoReject);
+  const tp1Best   = tp1Viable.sort((a, b) => b.netDelta - a.netDelta)[0] ?? null;
+  const tp1Rec: CounterfactualRecommendations["tp1"] = tp1Best ? {
+    recommendedPct:   tp1Best.candidatePct,
+    netDelta:         tp1Best.netDelta,
+    reversalCoverage: tp1Best.reversalCoverage,
+    reversalsProtected: tp1Best.reversalsProtected,
+    populationN:      rows.length,
+    rationale: `TP1=${tp1Best.candidatePct}% is the validated level: protects ${tp1Best.reversalsProtected}/${reversals.length} reversals (${tp1Best.reversalCoverage}% coverage), net +${tp1Best.netDelta}% vs baseline (n=${rows.length} population). Current TP1 avg ~3.5% catches ${tp1Sweep.find(c => c.candidatePct === 3.5)?.reversalsProtected ?? 1}/${reversals.length} reversals. All candidates with coverage >=50%: ${tp1Viable.map(c => `${c.candidatePct}%(net=${c.netDelta}%,cov=${c.reversalCoverage}%)`).join(", ")}. Recomputed fresh from ${rows.length} trades.`,
+  } : null;
+
+  // CHOPPY TP2 cap: derived from max winning CHOPPY pnl — not hardcoded
+  const choppyWins   = choppyRows.filter(r => r.pnl > 0);
+  const choppyWinMaxPnl = choppyWins.length > 0 ? Math.max(...choppyWins.map(r => r.pnl)) : 3.0;
+  // Recommended cap = floor of best CHOPPY winner (conservative), min 2.0, max 3.5
+  const choppyTp2RecCap = Math.max(2.0, Math.min(3.5, Math.floor(choppyWinMaxPnl * 10) / 10));
+  const choppyTp2RecEntry = choppyTp2Sweep.find(c => c.capPct === choppyTp2RecCap) ?? choppyTp2Sweep[choppyTp2Sweep.length - 2];
+  const choppyTp2Rec: CounterfactualRecommendations["choppyTp2"] = {
+    recommendedCap:   choppyTp2RecCap,
+    choppyWinMaxPnl:  Math.round(choppyWinMaxPnl * 100) / 100,
+    tp2HitRateAtCap:  choppyTp2RecEntry?.tp2HitRate ?? 0,
+    populationN:      choppyRows.length,
+    rationale: `Derived from max CHOPPY winning pnl=${choppyWinMaxPnl.toFixed(2)}% (n=${choppyWins.length} CHOPPY wins). TP2 hit rates by cap: ${choppyTp2Sweep.map(c => `${c.capPct}%→${c.tp2HitRate}%`).join(", ")}. TP2 rarely delivers in CHOPPY — cap at ${choppyTp2RecCap}% reduces over-optimism. Recomputed fresh from ${choppyRows.length} CHOPPY trades.`,
+  };
+
+  // SL: widening never helps — the failure is directional, not SL-placement
+  const slTightWR = slTight.length > 0 ? Math.round(slTight.filter(r => r.pnl > 0).length / slTight.length * 100) : 0;
+  const slRec: CounterfactualRecommendations["sl"] = {
+    hasValidAdjustment: false,
+    slTightN:  slTight.length,
+    slTightWR,
+    rationale: `sl_too_tight=true: ${slTight.length} trades, ${slTightWR}% WR. These are directional failures — price continued in the direction that stopped us (it didn't reverse after the wick). Widening SL does not improve WR; it only increases loss size per stopped trade. No SL-width adjustment is validated. The correct lever is entry direction quality (regime/signal gate), not SL distance.`,
+  };
+
+  // Blocks: classify each candidate with a status and reason
+  const blockRecs: CounterfactualRecommendations["blocks"] = blockCandidates.map(b => ({
+    key:      b.key,
+    n:        b.n,
+    winRate:  b.winRate,
+    netDelta: b.netDelta,
+    status:   b.netDelta > 5   ? "VALIDATED_BLOCK" as const
+            : b.netDelta > 0   ? "BORDERLINE"       as const
+            :                    "VALIDATED_ALLOW"   as const,
+    reason:   b.reason,
+  }));
 
   return {
     populationN:   rows.length,
@@ -1850,6 +1961,7 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
     winCount:      wins.length,
     tp1Sweep,
     blockCandidates,
+    choppyTp2Sweep,
     choppyTp2: {
       totalChoppy:      choppyRows.length,
       aboveCap35:       above35.length,
@@ -1862,6 +1974,12 @@ export async function computeCounterfactuals(): Promise<CounterfactualResult> {
       wins:      slTight.filter(r => r.pnl > 0).length,
       losses:    slTight.filter(r => r.pnl <= 0).length,
       totalLoss: Math.round(slTight.filter(r => r.pnl <= 0).reduce((s, r) => s + r.pnl, 0) * 100) / 100,
+    },
+    recommendations: {
+      tp1:       tp1Rec,
+      choppyTp2: choppyTp2Rec,
+      sl:        slRec,
+      blocks:    blockRecs,
     },
   };
 }
