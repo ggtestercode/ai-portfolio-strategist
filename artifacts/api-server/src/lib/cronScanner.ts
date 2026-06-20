@@ -705,8 +705,12 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
       console.log(`[partialExit] ${pos.symbol} — exchange TP1 detected: size ${pos.size}/${origQty} (${(qtyRatio * 100).toFixed(0)}%) < 85% → marking tp1Executed, applying SL ratchet`);
       await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
       pm.tp1Executed = true; // update local copy so TP2 gate below sees it this tick
-      // Ratchet SL to +1% beyond entry — same as software TP1 path
-      const tp1SlB = pos.side === "Buy" ? pm.entryPrice * 1.01 : pm.entryPrice * 0.99;
+      // Regime-conditional SL ratchet: CHOPPY → +1.0% (matches CHOPPY TP1 fire level),
+      // non-CHOPPY → +2.0% (safely below the 2.5% non-CHOPPY TP1 fire level; always valid).
+      const _slBChoppy = pm.entryRegime === "CHOPPY";
+      const tp1SlB = pos.side === "Buy"
+        ? pm.entryPrice * (_slBChoppy ? 1.01 : 1.02)
+        : pm.entryPrice * (_slBChoppy ? 0.99 : 0.98);
       const curSlRawB = pm.sl ?? pos.stopLoss ?? 0;
       const curSlB = typeof curSlRawB === "number" ? curSlRawB : parseFloat(String(curSlRawB) || "0");
       const wouldImproveB = pos.side === "Buy" ? tp1SlB > curSlB : (curSlB === 0 || tp1SlB < curSlB);
@@ -732,8 +736,12 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
           await patchPositionMeta(pos.symbol, { tp1Executed: true }).catch(() => {});
           const tp1ClosePct   = Math.max(20, pm.tp1ClosePercent ?? 30);
           await closePercentPosition(pos.symbol, tp1ClosePct);
-          // Move SL to +1% beyond entry (longs: entry×1.01, shorts: entry×0.99)
-          const tp1Sl = pos.side === "Buy" ? pm.entryPrice * 1.01 : pm.entryPrice * 0.99;
+          // Regime-conditional SL ratchet: CHOPPY → +1.0%, non-CHOPPY → +2.0%
+          // (2.0% is below the 2.5% non-CHOPPY TP1 fire level so the SL is always valid on Bybit)
+          const _slChoppy = pm.entryRegime === "CHOPPY";
+          const tp1Sl = pos.side === "Buy"
+            ? pm.entryPrice * (_slChoppy ? 1.01 : 1.02)
+            : pm.entryPrice * (_slChoppy ? 0.99 : 0.98);
           await bybitSetStopLoss(pos.symbol, tp1Sl, pos.positionIdx)
             .catch(e => console.warn(`[cronScanner] TP1 +1% SL failed ${pos.symbol}:`, e.message));
           await patchPositionMeta(pos.symbol, { sl: tp1Sl }).catch(() => {});
@@ -748,7 +756,7 @@ async function _checkPartialExits(livePositions: BybitPosition[]): Promise<void>
             `💰 TP1 profit banked — ${pos.symbol}`,
             `Closed: ${tp1ClosePct}% at ~$${currentPrice.toFixed(4)}`,
             `P/L banked: +$${banked.toFixed(2)}`,
-            `SL locked to +1%: $${tp1Sl.toFixed(4)}`,
+            `SL locked to ${_slChoppy ? "+1%" : "+2%"}: $${tp1Sl.toFixed(4)}`,
             `Remaining: ${remainQty} ${base} ($${remainMargin.toFixed(2)} margin)`,
             dustLine,
           ].filter(Boolean).join("\n")).catch(() => {});
@@ -1510,6 +1518,21 @@ async function runWatchScan(): Promise<void> {
         } catch { /* kline fetch failed — allow trade */ }
       }
 
+      // Regime-conditional TP1: 1.0% for CHOPPY, 2.5% for non-CHOPPY.
+      // Overrides Claude's price-level TP1 with a calibrated distance from entry.
+      // Floor: TP1 must be ≥ 1.0% — the SL-to-+1% ratchet fires on TP1 execute; sub-1% TP1
+      // causes the SL order to exceed current price and be silently rejected, also suppressing
+      // the beTrigger ratchet via stale positionMeta.sl.
+      {
+        const tp1EntryPrice = signal.entry ?? signal.price;
+        const isChoppyTp1  = regime?.regime === "CHOPPY";
+        const tp1Pct       = isChoppyTp1 ? 0.01 : 0.025;
+        const regimeTp1    = signal.direction === "long"
+          ? tp1EntryPrice * (1 + tp1Pct)
+          : tp1EntryPrice * (1 - tp1Pct);
+        if (regimeTp1 > 0) signal.tp1 = regimeTp1;
+      }
+
       // R:R gate — blended reward across both exits (more reliable than Claude's reported field)
       {
         const rrEntry  = signal.entry ?? signal.price;
@@ -1836,6 +1859,21 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
           ].join("\n")).catch(() => {});
           continue;
         }
+      }
+
+      // Regime-conditional TP1: 1.0% for CHOPPY, 2.5% for non-CHOPPY.
+      // Overrides Claude's price-level TP1 with a calibrated distance from entry.
+      // Floor: TP1 must be ≥ 1.0% — the SL-to-ratchet fires on TP1 execute; sub-1% TP1
+      // causes the SL order to exceed current price and be silently rejected, also suppressing
+      // the beTrigger ratchet via stale positionMeta.sl.
+      {
+        const tp1EntryPrice = opp.entry ?? opp.price;
+        const isChoppyTp1  = regime?.regime === "CHOPPY";
+        const tp1Pct       = isChoppyTp1 ? 0.01 : 0.025;
+        const regimeTp1    = opp.direction === "long"
+          ? tp1EntryPrice * (1 + tp1Pct)
+          : tp1EntryPrice * (1 - tp1Pct);
+        if (regimeTp1 > 0) opp.tp1 = regimeTp1;
       }
 
       // R:R gate — blended reward across both exits (more reliable than Claude's reported field)
