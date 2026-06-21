@@ -1,5 +1,5 @@
 # AI Trading Bot — Handover
-**Last updated:** June 16, 2026 (commit 39997e8)
+**Last updated:** June 21, 2026 (commit b5e7e40)
 **Full history:** HANDOVER_ARCHIVE.md and `git log --oneline`
 **Repo:** https://github.com/ggtestercode/ai-portfolio-strategist
 **Server:** Vultr Singapore — `root@139.180.215.150`
@@ -12,7 +12,7 @@
 - **Balance:** ~$26 | **Exchange:** Bybit Live | **Infra:** PM2 on Vultr, Neon PostgreSQL
 - **Open positions:** HYPE long, INJ long, XRP short (check `/positions` for live state)
 - **Scan:** every 4h (`0 */4 * * *`) | posMonitor: every 5 min
-- **Learning rules:** 15 active (generated June 1 from 110 reflections — exits are the primary problem)
+- **Learning rules:** 17 active (redesigned rule-gen pipeline June 21 — counterfactual engine + 3-phase LLM gate; see System Change sections below)
 - **Neon DB:** reset June 1 ✅ — CU-hrs back to 0
 
 ---
@@ -55,7 +55,7 @@
 - Relative strength vs BTC (4h/1D/7D)
 - Liquidity sweep + squeeze detection
 - Trade memory (last reflections) + performance summary
-- 15 active trading rules (soft constraints)
+- 17 active trading rules (soft constraints; TP1 is **code-set** — 1.0% CHOPPY / 2.5% non-CHOPPY — LLM output overridden at runtime; TP2 is LLM-set under regime×setup cap)
 - Open positions: entry, P/L, SL, TP, peak P/L, liqPrice
 - Recent exits (last 24h): exit method, hours ago, price
 - **Pending limit orders** (unfilled): direction, price, qty, hours pending
@@ -68,9 +68,17 @@
 
 ---
 
-## Recent Commits (last 15)
+## Recent Commits
 | Commit | Description |
 |--------|-------------|
+| `b5e7e40` | feat(scanner): regime×setup-conditional TP2 anchoring (1h MOMENTUM, 4h LIQSWEEP) |
+| `a5f1646` | fix(rules): deactivate 31/32 + Gate 1c closes embedded-TP1 bypass |
+| `16740df` | feat(rules/apply): renumber to 20+, preserve safeguards 5/10/14/15, fix tensions |
+| `0694c20` | fix(rules/gate3): use lever-appropriate engine number for counterfactual-match |
+| `b6191dc` | feat(rules/phase3): post-LLM validation gate — engine classification authoritative |
+| `8885c18` | feat(rules/phase2): balanced rule-gen — engine-fed prompt, loss-avoidance + win-amplification |
+| `9538144` | feat(tp1): regime-conditional TP1 — CHOPPY 1.0%, non-CHOPPY 2.5% |
+| `d26afdc` | fix(counterfactuals): snap TP2 cap to sweep value; sharpen borderline reason |
 | `39997e8` | fix(deploy): exclude backfill_* snapshot tables from drizzle-kit push |
 | `128c1c1` | fix(backfill): use Bybit stopOrderType for exit_method instead of pnlPct inference |
 | `2d2ef43` | fix(reflection): same 10s anchor guard in generateReflection bybitCloses fetch |
@@ -95,13 +103,18 @@
 - **Scan to 30min** — currently 4h; restore when balance >$50 and stable
 - **Capital top-up** — consider if performance confirmed
 - **tp1 always required in signal** — fixed `d3bfcf2`: prompt hardened + gate uses `v <= 0` for numerics
-- **Run `/forceRules`** after 5–10 clean trades closed post-June 3 (commit `5291d3f`). Two contamination sources in current 15 rules: (1) deleted LINK/HYPE corrupted reflections, (2) "SL too wide in 46/130" evidence was largely the ATR override bug, not Claude's actual SL choices. After clean post-fix closes, new reflections show Claude's true SL placement. Verify: if "SL too wide" count drops sharply in regenerated rules, confirms ATR was the cause. Track clean count via `/history`.
 - **SL-to-liquidation buffer** — scan prompt now instructs Claude to keep SL ≥2% above (longs) / ≤2% below (shorts) liquidation price; liq price is now computed accurately from portfolioLeverage (capped 10×) not hardcoded. Informational — not a hard gate.
 - **Per-rule attribution (Option 2 — code-evaluated)** — Replace current `appliedRuleIds` approach (all active rules credited to every trade, making per-rule stats meaningless) with: code records which active rules were RELEVANT to each trade (e.g. Rule 1 only relevant if regime=TRENDING_DOWN) and whether the trade COMPLIED or VIOLATED each. Goal: "trades following Rule X win Y% vs violating Z%" — real signal on rule helpfulness. Only works for mechanically-checkable rules (regime, direction, TP/SL distance). Build AFTER DB reconciler fix — needs accurate P&L first.
 - **Portfolio-level total margin cap** — No guard against sum of all open position margins exceeding X% of balance. Each position is individually capped at 30%, but three simultaneous positions each at 30% = 90% margin deployed. Fine at current scale (2-3 positions, $20-50 balance). Add cap when balance grows beyond ~$100 and position count increases.
 - **Reconciler uses time-based fill attribution (not orderId)** — DB stores no Bybit `orderId` per trade. The 10s anchor guard eliminates the confirmed class of cross-attribution (prior same-symbol close). Only add orderId matching (schema change to `trade_log`) if a future overlap defeats the time filter (e.g., two same-symbol trades opened within 10s of each other).
-- **Do NOT regenerate rules until post-fix trades accumulate** — current 15 rules were partly built on corrupted P&L corpus (pre-June 15). Metrics are trustworthy for the first time after the reconciler fix; regenerate after 10+ clean trades close on corrected data.
-- **NEXT-SESSION TEST** — does R:R rise above 0.70 on post-fix trades vs the clean baseline? Baseline: win rate 41.3%, net −$41.15, avg win $0.889, avg loss −$1.268, R:R 0.70 (109 trades, last 30 days, Jun 15 corrected). The winner-cutting fixes (RSI gate f913a81, volume direction-gate 6f8197c, CHOPPY exit 7191053) target R:R directly. Track via `/history`.
+- **Watch live: 1h TP2 placement** — deployed `b5e7e40`. First MOMENTUM trade in STRONG_TREND/TRENDING should show TP2 at 3.5–4.5%, not 6–7%. If LLM still outputs 6%+ on a MOMENTUM setup, the new instruction isn't landing — sharpen the prompt wording.
+- **Watch live: TP1 rescue on reversal** — deployed `9538144`. Next trade that reverses after going in-the-money should trigger TP1 partial at 1% (CHOPPY) or 2.5% (non-CHOPPY) and ratchet SL to +1%/+2%.
+- **Parked: non-CHOPPY TP2 sweep** — run per-regime TP2 distribution analysis (at 3.0%, 3.5%, 4.0%, 5.0%, 5.5%, 6.0%, 6.5%) against full population once n grows to ≥15 per regime. Currently n=3 for EXHAUSTION (inert at 3.0% cap — 0/3 reached), n=2 for RANGING, n=7 weak for TRENDING. STRONG_TREND long 6.5% cap is slightly loose (max observed 5.98%) — revisit at n=20.
+- **Parked: rule consolidation at next rule-gen** — DB rules 14/35 (TP2 regime caps) are now partially redundant with `tpCapShort()` in marketScanner.ts (the authoritative hard channel). At next rule-gen, do not re-emit separate TP2-cap rules — they add noise without adding enforcement. Soft rules covering what code already handles should be pruned.
+- **Parked: soft→hard promotion** — Rule 5 (RS Leadership Veto on shorts) is a soft DB rule; if further data confirms it is negative-EV to override, promote to a code gate in `applyHardFilters`. Needs clean W/L split with and without override before acting.
+- **Parked: shadow-tracking + demotion** — no mechanism yet to auto-demote rules with consistently negative track records once n grows. Add a W/L ratio gate at next rule-gen review.
+- **Parked: admin endpoint cleanup** — `/admin/re-reflect`, `/admin/preview-rules`, `/admin/counterfactuals`, `/admin/apply-rules` exist in `performance.ts`. Consider adding auth or removing stale endpoints before going to larger scale.
+- **R:R baseline** — win rate 41.3%, net −$41.15, avg win $0.889, avg loss −$1.268, R:R 0.70 (109 trades, Jun 15 corrected). Track whether new TP2 anchoring improves R:R on post-`b5e7e40` MOMENTUM trades.
 - **effective_sl not captured for offline/backfilled closes** — when a position closes while the bot is down (reconciled on next startup), `effective_sl` is not written to `trade_log` even if the SL was ratcheted. Caused 6bdeb8b3's `effective_sl=NULL`, which defaulted to `original_sl` before manual correction. Pre-existing gap; fix would require startup reconciler to infer effective_sl from exit price vs original SL when stopOrderType=StopLoss. Low priority — the scan (`exit_vs_sl_gap > 0.3%` for longs, `< -0.3%` for shorts) confirmed only 1 mislabeled ratchet in 30 days of data.
 
 ## Fix — SL Integrity (June 3)
@@ -371,6 +384,146 @@ Market order closes (posMonitor CLOSE commands) still map to "review" — same a
 **Snapshots:** `backfill_exit_fix_20260616_trade_memory` (4 rows, pre-correction) + `backfill_ratchet_fix_20260616_trade_log` + `backfill_ratchet_fix_20260616_trade_memory` (1 row each, pre-ratcheted_sl correction). All intact.
 
 **Deploy filter (`39997e8`):** `drizzle.config.ts` tablesFilter extended with `!backfill_*` — drizzle-kit push no longer prompts to drop snapshot tables.
+
+---
+
+## System Change — Regime-Conditional TP1 (commit `9538144`, June 2026)
+
+**Problem:** The old TP1 target was placed by the LLM at 4h structural levels (same method as TP2). These sat at 6–8% from entry — unreachable by short-duration trades and providing zero reversal protection. Every reversal peaked below the TP1 level, so the partial-close that would have banked profit before the reversal never triggered.
+
+**Fix — code override replaces LLM TP1:**
+`cronScanner.ts` (two paths: new signal ~line 1528, opportunity re-evaluation ~line 1871):
+```typescript
+const isChoppyTp1 = regime?.regime === "CHOPPY";
+const tp1Pct      = isChoppyTp1 ? 0.01 : 0.025;
+// regimeTp1 = entryPrice × (1 ± tp1Pct)
+if (regimeTp1 > 0) opp.tp1 = regimeTp1;   // LLM output discarded
+```
+- **CHOPPY:** TP1 = entry × 1.01 (long) / × 0.99 (short) → **1.0% from entry**
+- **Non-CHOPPY:** TP1 = entry × 1.025 / × 0.975 → **2.5% from entry**
+
+**Downstream: SL ratchet after TP1 fires** (`cronScanner.ts` ~line 741):
+```typescript
+const _slChoppy = pm.entryRegime === "CHOPPY";
+const tp1Sl = pos.side === "Buy"
+  ? pm.entryPrice * (_slChoppy ? 1.01 : 1.02)
+  : pm.entryPrice * (_slChoppy ? 0.99 : 0.98);
+```
+- CHOPPY: SL moves to **+1% from entry** after TP1
+- Non-CHOPPY: SL moves to **+2% from entry** after TP1
+
+**Breakeven trigger** (`cronScanner.ts` ~line 2665):
+```typescript
+const beTriggerPct = isChoppyCalibrated ? 0.8 : 2;
+```
+- CHOPPY: SL → entry at **+0.8%** (before TP1 fires)
+- Non-CHOPPY: SL → entry at **+2.0%**
+
+**Floor constraint:** TP1 must be ≥1% — the post-TP1 SL ratchet to `entryPrice × 1.01` would sit above a sub-1% TP1, creating an immediately-triggered stop. The code override makes this mechanically impossible (CHOPPY TP1 is exactly 1%, non-CHOPPY is 2.5%).
+
+**Effect on population:** Flipped from −0.48% average net to net-positive. The 1h/4h structural TP1 the LLM was setting gave zero partial exits on reversals; the calibrated distance forces the partial before the typical reversal magnitude.
+
+---
+
+## System Change — Rule-Gen Redesign: Counterfactual Engine + 3-Phase Pipeline (commits `d26afdc`–`0694c20`, June 2026)
+
+**Problem:** Previous rule-gen was pure LLM introspection over reflections — it could hallucinate rules not supported by the data, produce unenforceable rules (e.g., referencing 15m structure the code layer can't check), or miss high-leverage opportunities that the LLM wouldn't naturally articulate.
+
+**Phase 1 — Counterfactual Engine (`computeCounterfactuals()` in `tradeMemoryLib.ts`):**
+No LLM — pure code analysis over the closed-trade population. Runs via `/admin/counterfactuals`. For each setup/regime cohort, computes:
+- `tp1Sweep`: would a calibrated TP1 (1% CHOPPY / 2.5% non-CHOPPY) have fired, rescuing profit before a reversal?
+- `blockCandidates`: trades where a loss-avoidance rule would have blocked an actual loser
+- `choppyTp2Sweep`: CHOPPY cohort-specific sweep
+- `positiveSelection`: trades with consistent winning pattern
+- `cutWinnerEarly`: winners that exited far below their max_profit
+
+Engine outputs one of: `VALIDATED_BLOCK` (netDelta > +10%), `BORDERLINE`, `VALIDATED_ALLOW` (netDelta < −4%). CF_CUTOFF = 2026-06-04; population n=65 (26W/39L = 40% WR).
+
+**Phase 2 — LLM articulates pre-validated opportunities (`8885c18`):**
+LLM receives the engine's pre-classified cohorts and is asked to articulate rules for BOTH loss-avoidance (VALIDATED_BLOCK cohorts) AND win-amplification (VALIDATED_ALLOW cohorts — don't block these). This eliminates the prior bias toward loss-avoidance-only rules that silently blocked winners.
+
+**Phase 3 — Post-LLM validation gate (`b6191dc`):**
+After LLM proposes rules, a 5-gate filter runs before any rule is written to DB:
+- **Gate 1:** reject if rule text embeds a TP1 lever (sets a TP1 level — contradicts code-fixed TP1)
+- **Gate 1b:** reject if rule widens SL
+- **Gate 1c:** regex scan of ruleText for any embedded TP1 price (catches evasions via entry/exit level language)
+- **Gate 2:** lever must match engine classification (block-lever only on VALIDATED_BLOCK; allow-lever only on VALIDATED_ALLOW)
+- **Gate 3:** counterfactual ±2% match — rule's predicted effect must match engine's computed netDelta within tolerance
+- **Gate 4:** trade_skip threshold gate (blocks rules that would skip too many trades)
+- **Gate 5:** confidence gate
+
+Verified against independent recompute of engine results before deploying rules.
+
+---
+
+## System Change — Rule Set Cleanup (commit `a5f1646` + DB ops, June 2026)
+
+**Before:** 15 active rules (original numbering 1–15). **After:** 17 active rules (renumbered; safeguards at 5/10/14/15, new rules at 20–37).
+
+**Active rules (17):** 5, 10, 14, 15, 20, 21, 22, 23, 24, 25, 28, 30, 33, 34, 35, 36, 37
+
+**Inactive rules (6):** 4, 9, 26, 27, 31, 32
+
+**Deactivations:**
+- **Rule 26** (old Rule 4 resurrection — entry candle direction gate): blocked 10 actual winners (BNB +5.33%, ATOM +4.96%, NEAR +4.39% among them). Zero net-positive counterfactual. Deactivated.
+- **Rule 27** (15m structure alignment gate): requires 5/8 15m candles in trend direction. Unenforceable at the code-gate layer (`applyHardFilters` only fetches 1h/4h klines, no 15m). LLM scanner CAN evaluate 15m (has the data), but the rule as written implied code enforcement. Deactivated; re-introduce as a soft LLM-advisory if wanted.
+- **Rules 31/32** (embedded TP1 at 4–5% / 5%+): directly contradicted the deployed code-fixed TP1 (1.0%/2.5%). Gate 1c was added specifically to catch this class of bypass. Deactivated.
+
+**Corrections applied:**
+- **Rule 14** — TP1 references updated from "max 1.5% RANGING / max 2.0% EXHAUSTION" to "set at 2.5% by the scanner (non-CHOPPY path)". Added note that 15m sub-clause is advisory (LLM evaluates from context; code gates do not check 15m).
+- **Rule 35** — RANGING cap corrected 4.0%→3.5% (now matches Rule 14). EXHAUSTION cap 3.5%→3.0%. STRONG_TREND long 8.0%→6.5% (historical peak 5.98%). CHOPPY clause removed (already covered by Rule 23).
+- **Rule 36** — MOMENTUM+CHOPPY clause removed (MOMENTUM+CHOPPY is unconditionally hard-blocked in `applyHardFilters`; the rule clause was redundant and potentially confusing).
+- **Rule 37** — TRENDING_DOWN long clause removed (TRENDING_DOWN longs are unconditionally hard-blocked in code). Kept TRENDING_UP MOMENTUM short block (0W/1L).
+- **Rule 33** — HELD with both clauses. Original report incorrectly flagged it as overlapping with Rule 10. Rule 10 = BEARISH-candle climax (selling exhaustion → avoid adding shorts). Rule 33 = BULLISH-spike climax (buying momentum → wait for 15m LH before shorting). Different candle directions, different thesis.
+
+**Snapshots taken before changes:** `trading_rules_snapshot_20260621` (pre-deactivation), `trading_rules_snapshot_20260621_tp2` (pre-TP2-cap-fixes). Both subsequently dropped after confirming changes stable.
+
+**Key architecture note (discovered during validation):** `tpCapShort()` hardcoded in `marketScanner.ts` is the **primary** TP2 cap channel (injected into the LLM prompt as authoritative). DB rules are a **secondary/soft** channel. Before this session, these two channels were contradictory (e.g. RANGING: tpCapShort said 2.5%, DB Rule 14 said 3.5%). The TP2 anchoring change below synced both channels.
+
+---
+
+## System Change — Regime×Setup TP2 Anchoring (commit `b5e7e40`, June 21 2026)
+
+**Problem:** 83% of trades never hit TP2. Root cause: TP2 was anchored to the 4h 50-period high/low (8-day extremes at 6–7% from entry) while trades complete in median 6.2h — a 1h-swing duration. SL is placed at 1h/15m structural levels (correctly sized); TP2 was at 4h structural (mismatched). The "TP2=2× TP1 distance" fallback in the prompt also produced ~5.0% for non-CHOPPY, similarly aspirational.
+
+**Population evidence:**
+- STRONG_TREND MOMENTUM shorts: avg TP2 set at 6.43%, avg max_profit 2.69% — overshoot 4.06%
+- CHOPPY: avg TP2 set at 4.8–5.1%, avg max_profit 1.4–1.7%
+- RANGING: avg TP2 set at 3.04%, avg max_profit 3.49% — only regime with negative overshoot → 100% fill rate
+- 4 STRONG_TREND MOMENTUM tp2_too_ambitious trades (LTC max 3.63%, INJ 3.81%, ETC 4.89%, XRP 4.51%) would have all filled at a 1h structural level of 3.5–4.5%
+
+**Fix — prompt-only change in `marketScanner.ts`** (LLM already has 1h/4h/15m candles in context; no code change needed):
+
+| Regime + Setup | TP2 method | Cap (backstop) |
+|---|---|---|
+| STRONG_TREND/TRENDING + MOMENTUM | Nearest 1h structural resistance (short) / support (long) | short ≤5.5%, long ≤6.5% |
+| STRONG_TREND/TRENDING + LIQUIDITY_SWEEP | Nearest 4h structural resistance / support | ≤6.5% |
+| CHOPPY or EXHAUSTION | Cap-driven: entry ± 3.0% (NOT structural) | 3.0% |
+| RANGING | Nearest 4h range boundary | 3.5% |
+
+Removed the "TP2=2× TP1 distance" fallback instruction.
+
+**LIQSWEEP distinction:** LIQSWEEP setups in STRONG_TREND legitimately run to 4h targets (75% WR, 3/4 hit 4h TP2 in data, avg pnl +2.78%). Switching LIQSWEEP to 1h would have cost −1.92% on LIQSWEEP winners. Kept at 4h.
+
+**Winner stress-test:** Simulated 1h TP2 (~4% proxy) against all 16 winners in switching regimes:
+- Near-miss gains (4 STRONG_TREND + 3 TRENDING trades convert from TP1-only to TP2 fills): **+13.85%**
+- Runner cap losses (7 trades exited earlier at 1h level): **−8.08%**
+- **Net: +5.77%** improvement across winning cohort. Positive in all sensitivity scenarios tested (1h level 3.5%–5.0%).
+
+**tpCapShort() synced as backstops** (previously contradicted DB rules — both channels now agree):
+- CHOPPY: 3.5% → **3.0%** (DB Rule 23)
+- RANGING: 2.5% → **3.5%** (DB Rules 14/35)
+- EXHAUSTION: 3.5% → **3.0%** (DB Rules 14/35)
+- STRONG_TREND/TRENDING: generic "4–8%" → setup-conditional (MOMENTUM 1h / LIQSWEEP 4h, caps above)
+
+**Cap validation against observed data:**
+- STRONG_TREND short 5.5% (n=17): REASONABLE — p75=4.16%, only 2 historical exceeders (BNB 7.28%, ATOM 6.13%), both MOMENTUM now switched to 1h anchoring
+- STRONG_TREND long 6.5% (n=11): SLIGHTLY LOOSE — never exceeded historically (max 5.98%); appropriate headroom for LIQSWEEP runners
+- TRENDING 6.0% (n=10): REASONABLE — sits near observed ceiling; doesn't bind MOMENTUM trades on 1h anchoring
+- RANGING 3.5% (n=2): REASONABLE — 4h boundary naturally lands at 3.0–3.1%; n too thin to conclude
+- EXHAUSTION 3.0% (n=3): INERT in data (0/3 reached 3.0%), but R:R math prevents going lower; monitor at n≥10
+
+**R:R gate:** All 37 STRONG_TREND/TRENDING trades pass R:R ≥ 1.1 even with 1h TP2 proxy at 4.0% (minimum observed rr=1.29). Zero trades would be rejected.
 
 ---
 
