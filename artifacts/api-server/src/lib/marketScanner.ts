@@ -468,21 +468,30 @@ function classifySymbolRegime(klines: BybitKline[]): { regime: RegimeType; adx: 
   return { regime, adx, diPlus, diMinus, atr };
 }
 
-// Short TP cap text for a given regime (used in per-symbol regime prompt lines).
+// TP backstop caps by regime — synced with DB trading_rules after empirical validation.
+// CHOPPY/EXHAUSTION: cap-driven (structural levels too far; mean-reverting moves peak at 0.9–1.7%).
+// RANGING: 4h range boundary is the right anchor (naturally lands at 3.0–3.5%; 100% fill rate).
+// TRENDING/STRONG_TREND: differentiated by setup —
+//   MOMENTUM → 1h structural (median hold 6.2h; 4h extreme at 6–7% missed TP2 on 83% of MOMENTUM trades).
+//   LIQUIDITY_SWEEP → 4h structural (runs to 4h target; 75% WR, 3/4 hit 4h TP2 in data).
 function tpCapShort(r: RegimeType): string {
   switch (r) {
     case "STRONG_TREND":
-    case "TRENDING_UP":   return "TP1 2–3%, TP2 4–8%";
-    case "TRENDING_DOWN": return "longs hard-blocked; shorts TP1 2–3%, TP2 4–6%";
-    case "RANGING":       return "TP1 max 1.5%, TP2 max 2.5% — NOTE: no clean RANGING SL data yet; same R:R math as CHOPPY applies — verify first RANGING trade clears R:R 1.1 at realistic structural SL.";
-    case "EXHAUSTION":    return "TP1 max 2.0%, TP2 max 3.5%";
-    // CHOPPY: TP1 capped at 1.5% (evidenced — SOL moved 1.22%, 2.5% TP1 was unreachable; first partial must be reachable).
-    // TP2 at 3.5%: blended reward = 0.30×1.5 + 0.70×3.5 = 2.9%; max SL for R:R≥1.1 = 2.64% — clears realistic CHOPPY SLs (2.3–3%).
-    // TP2 was briefly 2.5% (made CHOPPY un-enterable: max SL only 2.0%, 8/9 historical trades failed gate).
-    // Protection from riding reversals comes from the 0.8% early-breakeven trigger (Option B, cronScanner),
-    // NOT from a tight TP2. TP2 only needs to clear R:R at realistic SLs.
-    case "CHOPPY":        return "TP1 max 1.5%, TP2 max 3.5% — CHOPPY compresses moves to ~1–2% before reversal; TP1 at nearest structural level within cap. TP2 at 3.5% keeps R:R viable (blended 2.9% vs typical 2.3–3% SL). Reversal protection comes from the 0.8% early-breakeven trigger, not a tight TP2.";
-    default:              return "TP1 within 1–3× ATR";
+    case "TRENDING_UP":
+      return "TP1 2–3%; TP2: MOMENTUM→nearest 1h resistance (long ≤6.5%, short ≤5.5%); LIQUIDITY_SWEEP→nearest 4h resistance (≤6.5%)";
+    case "TRENDING_DOWN":
+      return "longs hard-blocked; shorts TP1 2–3%; TP2: MOMENTUM→nearest 1h resistance (≤6.0%); LIQUIDITY_SWEEP→nearest 4h resistance (≤6.0%)";
+    case "RANGING":
+      return "TP1 max 1.5–2.5%; TP2: nearest 4h range boundary (cap 3.5%) — boundaries naturally land at 3.0–3.5%; 100% empirical fill rate.";
+    case "EXHAUSTION":
+      return "TP1 max 2.0%; TP2: cap-driven 3.0% from entry — mean-reverting; avg peak 0.9%. Set TP2 = entry ± 3.0%, NOT a structural level.";
+    // CHOPPY: TP1 code-set to 1.0%; TP2 cap tightened to 3.0% (DB Rule 23) from prior 3.5%.
+    // Blended reward = 0.30×1.5 + 0.70×3.0 = 2.55%; max SL for R:R≥1.1 = 2.32% — verify SL clears gate.
+    // Protection from reversals comes from the 0.8% early-breakeven trigger (cronScanner), NOT tight TP2.
+    case "CHOPPY":
+      return "TP1 max 1.0–1.5%; TP2: cap-driven 3.0% from entry — CHOPPY compresses moves ~1–2%; 1h and 4h structural levels are unreachable. Set TP2 = entry ± 3.0% (blended reward 2.55% at 1.5% TP1, clears R:R at SL ≤2.32%). Reversal protection from 0.8% early-breakeven trigger.";
+    default:
+      return "TP1 within 1–3× ATR";
   }
 }
 
@@ -786,7 +795,15 @@ async function runPhase2(
     `tp1ClosePercent: percentage of position to close at TP1 (default 30 if omitted). tp2ClosePercent: percentage of remaining position to close at TP2 (default 100 if omitted, closes all remaining). Both are optional — omit to use defaults. Use tp2ClosePercent < 100 only when you want to trail a portion beyond TP2.`,
     `Rank exactly 5. Score reflects your own conviction (0-100). Set recommendation and conviction fields based on your judgment. Keep reasoning ≤ 100 chars and whyNow ≤ 120 chars per entry — output truncation loses all 5 signals.`,
     `Funding: |rate|<0.03% neutral; 0.03-0.07% directional signal; >0.07% crowded/squeeze risk. OI up+price up=bullish; OI down+price up=weak; OI up+price down=bearish; OI down+price down=weak.`,
-    `Take profit placement: Primary method: identify nearest key resistance (long TP) or support (short TP) using 50-period high/low on 4h timeframe. Validation: TP distance must fall within the regime-calibrated band shown in the TP calibration line below — this overrides raw ATR multiples. ATR (1-3×) is a secondary sanity check only; do not override the regime band for ATR compliance. Secondary: Fibonacci 61.8% or 78.6% retracement as confirmation in trending markets. Final TP = structural level confirmed within regime band. TP2=2× TP1 distance. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.
+    `Take profit placement (regime × setup — determines P&L capture; apply exactly):
+TP2 METHOD — choose based on regime AND setupType:
+• CHOPPY or EXHAUSTION: set TP2 = entry ± 3.0% (cap-driven, NOT structural). These regimes mean-revert; avg peak 0.9–1.7%; 1h and 4h structural levels are aspirational and will not fill. Do NOT anchor TP2 to a resistance/support level.
+• RANGING: set TP2 = nearest 4h range boundary (cap 3.5%). Range boundaries naturally land at 3.0–3.5%; 4h structural is the right anchor here (100% empirical fill rate).
+• STRONG_TREND or TRENDING + setupType=MOMENTUM: set TP2 = nearest significant resistance (short) or support (long) on the 1h timeframe. Use the 1h OHLCV candles in your context — identify the most recent 1h swing high (shorts) or swing low (longs), or nearest 1h prior S/R zone above/below entry. Caps: long ≤6.5%, short ≤5.5%. Rationale: MOMENTUM trades median hold 6.2h; 4h 50-period extremes (6–7%) missed TP2 on 83% of historical MOMENTUM trades; 1h structural resistance at 3.5–4.5% matches actual excursion.
+• STRONG_TREND or TRENDING + setupType=LIQUIDITY_SWEEP: set TP2 = nearest 4h key resistance (short) or support (long). Cap: ≤6.5%. LIQSWEEP setups run cleanly to the 4h structural target (75% WR, 3/4 hit 4h TP2 in data); 1h would cap prematurely.
+• Do NOT use TP2 = 2× TP1 distance — outputs ~5.0% for non-CHOPPY, aspirational for MOMENTUM.
+TP1: set at a structural level within cap (~1.0–1.5% CHOPPY, ~2.5% otherwise) — code overrides tp1 at runtime but the R:R gate evaluates your value.
+Validation: TP distance must fall within the regime cap shown in the TP calibration line or per-symbol caps above. LONGS: SL<entry, TPs above. SHORTS: SL>entry, TPs below.
 INITIAL SL (entry only — does NOT govern post-entry SL management): Place the SL at the price where this trade's thesis is invalidated. Determine that level yourself from the candle data across 15m / 1h / 4h — use whatever structural method best fits this setup (swing structure, Fibonacci, prior support/resistance, range boundary, etc.) and whichever timeframe fits: tighter for fast/breakout entries, wider for slower swings. 4h ATR is volatility context only, never the placement rule. Constraints: SL must sit just beyond a GENUINE structural level. Never place it at an arbitrary price chosen only to hit a target R:R — a stop inside candle noise gets wicked out. Blended R:R must be ≥ 1.1. If your invalidation level doesn't clear it, anchor to a genuinely tighter structural level on a faster timeframe only if a real one exists; if none does, return direction=neutral rather than forcing a wide stop. Record the level and basis in stopLossMethod (e.g. 'swing_1h', 'fib_0618', 'range_low'). This sets the INITIAL stop only — it does NOT alter TP1/TP2 bands or the post-entry SL ladder (breakeven, ratchets).
 CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit beyond the GENUINE structural invalidation level — the actual swing low (longs) / swing high (shorts), placed clear of the recent wick/noise zone. If the genuine structural level gives blended R:R < 1.1, you have ONLY two valid choices: (1) Anchor to a genuinely tighter structural level on a faster timeframe IF a real one exists (a real swing, not a point inside the noise band). (2) If no genuine tighter structural level exists, return direction=neutral. You must NOT place the SL at an arbitrary price inside the noise/wick zone (e.g. just above the recent swing low) solely to make R:R clear 1.1. A stop inside the noise band will be wicked out without the thesis actually being invalidated. Placing the SL above the true swing low to pass the gate is an ERROR — return neutral instead. When you set the SL, identify the actual swing low/high you are placing beyond, and confirm the SL is on the far side of the recent wick zone, not inside it.`,
     `setupType=REJECTION|MOMENTUM|OVEREXTENDED|LIQUIDITY_SWEEP|VOL_BREAKOUT. setupQuality=HIGH|MEDIUM|LOW. timing=EARLY(fresh)|MIDDLE(1-2ATR)|LATE(3+ATR or RSI extreme) — skip LATE unless LIQUIDITY_SWEEP. VOL_BREAKOUT: use ONLY when 1h volume ≥2× 20-candle avg on a candle that breaks a structural level with ≥50% body in the breakout direction. NOT a sweep reversal (→LIQUIDITY_SWEEP). NOT trend-following without a breakout candle (→MOMENTUM).`,
@@ -825,11 +842,15 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
   const tpCalibLine = btcIsDirectional
     ? `TP calibration (BTC ${regime.regime}): ${
         regime.regime === "STRONG_TREND" || regime.regime === "TRENDING_UP"
-          ? "TP1 2–3% from entry, TP2 4–8% from entry. WARNING: 6–8% TP1 sits in the empirical dead zone — no STRONG_TREND long peaked between 3% and 8%. That setting misses the early partial and pushes TP2 to unreachable 16%+."
+          ? "TP1 ~2.5% (code-set); TP2: MOMENTUM→nearest 1h resistance (long ≤6.5%, short ≤5.5%), LIQUIDITY_SWEEP→nearest 4h resistance (≤6.5%). Median MOMENTUM hold 6.2h; 4h extremes (6–7%) missed TP2 on 83% of MOMENTUM trades — anchor to 1h structural level."
           : regime.regime === "TRENDING_DOWN"
-          ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 2–3%, TP2 4–6%."
+          ? "LONGS ARE HARD-BLOCKED. Shorts only: TP1 ~2.5%; TP2: MOMENTUM→nearest 1h resistance (≤6.0%); LIQUIDITY_SWEEP→nearest 4h resistance (≤6.0%)."
           : regime.regime === "CHOPPY"
-          ? "TP1 max 1.5%, TP2 max 3.5% — CHOPPY; moves ~1–2% before reversal. TP1 at nearest structural level within cap. TP2 at 3.5% keeps R:R viable at realistic SLs; reversal protection from 0.8% early-breakeven trigger."
+          ? "TP1 max 1.5%; TP2 cap 3.0% — set TP2 = entry ± 3.0% (NOT structural). CHOPPY moves ~1–2% before reversal; structural levels are unreachable aspirations. Reversal protection from 0.8% early-breakeven trigger."
+          : regime.regime === "RANGING"
+          ? "TP1 max 2.5%; TP2 = nearest 4h range boundary (cap 3.5%). Boundaries naturally land at 3.0–3.5%; 100% empirical fill rate."
+          : regime.regime === "EXHAUSTION"
+          ? "TP1 max 2.0%; TP2 cap 3.0% — set TP2 = entry ± 3.0% (NOT structural). EXHAUSTION mean-reverts; avg peak 0.9%."
           : "TP1 within 1–3× ATR from structural level."
       }`
     : `TP calibration: BTC is ${regime.regime} (non-directional) — use each symbol's own caps from the per-symbol regime block above.`;
