@@ -2098,30 +2098,27 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
                 console.warn(`[rule7] ${sym} — TP2 not live on Bybit 15s after fill (expected $${tp2Target})`);
                 await alertFn?.(`⚠️ ${sym}: TP2 NOT live on Bybit (expected $${tp2Target.toFixed(4)}) — verify manually`).catch(() => {});
               }
-            }
-          }
-
-          // TP1 check: the bot places a Bybit PartialTakeProfit conditional (via setTp1Partial /
-          // trading-stop API) AND runs checkPartialExits monitoring as a fallback. PartialTakeProfit
-          // orders appear in orderFilter:"tpslOrder", NOT in regular getOrders(). Alert only when
-          // positionMeta.tp1 is set (placement was intended) but no Bybit PartialTakeProfit exists
-          // — that's a genuine failure. Skip for unfilled limits (liveP null): TP1 is deferred to
-          // fill detection there and hasn't been placed yet.
-          if (tp1Target && liveP) {
-            const s15       = await loadBotState().catch(() => null);
-            const pm15      = ((s15?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
-            const tp1InMeta = (pm15?.tp1 ?? 0) > 0;
-            if (tp1InMeta) {
-              const tpslOrders  = await bybitGetTpslOrders(sym).catch(() => [] as BybitTpslOrder[]);
-              const tp1OnBybit  = tpslOrders.some(o => o.stopOrderType === "PartialTakeProfit");
-              console.log(`[rule7] ${sym} — 15s TP1: meta=$${pm15!.tp1!.toFixed(4)} Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
-              if (!tp1OnBybit) {
-                console.warn(`[rule7] ${sym} — TP1 PartialTakeProfit NOT on Bybit 15s after fill (expected $${tp1Target})`);
-                await alertFn?.(`⚠️ ${sym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${tp1Target.toFixed(4)}) — verify/replace manually`).catch(() => {});
+              // TP1 check: PartialTakeProfit orders appear in tpslOrder filter, not getOrders().
+              // Alert only when positionMeta.tp1 is set (placement was intended) but no Bybit
+              // PartialTakeProfit exists — that's a genuine failure. Nested here so liveP is in
+              // scope; skip when liveP is null (unfilled limit: TP1 deferred to fill detection).
+              if (tp1Target) {
+                const s15       = await loadBotState().catch(() => null);
+                const pm15      = ((s15?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
+                const tp1InMeta = (pm15?.tp1 ?? 0) > 0;
+                if (tp1InMeta) {
+                  const tpslOrders  = await bybitGetTpslOrders(sym).catch(() => [] as BybitTpslOrder[]);
+                  const tp1OnBybit  = tpslOrders.some(o => o.stopOrderType === "PartialTakeProfit");
+                  console.log(`[rule7] ${sym} — 15s TP1: meta=$${pm15!.tp1!.toFixed(4)} Bybit_PartialTP=${tp1OnBybit ? "found" : "MISSING"}`);
+                  if (!tp1OnBybit) {
+                    console.warn(`[rule7] ${sym} — TP1 PartialTakeProfit NOT on Bybit 15s after fill (expected $${tp1Target})`);
+                    await alertFn?.(`⚠️ ${sym}: TP1 PartialTakeProfit NOT live on Bybit (expected $${tp1Target.toFixed(4)}) — verify/replace manually`).catch(() => {});
+                  }
+                } else {
+                  // positionMeta.tp1 not set — the 5s metadata check catches this path
+                  console.log(`[rule7] ${sym} — 15s TP1: positionMeta.tp1 not set yet (may still be populating)`);
+                }
               }
-            } else {
-              // positionMeta.tp1 not set — the 5s metadata check catches this path
-              console.log(`[rule7] ${sym} — 15s TP1: positionMeta.tp1 not set yet (may still be populating)`);
             }
           }
         }, 15000);
@@ -2413,7 +2410,19 @@ async function checkPositionMonitor(): Promise<void> {
   if (monitorRunning) { console.log("[posMonitor] Previous check still running — skipping tick"); return; }
   monitorRunning = true;
   try {
-  const positions = await bybitGetPositions().catch(() => [] as BybitPosition[]);
+  let positions: BybitPosition[] = [];
+  let fetchFailed = false;
+  try {
+    positions = await bybitGetPositions();
+  } catch (e) {
+    fetchFailed = true;
+    console.warn(`[posMonitor] bybitGetPositions failed — skipping disappearance detection this cycle:`, (e as Error).message);
+  }
+  // API errors return early here: prevPositionSymbols is preserved intact so the next
+  // successful cycle still detects any genuine closes. A genuine empty [] (last position
+  // closed, HTTP 200 with no positions) does NOT throw, so fetchFailed stays false and
+  // the disappearance loop below runs correctly.
+  if (fetchFailed) return;
 
   // First tick after (re)start: seed prevPositionSymbols from live positions and skip
   // disappearance detection — startup reconciliation handles already-closed positions
@@ -2439,8 +2448,8 @@ async function checkPositionMonitor(): Promise<void> {
   const now          = Date.now();
 
   // ── Position disappearance detection (SL/TP/liquidation) ───────────────────
-  // Runs BEFORE the positions.length guard: symbols that vanished during a transient
-  // Bybit [] response are still detected and closeOpenTrade is called correctly.
+  // fetchFailed path returned above — reaching here means the Bybit fetch succeeded.
+  // An empty currentSymbols means positions genuinely closed, not an API error.
   const prevSymbols    = new Set(prevPositionSymbols); // snapshot for limit-fill detection below
   const currentSymbols = new Set(positions.map(p => p.symbol));
   for (const sym of prevPositionSymbols) {
