@@ -50,6 +50,7 @@ export interface PendingLimitFill {
   positionIdx:      number;
   tp1ClosePercent?: number;
   tp2ClosePercent?: number;
+  entryRegime?:     string;
 }
 
 export const botStateTable = pgTable("bot_state", {

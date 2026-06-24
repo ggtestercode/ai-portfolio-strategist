@@ -1579,6 +1579,7 @@ async function runWatchScan(): Promise<void> {
           tp1Price:         signal.tp1,
           tp1ClosePercent:  signal.tp1ClosePercent,
           tp2ClosePercent:  signal.tp2ClosePercent,
+          entryRegime:      regime?.regime,
         });
         const gateResult = await approvalGate.submit(proposal).catch(e => {
           console.error(`[watchScan] submit ${sym}:`, e);
@@ -2034,6 +2035,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         limitPrice:       opp.limitPrice ?? opp.entry,
         tp1ClosePercent:  opp.tp1ClosePercent,
         tp2ClosePercent:  opp.tp2ClosePercent,
+        entryRegime:      regime?.regime,
       });
       const gateResult = await approvalGate.submit(proposal).catch(e => {
         console.error(`[cronScanner] submit ${sym}:`, e);
@@ -2545,19 +2547,41 @@ async function checkPositionMonitor(): Promise<void> {
       const pending = pendingLimitFills.get(pos.symbol)!;
       await removePendingLimitFill(pos.symbol).catch(() => {});
       console.log(`[posMonitor] Limit filled — ${pos.symbol} at $${pos.entryPrice.toFixed(4)}`);
+
+      // Resolve entryRegime: PendingLimitFill is the authoritative source (set at order
+      // submission, survives restarts via DB). Fall back to positionMeta written by the
+      // earlier fire-and-forget patchPositionMeta({ entryRegime }) from cronScanner.
+      const resolvedRegime = pending.entryRegime ?? posMeta[pos.symbol]?.entryRegime;
+      if (!resolvedRegime) {
+        console.warn(`[posMonitor] ${pos.symbol} fill-detection: entryRegime missing in pendingFill and positionMeta — TP1 will use non-CHOPPY 2.5%`);
+      }
+
+      // Recompute TP1 from actual fill price (not signal.entry anchor).
+      // Prevents PartialTakeProfit placement failures when price runs fast past a
+      // signal.entry-anchored target before fill-detection runs.
+      const isChoppyFill = resolvedRegime === "CHOPPY";
+      const tp1Pct = isChoppyFill ? 0.01 : 0.025;
+      const correctedTp1 = pending.direction === "long"
+        ? pos.entryPrice * (1 + tp1Pct)
+        : pos.entryPrice * (1 - tp1Pct);
+
+      // This patchPositionMeta is awaited and commits LAST — wins the race against the
+      // fire-and-forget patchPositionMeta({ entryRegime }) and storePositionMeta calls
+      // that ran at order submission / 5s metadata completeness check.
       await patchPositionMeta(pos.symbol, {
         sl:              pending.sl,
-        tp1:             pending.tp1,
+        tp1:             correctedTp1,
         tp2:             pending.tp2,
         originalQty:     pos.size,
         entryPrice:      pos.entryPrice,
         openedAt:        Date.now(),
         tp1ClosePercent: pending.tp1ClosePercent,
         tp2ClosePercent: pending.tp2ClosePercent,
+        entryRegime:     resolvedRegime,
       }).catch(() => {});
       if (pending.tp1 && pending.tp1 > 0) {
-        const r = await bybitEnsurePartialOrder(pos.symbol, "PartialTakeProfit", pending.tp1, pos.size, pos.positionIdx, pending.tp1ClosePercent);
-        console.log(`[posMonitor] ${pos.symbol} TP1 on fill: ${r} ($${pending.tp1})`);
+        const r = await bybitEnsurePartialOrder(pos.symbol, "PartialTakeProfit", correctedTp1, pos.size, pos.positionIdx, pending.tp1ClosePercent);
+        console.log(`[posMonitor] ${pos.symbol} TP1 on fill: ${r} ($${correctedTp1.toFixed(4)}) [signal $${pending.tp1.toFixed(4)} corrected from fill $${pos.entryPrice.toFixed(4)} ${isChoppyFill ? "CHOPPY 1%" : "non-CHOPPY 2.5%"}]`);
       }
       // Fix 3: 15s post-fill TP1 verification — runs regardless of whether the signal included tp1.
       // Reads positionMeta at 15s (includes ATR fallback values written by applyAtrSlTp).
@@ -2582,10 +2606,10 @@ async function checkPositionMonitor(): Promise<void> {
       }
       await alertFn?.([
         `✅ <b>Limit filled — ${pos.symbol} ${pending.direction.toUpperCase()}</b>`,
-        `Entry: $${pos.entryPrice.toFixed(4)}`,
-        pending.sl  ? `SL:  $${pending.sl.toFixed(4)}`  : null,
-        pending.tp1 ? `TP1: $${pending.tp1.toFixed(4)}` : null,
-        pending.tp2 ? `TP2: $${pending.tp2.toFixed(4)}` : null,
+        `Entry: $${pos.entryPrice.toFixed(4)} | Regime: ${resolvedRegime ?? "unknown"}`,
+        pending.sl  ? `SL:  $${pending.sl.toFixed(4)}`              : null,
+        pending.tp1 ? `TP1: $${correctedTp1.toFixed(4)} (fill-based)` : null,
+        pending.tp2 ? `TP2: $${pending.tp2.toFixed(4)}`             : null,
       ].filter(Boolean).join("\n")).catch(() => {});
     }
   }

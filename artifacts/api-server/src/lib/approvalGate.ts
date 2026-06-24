@@ -33,6 +33,7 @@ export interface TradeProposal {
   limitPrice?:         number;
   tp1ClosePercent?:    number;
   tp2ClosePercent?:    number;
+  entryRegime?:        string;
 }
 
 export interface PendingApproval {

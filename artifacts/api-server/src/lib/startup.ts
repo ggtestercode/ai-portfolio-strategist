@@ -62,6 +62,13 @@ async function storePositionMeta(symbol: string, meta: PositionMeta): Promise<vo
     entrySource:    existing[symbol]?.entrySource,
     trailingActive: false,   // never inherit — new positions always start clean
     ...meta,
+    // Preserve entryRegime/score/setupType from existing when meta doesn't supply them.
+    // applyAtrSlTp calls storePositionMeta without these fields; this prevents that
+    // destructive call from erasing values written by the earlier fire-and-forget
+    // patchPositionMeta({ entryRegime, score, setupType }).
+    entryRegime: meta.entryRegime ?? existing[symbol]?.entryRegime,
+    score:        meta.score      ?? existing[symbol]?.score,
+    setupType:    meta.setupType  ?? existing[symbol]?.setupType,
   };
   await db.update(botStateTable)
     .set({ positionMetadata: existing, lastUpdated: new Date() })
@@ -320,6 +327,7 @@ export async function initBrokers(): Promise<void> {
         positionIdx:     result.positionIdx,
         tp1ClosePercent,
         tp2ClosePercent,
+        entryRegime:     p.entryRegime,
       };
       pendingLimitFills.set(p.symbol, fillData);
       persistPendingLimitFillsToDB().catch(() => {});
@@ -341,6 +349,7 @@ export async function initBrokers(): Promise<void> {
           openedAt:        Date.now(),
           tp1ClosePercent,
           tp2ClosePercent,
+          entryRegime:     p.entryRegime,
         }).catch(e => console.warn(`[startup] storePositionMeta ${p.symbol}:`, e.message));
       }
     }
