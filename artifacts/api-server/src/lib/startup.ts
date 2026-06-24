@@ -10,6 +10,7 @@ import {
   setTakeProfit   as bybitSetTakeProfit,
   getClosedPnl    as bybitGetClosedPnl,
   ensurePartialOrder    as bybitEnsurePartialOrder,
+  computeTp1,
   getKlines,
   getTicker,
   type BybitKline,
@@ -82,6 +83,7 @@ export async function applyAtrSlTp(
   entryPrice:  number,
   positionIdx: number,
   originalQty: number,
+  entryRegime?: string,
 ): Promise<void> {
   const klines = await getKlines(symbol, "240", 28).catch(() => [] as BybitKline[]);
   const atr    = calcATR(klines, 14);
@@ -125,9 +127,10 @@ export async function applyAtrSlTp(
       sl = direction === "long" ? entryPrice - maxSlDist : entryPrice + maxSlDist;
   }
 
-  // TP for exchange: use Claude's TP2 (full-mode close target) if available; else ATR TP1
-  // TP1 for metadata: used by software polling (checkPartialExits) — use Claude's TP1 if available
-  const tp1        = dbTp1 > 0 ? dbTp1 : atrTp1;
+  // TP for exchange: use Claude's TP2 (full-mode close target) if available; else ATR TP1.
+  // TP1: formula-only (fill-anchored), never trade_log.tp1. SL and TP2 still use trade_log priority.
+  if (!entryRegime) console.warn(`[startup] applyAtrSlTp ${symbol}: entryRegime missing — TP1 will use non-CHOPPY 2.5%`);
+  const tp1        = computeTp1(entryPrice, entryRegime, direction);
   const tp2        = dbTp2 > 0 ? dbTp2 : atrTp2;
   const exchangeTp = dbTp2 > 0 ? dbTp2 : atrTp1; // Full-mode TP on exchange = TP2 if known
 
@@ -237,12 +240,12 @@ async function recoverPendingLimitFills(): Promise<void> {
         .set({ positionMetadata: _pm, lastUpdated: new Date() })
         .where(eq(botStateTable.id, 1)).catch(() => {});
     } else {
-      // Resolve TP1: use signal value if present, otherwise fall back to positionMeta ATR value.
-      // The ATR fallback path handles positions whose signal lacked tp1 (e.g. HYPE $73.4).
-      const resolvedTp1 = (fill.tp1 && fill.tp1 > 0) ? fill.tp1 : (posMeta[symbol]?.tp1 ?? 0);
-      if (!tp1Executed && resolvedTp1 > 0) {
-        const r = await bybitEnsurePartialOrder(symbol, "PartialTakeProfit", resolvedTp1, livePos.size, fill.positionIdx, fill.tp1ClosePercent);
-        console.log(`[startup] ${symbol} TP1 recovery: ${r} ($${resolvedTp1})`);
+      if (!tp1Executed) {
+        const recoveryRegime = fill.entryRegime ?? posMeta[symbol]?.entryRegime;
+        if (!recoveryRegime) console.warn(`[startup] ${symbol} TP1 recovery: entryRegime missing — using non-CHOPPY 2.5%`);
+        const tp1Price = computeTp1(livePos.entryPrice, recoveryRegime, fill.direction);
+        const r = await bybitEnsurePartialOrder(symbol, "PartialTakeProfit", tp1Price, livePos.size, fill.positionIdx, fill.tp1ClosePercent);
+        console.log(`[startup] ${symbol} TP1 recovery: ${r} ($${tp1Price.toFixed(4)})`);
       }
     }
     if (fill.tp2 && fill.tp2 > 0 && (fill.tp2ClosePercent ?? 100) < 100) {
@@ -314,6 +317,7 @@ export async function initBrokers(): Promise<void> {
       limitPrice:       limitPrice,
       tp1ClosePercent,
       tp2ClosePercent,
+      entryRegime:      p.entryRegime,
     });
 
     if (result.isLimitOrder) {

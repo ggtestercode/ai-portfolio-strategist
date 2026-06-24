@@ -266,6 +266,15 @@ export async function ensurePartialOrder(
   return placed ? "placed" : "skipped-error";
 }
 
+// ── TP1 formula — single source of truth ─────────────────────────────────────
+// TP1 is ALWAYS fill-anchored; never signal.entry-anchored or trade_log.tp1.
+// CHOPPY → 1%; anything else → 2.5% (non-CHOPPY default on missing regime).
+export function computeTp1(entryPrice: number, regime: string | undefined, direction: "long" | "short"): number {
+  if (!regime) console.warn("[computeTp1] entryRegime missing — defaulting to non-CHOPPY 2.5%");
+  const pct = regime === "CHOPPY" ? 0.01 : 0.025;
+  return direction === "long" ? entryPrice * (1 + pct) : entryPrice * (1 - pct);
+}
+
 export async function cancelOrder(symbol: string, orderId: string): Promise<void> {
   const sym = normalise(symbol);
   await bpost("/v5/order/cancel", { category: "linear", symbol: sym, orderId });
@@ -367,7 +376,7 @@ export async function openPosition(
   side: "Buy" | "Sell",
   amountUsd: number,
   leverage = 10,
-  opts?: { stopLoss?: number; takeProfit?: number; tp1?: number; limitPrice?: number; tp1ClosePercent?: number; tp2ClosePercent?: number },
+  opts?: { stopLoss?: number; takeProfit?: number; tp1?: number; limitPrice?: number; tp1ClosePercent?: number; tp2ClosePercent?: number; entryRegime?: string },
 ): Promise<{ orderId: string; entryPrice: number; positionIdx: number; qty: number; isLimitOrder: boolean; actualMarginUsd: number }> {
   // ── Leverage cap ─────────────────────────────────────────────────────────
   const MAX_LEVERAGE = 10;
@@ -482,7 +491,8 @@ export async function openPosition(
   if (!useLimit) {
     await new Promise(res => setTimeout(res, 600)); // let position settle
     if (opts?.tp1 && opts.tp1 > 0) {
-      await setTp1Partial(sym, opts.tp1, positionIdx, qty, opts.tp1ClosePercent);
+      const tp1Price = computeTp1(markPrice, opts.entryRegime, side === "Buy" ? "long" : "short");
+      await setTp1Partial(sym, tp1Price, positionIdx, qty, opts.tp1ClosePercent);
     }
     if (opts?.takeProfit && opts.takeProfit > 0 && (opts.tp2ClosePercent ?? 100) < 100) {
       await setTp2Partial(sym, opts.takeProfit, positionIdx, qty, opts.tp2ClosePercent!);

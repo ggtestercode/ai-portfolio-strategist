@@ -16,6 +16,7 @@ import {
   getOrders       as bybitGetOrders,
   getTpslOrders         as bybitGetTpslOrders,
   ensurePartialOrder    as bybitEnsurePartialOrder,
+  computeTp1,
   closePercentPosition,
   setStopLoss     as bybitSetStopLoss,
   setTrailingStop,
@@ -1595,6 +1596,7 @@ async function runWatchScan(): Promise<void> {
 
           // Verify metadata completeness, confirm fill on Bybit, then log trade.
           // logOpenTrade is deferred 5s so we can verify the position exists before creating a record.
+          const _5sRegime = regime?.regime; // capture before setTimeout fires; outer let may advance
           setTimeout(async () => {
             const s2   = await loadBotState().catch(() => null);
             const pm   = ((s2?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
@@ -1604,9 +1606,11 @@ async function runWatchScan(): Promise<void> {
             const pos2 = livePositions.find(p => p.symbol === sym);
             if (missing.length > 0) {
               console.log(`[watchScan] ⚠️ Missing metadata for ${sym}: ${missing.join(", ")} — applying ATR fallback`);
-              if (pos2) {
+              if (pos2 && pendingLimitFills.has(sym)) {
+                console.log(`[watchScan] ${sym} pending limit fill — skipping applyAtrSlTp (fill-detection owns TP1)`);
+              } else if (pos2) {
                 const dir = pos2.side === "Buy" ? "long" : "short" as "long" | "short";
-                await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size)
+                await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size, _5sRegime)
                   .catch(e => console.warn(`[watchScan] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
               }
             }
@@ -2048,6 +2052,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         patchPositionMeta(sym, { score: opp.score ?? 0, entryRegime: regime?.regime, setupType: opp.setupType }).catch(() => {});
 
         // Verify metadata completeness — atr excluded: startup stores atr=0 for Claude SL/TP
+        const _5sRegime = regime?.regime; // capture before setTimeout fires; outer let may advance
         setTimeout(async () => {
           const s2   = await loadBotState().catch(() => null);
           const pm   = ((s2?.positionMetadata ?? {}) as Record<string, PositionMeta>)[sym];
@@ -2059,8 +2064,12 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
             const pos2           = liveAfterCheck.find(p => p.symbol === sym);
             if (pos2) {
               const dir = pos2.side === "Buy" ? "long" : "short" as "long" | "short";
-              await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size)
-                .catch(e => console.warn(`[cronScanner] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
+              if (pendingLimitFills.has(sym)) {
+                console.log(`[cronScanner] ${sym} pending limit fill — skipping applyAtrSlTp (fill-detection owns TP1)`);
+              } else {
+                await applyAtrSlTp(sym, dir, pos2.entryPrice, pos2.positionIdx, pos2.size, _5sRegime)
+                  .catch(e => console.warn(`[cronScanner] applyAtrSlTp fallback ${sym}:`, (e as Error).message));
+              }
             }
           }
         }, 5000);
@@ -2556,14 +2565,9 @@ async function checkPositionMonitor(): Promise<void> {
         console.warn(`[posMonitor] ${pos.symbol} fill-detection: entryRegime missing in pendingFill and positionMeta — TP1 will use non-CHOPPY 2.5%`);
       }
 
-      // Recompute TP1 from actual fill price (not signal.entry anchor).
-      // Prevents PartialTakeProfit placement failures when price runs fast past a
-      // signal.entry-anchored target before fill-detection runs.
-      const isChoppyFill = resolvedRegime === "CHOPPY";
-      const tp1Pct = isChoppyFill ? 0.01 : 0.025;
-      const correctedTp1 = pending.direction === "long"
-        ? pos.entryPrice * (1 + tp1Pct)
-        : pos.entryPrice * (1 - tp1Pct);
+      // TP1 via shared formula: fill-anchored, regime-conditional (CHOPPY 1%, non-CHOPPY 2.5%).
+      // Same computeTp1 used by ALL other TP1 writers — guarantees identical price, dedup works.
+      const correctedTp1 = computeTp1(pos.entryPrice, resolvedRegime, pending.direction);
 
       // This patchPositionMeta is awaited and commits LAST — wins the race against the
       // fire-and-forget patchPositionMeta({ entryRegime }) and storePositionMeta calls
@@ -2581,7 +2585,7 @@ async function checkPositionMonitor(): Promise<void> {
       }).catch(() => {});
       if (pending.tp1 && pending.tp1 > 0) {
         const r = await bybitEnsurePartialOrder(pos.symbol, "PartialTakeProfit", correctedTp1, pos.size, pos.positionIdx, pending.tp1ClosePercent);
-        console.log(`[posMonitor] ${pos.symbol} TP1 on fill: ${r} ($${correctedTp1.toFixed(4)}) [signal $${pending.tp1.toFixed(4)} corrected from fill $${pos.entryPrice.toFixed(4)} ${isChoppyFill ? "CHOPPY 1%" : "non-CHOPPY 2.5%"}]`);
+        console.log(`[posMonitor] ${pos.symbol} TP1 on fill: ${r} ($${correctedTp1.toFixed(4)}) [fill $${pos.entryPrice.toFixed(4)} regime=${resolvedRegime ?? "non-CHOPPY"} formula]`);
       }
       // Fix 3: 15s post-fill TP1 verification — runs regardless of whether the signal included tp1.
       // Reads positionMeta at 15s (includes ATR fallback values written by applyAtrSlTp).
@@ -2608,7 +2612,7 @@ async function checkPositionMonitor(): Promise<void> {
         `✅ <b>Limit filled — ${pos.symbol} ${pending.direction.toUpperCase()}</b>`,
         `Entry: $${pos.entryPrice.toFixed(4)} | Regime: ${resolvedRegime ?? "unknown"}`,
         pending.sl  ? `SL:  $${pending.sl.toFixed(4)}`              : null,
-        pending.tp1 ? `TP1: $${correctedTp1.toFixed(4)} (fill-based)` : null,
+        pending.tp1 ? `TP1: $${correctedTp1.toFixed(4)} (formula ${resolvedRegime ?? "non-CHOPPY"})` : null,
         pending.tp2 ? `TP2: $${pending.tp2.toFixed(4)}`             : null,
       ].filter(Boolean).join("\n")).catch(() => {});
     }
@@ -2631,8 +2635,9 @@ async function checkPositionMonitor(): Promise<void> {
     if (selfMissing.length > 0 && !selfHealAttempted.has(pos.symbol)) {
       selfHealAttempted.add(pos.symbol);
       console.log(`[posMonitor] ⚠️ ${pos.symbol} missing: ${selfMissing.join(",")} — self-healing`);
-      const healDir = pos.side === "Buy" ? "long" : "short" as "long" | "short";
-      applyAtrSlTp(pos.symbol, healDir, pos.entryPrice, pos.positionIdx, pos.size)
+      const healDir    = pos.side === "Buy" ? "long" : "short" as "long" | "short";
+      const healRegime = selfMeta?.entryRegime;
+      applyAtrSlTp(pos.symbol, healDir, pos.entryPrice, pos.positionIdx, pos.size, healRegime)
         .then(() => { _botStateCache = null; }) // clear cache so next tick picks up healed metadata
         .catch(e => console.warn(`[posMonitor] self-heal ${pos.symbol}:`, (e as Error).message));
     }
