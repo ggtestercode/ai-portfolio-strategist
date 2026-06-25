@@ -349,6 +349,29 @@ async function applyHardFilters(
       } catch { /* kline fetch failed — pass (do not block on missing data) */ }
     }
 
+    // Hard gate: MOMENTUM counter-candle, body ≥ 30% (all regimes except TRENDING_UP handled above,
+    // CHOPPY blocked before). Jun-2026 n=48: 6L blocked (LTC/BNB/TIA shorts, ETH/NEAR/ATOM longs),
+    // 0W blocked — net +13.02%. REJECTION/LIQUIDITY_SWEEP exempt: their counter-candle IS the signal.
+    // API cost: 2 candles only, fires for MOMENTUM signals not already rejected above.
+    if (opp.setupType === "MOMENTUM" && regime?.regime !== "TRENDING_UP") {
+      try {
+        const k1h = await getKlines(opp.symbol, "60", 2);
+        if (k1h.length >= 2) {
+          const lastC        = k1h[k1h.length - 2]!;
+          const range        = lastC.high - lastC.low;
+          const bodyPct      = range > 0 ? Math.abs(lastC.close - lastC.open) / range : 0;
+          const bullishCandle = lastC.close > lastC.open;
+          const candleAgainst = opp.direction === "long" ? !bullishCandle : bullishCandle;
+          if (candleAgainst && bodyPct >= 0.30) {
+            const bp = (bodyPct * 100).toFixed(1);
+            console.log(`[momentum-gate] BLOCKED ${opp.symbol} ${opp.direction} — 1h candle O=${lastC.open} H=${lastC.high} L=${lastC.low} C=${lastC.close} body=${bp}% counter-direction`);
+            rejected.push({ symbol: opp.symbol, reason: `MOMENTUM counter-candle gate: last 1h ${bullishCandle ? "bullish" : "bearish"} body=${bp}% ≥ 30% vs ${opp.direction} — Jun-2026: 6L blocked 0W killed net +13.0%` });
+            continue;
+          }
+        }
+      } catch { /* kline fetch failed — pass (do not block on missing data) */ }
+    }
+
     // Filter 5: Low liquidity (volume24h < $10M)
     if (opp.volume24h && opp.volume24h < 10_000_000) {
       rejected.push({ symbol: opp.symbol, reason: `low liquidity $${(opp.volume24h / 1e6).toFixed(1)}M < $10M` });
@@ -1511,6 +1534,31 @@ async function runWatchScan(): Promise<void> {
                 `🚫 Entry blocked — ${sym}`,
                 `MOMENTUM+TRENDING_UP counter-candle gate: last 1h candle ${candleBullish ? "bullish" : "bearish"} vs ${signal.direction} direction.`,
                 `Jun-2026: counter-candle = 0W/3L; confirming candle = 3W/0L.`,
+              ].join("\n")).catch(() => {});
+              await removeFromWatchList(signal.symbol);
+              continue;
+            }
+          }
+        } catch { /* kline fetch failed — allow trade */ }
+      }
+
+      // Hard gate — MOMENTUM counter-candle body ≥ 30% (mirrors applyHardFilters; all non-TRENDING_UP regimes)
+      if (signal.setupType === "MOMENTUM" && regime?.regime !== "TRENDING_UP") {
+        try {
+          const k1h = await getKlines(sym, "60", 2);
+          if (k1h.length >= 2) {
+            const lastC        = k1h[k1h.length - 2]!;
+            const range        = lastC.high - lastC.low;
+            const bodyPct      = range > 0 ? Math.abs(lastC.close - lastC.open) / range : 0;
+            const bullishCandle = lastC.close > lastC.open;
+            const candleAgainst = signal.direction === "long" ? !bullishCandle : bullishCandle;
+            if (candleAgainst && bodyPct >= 0.30) {
+              const bp = (bodyPct * 100).toFixed(1);
+              console.log(`[momentum-gate] BLOCKED ${sym} ${signal.direction} (watchScan) — 1h candle O=${lastC.open} H=${lastC.high} L=${lastC.low} C=${lastC.close} body=${bp}% counter-direction`);
+              await alertFn?.([
+                `🚫 Entry blocked — ${sym}`,
+                `MOMENTUM counter-candle gate: last 1h ${bullishCandle ? "bullish" : "bearish"} body=${bp}% ≥ 30% vs ${signal.direction}.`,
+                `Jun-2026: 6L blocked, 0W killed, net +13.0%.`,
               ].join("\n")).catch(() => {});
               await removeFromWatchList(signal.symbol);
               continue;
