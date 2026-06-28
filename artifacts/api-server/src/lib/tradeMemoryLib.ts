@@ -52,6 +52,7 @@ interface ReflectionInput {
   suppressAlerts?: boolean;      // true for backfill — don't spam old-trade execution alerts
   source?: string | null;        // 'mode_3' | 'version_b'
   exitReasonOverride?: string;   // explicit exit label — overrides P&L-derived heuristic
+  atr?: number | null;           // 4h ATR from trade_log.atr — for sl_atr_ratio; no new API call
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -532,28 +533,47 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const effectiveSlDistancePct = effectiveSL > 0 && input.entryPrice > 0
     ? Math.abs(effectiveSL - input.entryPrice) / input.entryPrice * 100 : 0;
 
-  // slTooTight — code-owned, never delegated to LLM. Wick-vs-close test:
-  // find the first trade-period candle that touches the original SL level; if its close
-  // recovered to the non-stopped side, the SL was hit by noise (too tight = true).
-  // If the close was through the SL, it was a genuine structural breach (false).
-  // Branch 2 (ratcheted_sl) and Branch 3 (tp_hit) always false — original SL was never hit.
+  // ── Durable label facts (batch 9) — computed once and stored on every reflection so that
+  // future threshold revisions are a SQL UPDATE, not a Bybit re-fetch.
+  // slDistancePct moved here (was duplicated in the SL-tightness block below).
+  const slDistancePct = plannedSL > 0 && input.entryPrice > 0
+    ? Math.abs(plannedSL - input.entryPrice) / input.entryPrice * 100 : 0;
+  // atrPct: 4h ATR as % of entry — null when atr not available (~8% of early rows).
+  const atrPct: number | null = (input.atr != null && input.atr > 0 && input.entryPrice > 0)
+    ? input.atr / input.entryPrice * 100 : null;
+  // sl_atr_ratio: how many 4h ATRs wide the SL is. < 1.0 = SL inside normal 4h bar range.
+  const slAtrRatioVal: number | null = (atrPct != null && slDistancePct > 0)
+    ? slDistancePct / atrPct : null;
+  // wick_recovery: SL-hit bar close recovered to the safe side (existing wick test, extracted).
+  const slHitCandle = (plannedSL > 0 && tradePeriodCandles.length > 0)
+    ? tradePeriodCandles.find(c => isLong ? c.low <= plannedSL : c.high >= plannedSL)
+    : undefined;
+  const wickRecoveryVal: boolean | null = (plannedSL > 0 && tradePeriodCandles.length > 0)
+    ? (slHitCandle != null
+        ? (isLong ? slHitCandle.close > plannedSL : slHitCandle.close < plannedSL)
+        : false)
+    : null;  // null = candles unavailable; wick gate treated as false
+
+  // slTooTight — code-owned, never delegated to LLM.
+  // PRIMARY gate: sl/4hATR < 1.0 (SL inside normal 4h volatility) AND maxFav ≥ 0.5%
+  //   (price went meaningfully favorable before SL hit → noise stop, not structural).
+  //   Uses stored trade_log.atr so no extra Bybit call. Null-safe: falls back to wick gate.
+  // SECONDARY gate: wick recovery (close recovered to safe side) AND maxFav ≥ 0.3%
+  //   The 0.3% maxFav guard prevents false positives on genuine wrong-direction trades
+  //   where price goes straight to SL but the hit-bar happens to close back below SL.
+  // Both gates require exitBranch=original_sl (Branches 2/3 can never be slTooTight).
   const computedSlTooTight: boolean = (() => {
     if (exitBranch !== "original_sl") return false;
-    if (plannedSL <= 0 || tradePeriodCandles.length === 0) {
-      console.log(`[reflection] slTooTight: candles unavailable for ${input.symbol}, defaulting false`);
+    if (plannedSL <= 0) {
+      console.log(`[reflection] slTooTight: no plannedSL for ${input.symbol}, defaulting false`);
       return false;
     }
-    const slHitCandle = tradePeriodCandles.find(c =>
-      isLong ? c.low <= plannedSL : c.high >= plannedSL
-    );
-    if (!slHitCandle) {
-      console.log(`[reflection] slTooTight: no SL-touch candle found for ${input.symbol} (SL=$${plannedSL}), defaulting false`);
-      return false;
-    }
-    // Wick stop: SL tagged but close recovered to the safe side
-    return isLong
-      ? slHitCandle.close > plannedSL   // long: wick below SL, close above = noise stop
-      : slHitCandle.close < plannedSL;  // short: wick above SL, close below = noise stop
+    const atrGate  = slAtrRatioVal != null && slAtrRatioVal < 1.0 && maxProfitPct >= 0.5;
+    const wickGate = wickRecoveryVal === true && maxProfitPct >= 0.3;
+    console.log(`[reflection] slTooTight: ${input.symbol} atrGate=${atrGate}`
+      + ` (slAtrRatio=${slAtrRatioVal?.toFixed(2) ?? "null"}, maxFav=${maxProfitPct.toFixed(2)}%)`
+      + ` wickGate=${wickGate} (wick=${wickRecoveryVal}) → ${atrGate || wickGate}`);
+    return atrGate || wickGate;
   })();
 
   // Entry regime — parse from trade's stored reasoning (bot_state.currentRegime is today's regime)
@@ -629,8 +649,7 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
   const maxAdverseMoveHoldPct = isLong
     ? (minPriceDuringHold > 0 && input.entryPrice > 0 ? (input.entryPrice - minPriceDuringHold) / input.entryPrice * 100 : 0)
     : (maxPriceDuringHold > 0 && input.entryPrice > 0 ? (maxPriceDuringHold - input.entryPrice) / input.entryPrice * 100 : 0);
-  const slDistancePct = plannedSL > 0 && input.entryPrice > 0
-    ? Math.abs(plannedSL - input.entryPrice) / input.entryPrice * 100 : 0;
+  // slDistancePct declared above (before computedSlTooTight) — not re-declared here.
 
   // 5. Hold duration
   const holdMs      = input.entryAt && input.exitAt
@@ -980,13 +999,15 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
     d.slTooTight = false;
   }
 
-  // directionCorrect is code-computed — never delegated to LLM (removed from template/required/fallback).
-  // True  → price moved in trade's favor at some point (ratcheted/tp_hit/review/profit_protection),
-  //         OR the SL was a noise wick (direction right, SL too tight — computedSlTooTight=true).
-  // False → price structurally broke the original SL without recovery (exitBranch=original_sl
-  //         AND computedSlTooTight=false). Only this case proves the direction call was wrong.
-  // Depends on Piece 1 (exitBranch, effectiveSl) and Piece 2 (tp1Executed) being correct.
-  d.directionCorrect = exitBranch !== "original_sl" || computedSlTooTight;
+  // directionCorrect is code-computed — never delegated to LLM.
+  // True  → non-SL exit (price moved in trade's favor at some point),
+  //         OR maxFavPct ≥ 0.5% (price went meaningfully favorable before SL hit).
+  //         A 0.5% favorable move with an original_sl exit = direction had partial validity.
+  // False → price NEVER went ≥0.5% in trade direction (exitBranch=original_sl AND maxFav < 0.5%).
+  //         This is the only case that proves the direction call was wrong.
+  // Using maxFavPct directly (already code-computed from klines) avoids dependency on
+  // computedSlTooTight, making direction_correct independently verifiable from stored max_profit_pct.
+  d.directionCorrect = exitBranch !== "original_sl" || maxProfitPct >= 0.5;
 
   // Hard override — a discretionary posMonitor PARTIAL_CLOSE between TP1 and final exit means
   // TP2 was not fairly tested. The bot's judgment ended the trade; TP2 distance is not the signal.
@@ -1193,6 +1214,9 @@ export async function generateReflection(input: ReflectionInput, _retryCount = 0
       : null,
     reconstructedOutcome: reconstruction?.outcome !== "ambiguous_excluded" ? reconstruction?.outcome ?? null : null,
     beToTp1GapPct:        beToTp1GapPct !== null ? String(beToTp1GapPct.toFixed(4)) : null,
+    // Durable label inputs (batch 9) — stored for future threshold revisions via SQL UPDATE.
+    slAtrRatio:    slAtrRatioVal  != null ? String(slAtrRatioVal.toFixed(4))  : null,
+    wickRecovery:  wickRecoveryVal != null ? wickRecoveryVal : null,
   });
 
   // Alert on execution failures (suppressed for backfill runs)
@@ -2875,6 +2899,7 @@ export async function backfillStructuredReflections(max = 20): Promise<void> {
       tp2:            trade.tp2,
       sourceTradeId:  trade.id,
       suppressAlerts: true,
+      atr:            trade.atr != null ? parseFloat(String(trade.atr)) : null,
     }).catch(e => console.error(`[backfill] ${trade.symbol} reflection failed:`, (e as Error).message));
 
     processed++;
@@ -3064,6 +3089,7 @@ export async function closeOpenTrade(params: {
     tp1:        openTrade.tp1,
     tp2:        openTrade.tp2,
     exitReasonOverride: params.exitReason,
+    atr:        openTrade.atr != null ? parseFloat(String(openTrade.atr)) : null,
   }).catch(e => console.error("[tradeMemory] reflection failed:", e));
 
   // Rule tracking — update only rules tagged at entry (appliedRuleIds)

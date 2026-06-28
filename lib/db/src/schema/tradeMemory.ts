@@ -85,6 +85,10 @@ export const tradeMemoryTable = pgTable("trade_memory", {
   // Gap between breakeven-trigger threshold and TP1 distance. Positive = TP1 set beyond BE trigger;
   // a wide gap means path-C trades exit with nothing even though price moved into profit.
   beToTp1GapPct:          decimal("be_to_tp1_gap_pct",  { precision: 10, scale: 4 }),
+  // Durable label inputs — batch 9 (ATR-anchored re-label fix).
+  // Stored as raw numeric facts so future threshold revisions are a SQL UPDATE, not a re-fetch.
+  slAtrRatio:    decimal("sl_atr_ratio",  { precision: 10, scale: 4 }), // slDistancePct / (atr_4h/entry*100)
+  wickRecovery:  boolean("wick_recovery"),                               // SL-hit bar close recovered to safe side
 });
 
 export type TradeMemory       = typeof tradeMemoryTable.$inferSelect;
