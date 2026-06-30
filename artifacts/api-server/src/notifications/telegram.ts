@@ -92,6 +92,67 @@ function displaySymbol(symbol: string): string {
   return symbol.replace(/[-/]?(USDT|USDC|USD)$/i, "");
 }
 
+/**
+ * Send a pre-built string[] to Telegram, chunking into ≤4000-char messages.
+ * Splits ONLY on empty-string boundary lines (never mid-block).
+ * Adds (1/N) pagination tags when multiple chunks are needed.
+ * maxChunks caps the number of messages sent; older chunks are dropped with a notice.
+ * Reusable for any command that builds variable-length output.
+ */
+async function chunkAndSend(
+  chatId: string,
+  lines: string[],
+  { maxChunks = 5, parseMode = "HTML" as "HTML" | "Markdown" } = {}
+): Promise<void> {
+  const bot = getBot();
+  const MAX = 4000;
+
+  // Group lines into indivisible blocks: each block ends at (and includes) an empty line,
+  // or at the end of the array. A trade in /history full ends with out.push("") — that
+  // empty line is the block boundary, so a trade is never split across messages.
+  const blocks: string[] = [];
+  let acc: string[] = [];
+  for (const line of lines) {
+    acc.push(line);
+    if (line === "") { blocks.push(acc.join("\n")); acc = []; }
+  }
+  if (acc.length > 0) blocks.push(acc.join("\n"));
+
+  // Pack blocks into chunks ≤ MAX chars.
+  const chunks: string[] = [];
+  let cur = "";
+  for (const block of blocks) {
+    const next = cur ? cur + "\n" + block : block;
+    if (cur && next.length > MAX) { chunks.push(cur); cur = block; }
+    else cur = next;
+  }
+  if (cur) chunks.push(cur);
+  if (!chunks.length) return;
+
+  // Max-chunk guard: keep the most-recent N chunks, drop oldest with a notice.
+  const total   = chunks.length;
+  const dropped = total > maxChunks ? total - maxChunks : 0;
+  const toSend  = dropped > 0 ? chunks.slice(dropped) : chunks;
+
+  for (let i = 0; i < toSend.length; i++) {
+    const isLast = i === toSend.length - 1;
+    let text = toSend[i]!;
+
+    // Inject pagination tag at end of first line of each chunk.
+    if (total > 1) {
+      const tag = `<i>(${i + 1 + dropped}/${total})</i>`;
+      const nl  = text.indexOf("\n");
+      text = nl >= 0 ? text.slice(0, nl) + " " + tag + text.slice(nl) : text + " " + tag;
+    }
+
+    if (dropped > 0 && i === 0) {
+      text += `\n<i>…${dropped} earlier section(s) omitted — 5-message cap reached</i>`;
+    }
+
+    await bot.sendMessage(chatId, text, { parse_mode: parseMode });
+    if (!isLast) await new Promise<void>(r => setTimeout(r, 300));
+  }
+}
 
 async function buildContext(): Promise<AssistantContext> {
   return getCachedContext(async () => {
@@ -1391,7 +1452,13 @@ export function startPolling(): void {
       }
 
       out.push(`<i>${utcNow()}</i>`);
-      await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
+      // Compact (/history) is always ≤10 trades — safe to send as one message.
+      // Full (/history full) can exceed 4096 chars — chunk on trade boundaries.
+      if (isFull) {
+        await chunkAndSend(chatId, out);
+      } else {
+        await b.sendMessage(chatId, out.join("\n"), { parse_mode: "HTML" });
+      }
     } catch (err: unknown) {
       const m = err instanceof Error ? err.message : String(err);
       await b.sendMessage(chatId, `❌ ${escapeHtml(m)}`).catch(() => {});
