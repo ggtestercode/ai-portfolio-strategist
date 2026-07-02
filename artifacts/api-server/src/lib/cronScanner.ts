@@ -291,6 +291,29 @@ function calcRMultipleSizing(
   return Math.max(minimumMargin, Math.min(marginSize, maximumMargin));
 }
 
+// Reversible sizing dial. MOMENTUM validated persistently negative (n=129, payoff 0.93,
+// zero winning weeks) with no entry-time marker separating winners from losers (scores don't
+// correlate), so position size is the only zero-selection-risk lever. Set to 1.0 to restore
+// full MOMENTUM sizing.
+const MOMENTUM_SIZE_MULT = 0.5;
+
+// Applies MOMENTUM_SIZE_MULT to MOMENTUM entries ONLY — all regimes, both directions.
+// REJECTION / LIQUIDITY_SWEEP / VOL_BREAKOUT sizing is untouched.
+// calcRMultipleSizing returns MARGIN (notional = margin × leverage). After halving, the margin
+// is floored so notional still clears Bybit's ~$5 USDT minimum order value: trades are floored
+// at the exchange minimum, never skipped. Empirically (25d) MOMENTUM runs 8–20× leverage with
+// halved notional $20–50, so the floor never engages in practice — it guards the low-leverage edge.
+function applyMomentumSizeMult(amountUsd: number, setupType: string | undefined, leverage: number): number {
+  if (amountUsd <= 0 || setupType !== "MOMENTUM") return amountUsd;
+  const BYBIT_MIN_NOTIONAL = 5;                    // USDT, conservative floor across traded symbols
+  const lev    = leverage > 0 ? leverage : 10;
+  const scaled = amountUsd * MOMENTUM_SIZE_MULT;
+  const floor  = BYBIT_MIN_NOTIONAL / lev;         // margin needed to keep notional above exchange min
+  const final  = Math.max(scaled, floor);
+  console.log(`[sizing] MOMENTUM half-size applied: $${amountUsd.toFixed(2)} → $${final.toFixed(2)} margin (${lev}× → notional $${(final * lev).toFixed(1)})${final > scaled ? " [floored at exchange min]" : ""}`);
+  return final;
+}
+
 // ── Layer 2: Hard filters ─────────────────────────────────────────────────────
 interface FilterResult {
   passed:   ScanOpportunity[];
@@ -327,6 +350,15 @@ async function applyHardFilters(
     // VOL_BREAKOUT+CHOPPY is NOT gated here; it accumulates its own track record.
     if (opp.setupType === "MOMENTUM" && regime?.regime === "CHOPPY") {
       rejected.push({ symbol: opp.symbol, reason: `MOMENTUM+CHOPPY gate: BTC non-directional, altcoin momentum fails (23% win, avg −1.50%, n=13)` });
+      continue;
+    }
+
+    // Hard gate: LIQUIDITY_SWEEP LONG in CHOPPY BTC regime — n=7, 28.6% win, −$7.20 (validated).
+    // Sweep-reversal longs need directional follow-through; in directionless BTC they fail to sustain.
+    // Scope: LIQSWEEP + long + CHOPPY only. LIQSWEEP shorts and LIQSWEEP longs in other regimes are
+    // NOT gated (STRONG_TREND/long is the winning LIQSWEEP bucket). Reversible: remove this clause.
+    if (opp.setupType === "LIQUIDITY_SWEEP" && opp.direction === "long" && regime?.regime === "CHOPPY") {
+      rejected.push({ symbol: opp.symbol, reason: `LIQSWEEP CHOPPY long block: 2W/5L −$7.20 historical` });
       continue;
     }
 
@@ -1520,6 +1552,17 @@ async function runWatchScan(): Promise<void> {
         continue;
       }
 
+      // Hard gate — LIQSWEEP CHOPPY long block (mirrors applyHardFilters; watchScan bypasses that path)
+      if (signal.setupType === "LIQUIDITY_SWEEP" && signal.direction === "long" && regime?.regime === "CHOPPY") {
+        console.log(`[gate] REJECTED ${sym} (watchScan) — LIQSWEEP CHOPPY long block: 2W/5L −$7.20 historical`);
+        await alertFn?.([
+          `🚫 Entry blocked — ${sym}`,
+          `LIQSWEEP CHOPPY long block: sweep-reversal longs fail in directionless BTC (2W/5L, −$7.20).`,
+        ].join("\n")).catch(() => {});
+        await removeFromWatchList(signal.symbol);
+        continue;
+      }
+
       // Hard gate — MOMENTUM+TRENDING_UP counter-candle (mirrors applyHardFilters; watchScan bypasses that path)
       if (signal.setupType === "MOMENTUM" && regime?.regime === "TRENDING_UP") {
         try {
@@ -1602,7 +1645,7 @@ async function runWatchScan(): Promise<void> {
         }
       }
 
-      const amountUsd = calcRMultipleSizing(
+      let amountUsd = calcRMultipleSizing(
         bybitBalance,
         signal.entry ?? signal.price,
         signal.stopLoss ?? 0,
@@ -1612,6 +1655,7 @@ async function runWatchScan(): Promise<void> {
         signal.timing ?? "EARLY",
         signal.setupQuality ?? "MEDIUM",
       );
+      amountUsd = applyMomentumSizeMult(amountUsd, signal.setupType, signal.leverage ?? 10);
       if (amountUsd > 0) {
         const proposal = buildProposal({
           symbol:          sym,
@@ -2059,7 +2103,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       }
 
       // Layer 4+5: R-multiple sizing
-      const amountUsd = calcRMultipleSizing(
+      let amountUsd = calcRMultipleSizing(
         bybitBalance,
         opp.entry     ?? opp.price,
         opp.stopLoss  ?? 0,
@@ -2070,6 +2114,7 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
         opp.setupQuality       ?? "MEDIUM",
       );
       if (amountUsd <= 0) continue; // skip MAJOR_SKIP or zero-size
+      amountUsd = applyMomentumSizeMult(amountUsd, opp.setupType, opp.leverage ?? 10);
 
       const proposal = buildProposal({
         symbol:          sym,
