@@ -2488,7 +2488,20 @@ async function runCronScan(triggered: "cron" | "manual" = "cron"): Promise<void>
       console.log("[mode3Paper] Disabled via MODE3_PAPER_ENABLED=false");
     }
   } catch (err) {
+    // A THROWN scan failure (API credit exhaustion, network error, Anthropic outage) lands here —
+    // distinct from result.scanFailed (parse/truncation, alerted above). Previously console-only,
+    // so a credit-dead bot failed silently every 4h. Alert on every failure (no dedup — a 4-hourly
+    // "bot is down" reminder is useful). Billing errors get an actionable top-up message.
+    const msg = err instanceof Error ? err.message : String(err);
     console.error("[cronScanner] Scan failed:", err);
+    const isBilling = /credit balance is too low|insufficient|quota|billing/i.test(msg);
+    await alertFn?.([
+      `❌ <b>AUTOSCAN DID NOT COMPLETE</b> — ${new Date().toUTCString()}`,
+      isBilling
+        ? `Anthropic API credits exhausted — top up at console.anthropic.com → Plans & Billing.`
+        : `Scan threw before finishing: ${msg.slice(0, 200)}`,
+      `No signals evaluated this cycle. Next scan in ~4h.`,
+    ].join("\n")).catch(() => {});
   } finally {
     isScanning = false;
   }
