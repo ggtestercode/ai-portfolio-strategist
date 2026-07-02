@@ -468,6 +468,23 @@ function classifySymbolRegime(klines: BybitKline[]): { regime: RegimeType; adx: 
   return { regime, adx, diPlus, diMinus, atr };
 }
 
+// Fix 2: counter-trend directional FACT appended to the per-symbol regime line.
+// Derived PURELY from the regime enum — never re-thresholded from raw ADX/DI — so it can never
+// contradict the regime string it sits beside (the string IS this enum). Per-symbol STRONG_TREND is
+// bullish-only by construction (classifySymbolRegime), so ↑ is unambiguous. Silent in RANGING/CHOPPY
+// (and any non-directional regime) — the dead zone. States the fact; never says "avoid" — Claude decides.
+function regimeArrow(regime: RegimeType): string {
+  switch (regime) {
+    case "STRONG_TREND":
+    case "TRENDING_UP":
+      return " [↑ uptrend — longs WITH trend, shorts COUNTER-TREND]";
+    case "TRENDING_DOWN":
+      return " [↓ downtrend — shorts WITH trend, longs COUNTER-TREND]";
+    default:
+      return "";  // RANGING / CHOPPY / EXHAUSTION / VOLATILE — no clear trend, stay silent
+  }
+}
+
 // TP backstop caps by regime — synced with DB trading_rules after empirical validation.
 // CHOPPY/EXHAUSTION: cap-driven (structural levels too far; mean-reverting moves peak at 0.9–1.7%).
 // RANGING: 4h range boundary is the right anchor (naturally lands at 3.0–3.5%; 100% fill rate).
@@ -828,8 +845,8 @@ CRITICAL — do NOT tighten the SL into noise to pass the gate: The SL must sit 
         ? ` | 4h_spike: range=${bf.rangeAtr.toFixed(1)}×ATR close=${bf.closePos.toFixed(2)} vol=${bf.volRatio.toFixed(1)}×avg run20=${bf.run20 >= 0 ? "+" : ""}${bf.run20.toFixed(0)}%${bf.suspected ? " ⚠️BLOWOFF_SUSPECTED" : ""}`
         : "";
       return btcIsDirectional
-        ? [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)}${bfStr}`]
-        : [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)} → ${tpCapShort(r.regime)}${bfStr}`];
+        ? [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)}${regimeArrow(r.regime)}${bfStr}`]
+        : [`  ${sym}: ${r.regime} ADX=${r.adx.toFixed(0)} DI+=${r.diPlus.toFixed(0)} DI-=${r.diMinus.toFixed(0)}${regimeArrow(r.regime)} → ${tpCapShort(r.regime)}${bfStr}`];
     });
     if (lines.length === 0) return "";
     return btcIsDirectional

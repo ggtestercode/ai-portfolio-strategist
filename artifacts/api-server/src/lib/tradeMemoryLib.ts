@@ -2919,34 +2919,91 @@ export async function getRecentTrades(limit = 10): Promise<typeof tradeLogTable.
     .limit(limit);
 }
 
+// setupRecord block — the bot's OWN realized base rates, injected so a fresh-instance scanner
+// sees its track record before scoring (validated: assigned scores do NOT correlate with outcomes).
+// Design decisions (see design review):
+//  - Metric = expectancy per trade in PNL_PCT (= avg pnl_pct; size-invariant, so half-sizing MOMENTUM
+//    going forward never corrupts it — dollar pnl would). WR and n shown alongside.
+//  - Regime axis = MACRO BTC regime, parsed from the reasoning field (the axis the gates and the
+//    validated buckets use). No sym_regime column, no migration — pure read of the closed-trade record.
+//  - Tiered granularity: setup×direction always (decent n); regime split ONLY where that sub-bucket
+//    has n≥15; any bucket with n<5 is omitted (a point estimate a fresh instance can't calibrate is
+//    worse than silence).
+//  - Leads with the money-losing buckets — that is what changes behavior, not an exhaustive matrix.
+//  - Reads ONLY realized pnl_pct outcomes (ground truth the injection cannot influence), so base
+//    rates do not drift from the injection itself.
 export async function getPerformanceSummary(): Promise<string> {
   try {
     const rows = await db.select({
       setupType: tradeLogTable.setupType,
+      direction: tradeLogTable.direction,
       pnlPct:    tradeLogTable.pnlPct,
+      reasoning: tradeLogTable.reasoning,
     })
     .from(tradeLogTable)
-    .where(isNotNull(tradeLogTable.exitAt))
+    .where(and(isNotNull(tradeLogTable.exitAt), isNotNull(tradeLogTable.pnlPct)))
     .orderBy(desc(tradeLogTable.exitAt))
-    .limit(200);
+    .limit(500);
 
     if (!rows.length) return "";
 
-    const bySetup: Record<string, { wins: number; total: number }> = {};
+    type Bucket = { n: number; wins: number; sumPct: number };
+    const mk  = (): Bucket => ({ n: 0, wins: 0, sumPct: 0 });
+    const sd  = new Map<string, Bucket>();   // setup×direction
+    const sdr = new Map<string, Bucket>();   // setup×direction×(macro BTC regime)
+
     for (const r of rows) {
-      const setup = r.setupType ?? "UNKNOWN";
-      if (!bySetup[setup]) bySetup[setup] = { wins: 0, total: 0 };
-      bySetup[setup]!.total++;
-      if (parseFloat(r.pnlPct ?? "0") > 0) bySetup[setup]!.wins++;
+      const pct = parseFloat(r.pnlPct ?? "");
+      if (!Number.isFinite(pct)) continue;
+      const setup = (r.setupType ?? "UNTAGGED").toUpperCase();
+      const dir   = (r.direction ?? "?").toLowerCase();
+      const regime = /regime=([A-Z_]+)/.exec(r.reasoning ?? "")?.[1];
+
+      const sdKey = `${setup} ${dir}`;
+      const a = sd.get(sdKey) ?? mk();
+      a.n++; a.sumPct += pct; if (pct > 0) a.wins++;
+      sd.set(sdKey, a);
+
+      if (regime) {
+        const rKey = `${sdKey} ${regime}`;
+        const b = sdr.get(rKey) ?? mk();
+        b.n++; b.sumPct += pct; if (pct > 0) b.wins++;
+        sdr.set(rKey, b);
+      }
     }
 
-    const lines = ["Your trading performance so far:"];
-    lines.push("\nBy setup type:");
-    for (const [setup, stats] of Object.entries(bySetup)) {
-      const wr = stats.total > 0 ? Math.round(stats.wins / stats.total * 100) : 0;
-      lines.push(`  ${setup}: ${stats.total} trades, ${wr}% win rate`);
+    const exp    = (b: Bucket) => b.sumPct / b.n;               // expectancy = avg %/trade
+    const wr     = (b: Bucket) => Math.round((b.wins / b.n) * 100);
+    const fmtPct = (v: number) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)}%`;
+
+    const sdEntries = [...sd.entries()].filter(([, b]) => b.n >= 5);   // omit n<5
+    if (!sdEntries.length) return "";
+
+    const losers  = sdEntries.filter(([, b]) => exp(b) <  0).sort((x, y) => exp(x[1]) - exp(y[1]));
+    const winners = sdEntries.filter(([, b]) => exp(b) >= 0).sort((x, y) => exp(y[1]) - exp(x[1]));
+
+    // regime sub-lines for a setup×direction — only where the sub-bucket has n≥15
+    const regimeSub = (sdKey: string): string[] =>
+      [...sdr.entries()]
+        .filter(([k, b]) => k.startsWith(`${sdKey} `) && b.n >= 15)
+        .sort((x, y) => exp(x[1]) - exp(y[1]))
+        .map(([k, b]) => `    └ ${k.slice(sdKey.length + 1)}: ${fmtPct(exp(b))}/trade, ${wr(b)}% WR, n=${b.n}`);
+
+    const renderLine = ([k, b]: [string, Bucket]): string[] =>
+      [`  ${k}: ${fmtPct(exp(b))}/trade, ${wr(b)}% WR, n=${b.n}`, ...regimeSub(k)];
+
+    const lines: string[] = [
+      `Your realized track record (macro BTC regime; expectancy = avg %/trade on your own closed trades):`,
+    ];
+    if (losers.length) {
+      lines.push(`Setups that have LOST you money (worst first — weight these before scoring):`);
+      for (const e of losers) lines.push(...renderLine(e));
     }
-    lines.push("\nUse this to refine your entry decisions.");
+    if (winners.length) {
+      lines.push(`Setups in the black:`);
+      for (const e of winners) lines.push(...renderLine(e));
+    }
+    lines.push(`Your assigned score has NOT correlated with outcome — weight the base rate, not conviction.`);
     return lines.join("\n");
   } catch {
     return "";
